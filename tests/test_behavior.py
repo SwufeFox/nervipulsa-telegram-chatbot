@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from app import fixtures
-from app.agent import ScriptedAgent
+from app.agent import AgentResult, ScriptedAgent
 from app.bot import GroupAgent
 from app.conversation import build_prompt, parse_reply
 from app.policy import (
@@ -104,7 +104,58 @@ def test_silence_is_never_an_empty_message(store, config, transport, clock,
     run(body())
 
 
-# -- Requirement 1: mention and reply take priority ------------------------
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["Alma starts typing...", "Alma is typing…", "typing...", "Thinking…"],
+)
+def test_ui_status_placeholder_is_not_sent_as_a_chat_reply(placeholder: str) -> None:
+    assert parse_reply(placeholder, bot_name="Alma") is None
+
+
+def test_provider_activation_failure_is_not_counted_as_empty_silence(
+    store, config, transport, clock, system_prompt
+) -> None:
+    class FailedAgent:
+        async def start(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+        async def ask(self, *, chat_id: int, prompt: str, tag: str) -> AgentResult:
+            return AgentResult(
+                activation_id="activation-failed",
+                text=None,
+                status="error",
+                detail={"error_kind": "response_invalid"},
+            )
+
+    agent = FailedAgent()
+    bot = GroupAgent(
+        config=config, store=store, client=TelegramClient(transport),
+        system_prompt=system_prompt, agent_factory=lambda spec: agent,
+        turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
+        bot_user_id=fixtures.ALMA, clock=clock,
+    )
+
+    async def body() -> None:
+        await bot.start()
+        await bot.step([fixtures.mention()])
+        clock.advance(3.0)
+        tick, decisions = await bot.step([])
+        assert tick.errors == 1
+        assert len(decisions) == 1 and decisions[0].is_reply
+        rows = store._query("SELECT outcome, reason FROM decisions ORDER BY created_at")
+        assert any(r["reason"] == "model_activation_failed" for r in rows)
+        assert not any(r["reason"] == "model_returned_nothing" for r in rows)
+        assert transport.sends == []
+        await bot.stop()
+
+    run(body())
+
+
 
 
 def test_mention_gets_a_reply(store, config, transport, clock, system_prompt) -> None:

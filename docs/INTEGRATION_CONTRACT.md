@@ -23,8 +23,8 @@ Two Core dependencies, both consumed by this application:
 The application pins a **commit**, never `main`. Before upgrading Core:
 
 1. apply the new commit in the Core working tree;
-2. run `python -m pytest -q` in Core (currently 167 passed);
-3. run `python -m pytest -q` here (currently 108 passed);
+2. run `python -m pytest -q` in Core (currently 175 passed);
+3. run `python -m pytest -q` here (currently 131 passed);
 4. run `python experiments/milestone_a.py` and `milestone_c.py` and compare the
    recorded observations in `EXPERIMENTS.md`;
 5. update the commit id above and the compatibility table below.
@@ -38,21 +38,81 @@ the shared contract updated **before** either side is merged.
 | --- | --- | --- | --- |
 | 0.1.0 | `9a734c4` | 167 passed / 143.96s | first working integration |
 | 0.1.0 | `6a300ce` | 174 passed / 144.40s | + `python_host=False`; 10 topics → 0 workers |
+| working tree | based on `6a300ce` | Core 175 passed; app 131 passed | optional output-token cap; not yet pinned |
+
+The current application code uses the local Core extension `Settings.max_output_tokens` and `ModelRequest.max_output_tokens`. `pyproject.toml` still pins `6a300ce`, which does not include that extension. The evaluation and tests in this workspace imported the sibling Core checkout. Before a clean install or release, commit/publish the Core change and update the application pin to that exact revision.
 
 ## Depends on (public, stable)
+
+### `python-telegram-bot` `22.8` (pinned, not the runtime)
+
+The production Telegram transport is PTB's async `Bot`
+(`app/telegram.py::PythonTelegramBotTransport`). Pinned exactly, for two reasons:
+PTB's async surface moves between minor versions, and this class is written
+against the argument names of exactly these four calls.
+
+| Our call | PTB call |
+| --- | --- |
+| `getUpdates` | `Bot.get_updates(...)` → `Update.to_dict()` |
+| `sendMessage` | `Bot.send_message(...)` + `ReplyParameters` |
+| `getMe` | `Bot.get_me()` |
+| `deleteMessage` | `Bot.delete_message(...)` |
+
+What we deliberately do **not** take from PTB:
+
+- **Not `Application` / `Updater`.** Their polling queue acknowledges updates
+  before our durable write commits. `bot.poll_once` still owns the loop and the
+  persisted offset, so PTB is only the HTTP layer.
+- **Not `telegram.ext`.** No handler registration, no persistence layer; the
+  application's SQLite store is the source of truth.
+- **Token in errors.** PTB messages can quote the Bot API URL, which contains the
+  token. `_short()` scrubs `/bot<id>:<secret>` before any string reaches a log or
+  the `sends` table.
+
+Error mapping is part of the contract, because it decides whether a message is
+ever retried:
+
+| PTB exception | `TransportError.kind` | Send outcome |
+| --- | --- | --- |
+| `BadRequest` (also `Forbidden`, `RetryAfter`) | `rejected` | `failed` |
+| `TimedOut`, other `NetworkError` | `indeterminate` | `unknown` |
+
+`BadRequest` subclasses `NetworkError` in PTB, so the rejection branch must be
+tested first — the reverse order silently converts a fixable refusal into a
+never-retried `unknown`.
 
 ### `nervipulsa.config.Settings`
 
 Fields used: `provider`, `base_url`, `model`, `api_key`, `workspace`,
-`context_limit`, `max_timeout`, `default_timeout`, `adapter`.
+`context_limit`, `max_output_tokens`, `max_timeout`, `default_timeout`, `adapter`.
 Constructed directly rather than via `load_settings` so the application owns its own
 configuration file and never picks up the user's CLI config by accident.
+
+`context_limit` and `max_output_tokens` both default to `1_000_000` (effectively
+unlimited), and `max_timeout` follows `request_timeout` (default 900s). The reply
+budget is not decoration: with the earlier 4096 cap, a model that spends ~98% of
+its output on reasoning could exhaust the budget and return no content at all —
+measured at 2 of 10 replies (`docs/LONG_CONVERSATION.md`).
+
+### The agent profile is two files
+
+`Runtime(..., system_prompt=)` receives a string the application composes at
+startup from `app/prompts/soul.md` (identity, hard limits, untrusted input) and
+`app/prompts/introduction.md` (participation rules, tone), in that order. Core sees
+one system prompt; the split is entirely application-side.
+
+Two consequences the contract has to state:
+
+- A missing or empty half raises before the runtime is constructed. There is no
+  fallback identity, by design.
+- `BOT_SYSTEM_PROMPT_PATH` (legacy) bypasses the split and uses one file verbatim.
 
 ### `nervipulsa.providers.OpenAICompatibleBackend`
 
 Constructor: `(provider=, base_url=, api_key=, model=, timeout=, adapter=)`.
-The application never talks HTTP itself; all provider communication goes through
-this adapter.
+When `ModelRequest.max_output_tokens` is set, this adapter sends it as OpenAI-compatible
+`max_tokens`; `None` preserves the prior payload. The application never talks HTTP
+itself; all provider communication goes through this adapter.
 
 ### `nervipulsa.providers.ScriptedBackend`
 
@@ -62,7 +122,8 @@ assertions; nothing in production code reads them.
 
 ### `nervipulsa.ports`
 
-`ModelRequest` (`messages`, `tools`, `activation_id`, `model`, `purpose`),
+`ModelRequest` (`messages`, `tools`, `activation_id`, `model`, `purpose`, optional
+`max_output_tokens`),
 `ModelResponse` (`content`, `tool_calls`, `usage`, `model`), `ToolCall`,
 `ProviderFailure(kind, message)`, and the `ToolCatalog` shape
 (`schemas(*, workspace)`, `get(name)`).
@@ -155,6 +216,10 @@ Stated plainly so nobody infers them:
 - **Not production reliability.** A real provider has been exercised (magpie,
   `EXPERIMENTS.md` E7b/E7d); the real Telegram API has not. See `EXPERIMENTS.md`
   E8 for exactly what was and was not executed.
+- **Not a verified PTB upgrade path.** `python-telegram-bot` is pinned to `22.8`
+  and the transport is unit-tested against a stub `Bot`, not against Telegram.
+  A version bump is a code change until `test_ptb_transport.py` and a real
+  `getUpdates` round trip both pass.
 - **Not multi-tenant.** One process, one authorized chat set, no sharding. Two
   processes on the same SQLite file would both poll; nothing prevents it yet.
 

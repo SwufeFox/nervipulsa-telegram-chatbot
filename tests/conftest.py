@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import fixtures  # noqa: E402
-from app.config import AppConfig  # noqa: E402
+from app.config import AppConfig, load_default_profile  # noqa: E402
 from app.store import Store  # noqa: E402
 
 
@@ -101,7 +101,7 @@ def config(tmp_path: Path) -> AppConfig:
 
 @pytest.fixture
 def system_prompt() -> str:
-    return (ROOT / "app" / "prompts" / "group_agent.md").read_text(encoding="utf-8")
+    return load_default_profile()
 
 
 def run(coro):

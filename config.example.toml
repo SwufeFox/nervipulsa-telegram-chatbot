@@ -1,0 +1,91 @@
+# A clean, committable configuration for the group agent.
+#
+# What may live here: everything except secrets. `TELEGRAM_BOT_TOKEN` and the
+# model API key come from the environment only — a token in a committed file is
+# a token in every backup, screenshot and `git add -A`.
+#
+# Load it with:
+#     python -m app.main --config config.toml --check
+#     python -m app.main --config config.toml
+#
+# Every key below can also be overridden by an environment variable; the
+# variable name is noted next to the ones that matter. Environment always wins.
+# Sections are for readability only: `telegram.poll_timeout` is the same setting
+# as a top-level `poll_timeout`.
+
+[bot]
+# Shown as the sender label in the local log and in model-facing history.
+name = "Alma"
+# Without the leading @. Used to detect a mention when the text does not arrive
+# with an explicit `mention` entity. Usually learned from `getMe` at startup.
+username = "alma_bot"
+
+[telegram]
+# Only these chats are ever stored, answered, or recorded. An empty list makes
+# the bot refuse to start live: better than accidentally running open.
+allowed_chat_ids = [-1001234567890]
+# Who may use /pause /resume /proactive /stats /purge. Never echoed in chat.
+admin_user_ids = [123456789]
+# Seconds Telegram holds a long-poll request open. 0 means "return immediately".
+poll_timeout = 25
+# Keep the pipeline but never call the send API. Env: BOT_DRY_RUN
+dry_run = false
+
+[behaviour]
+# How long the bot waits for more messages before closing a turn. Long enough
+# that a two-line question is one turn, short enough not to feel frozen.
+debounce_seconds = 3.5
+# A burst larger than this closes the turn early and starts a new one.
+max_turn_messages = 12
+# Messages of history handed to the model. This is the main cost driver.
+history_messages = 24
+
+[proactive]
+# Off by default. Speaking unasked needs evidence, not optimism.
+enabled = false
+# Floor between two unprompted messages, and the ceiling per hour.
+min_interval_seconds = 240
+max_per_hour = 4
+# Score a turn must reach before the bot speaks without being addressed.
+min_confidence = 0.62
+
+[model]
+# `magpie` is the local OpenAI-compatible endpoint used in development.
+provider = "magpie"
+base_url = "http://127.0.0.1:3425/v1"
+model = "opencode-go/muse-spark-1.3-contributor"
+# Both budgets are "effectively unlimited": 1M tokens each.
+#
+# The previous 40000 / 4096 pair was the binding constraint, not the model.
+# Muse Spark spends ~98% of its output on reasoning tokens, so a 4096 cap meant
+# a hard question could burn the whole budget thinking and return nothing at
+# all — measured at 2 of 10 replies in docs/LONG_CONVERSATION.md.
+#
+# "Unlimited" means "high enough never to bind", not literal infinity: the
+# provider enforces its own limits and will reject a request that is too large.
+context_limit = 1000000
+# Sent as `max_tokens`.
+max_output_tokens = 1000000
+# An unlimited reply can legitimately take minutes. Keep this above the longest
+# reply you are willing to wait for, or a good request gets cut off mid-thought.
+request_timeout = 900.0
+
+[runtime]
+# One runtime directory per (chat, topic) is created under here.
+workspace = "state"
+# Defaults to <workspace>/bot.sqlite3 when empty.
+db_path = ""
+
+[profile]
+# Who the bot is: identity, the rules it cannot break, how it treats untrusted
+# input. Edit this to change what the bot *is* — but keep the impersonation ban
+# and the untrusted-input section, or the bot may start claiming to be a person.
+soul_path = "app/prompts/soul.md"
+# How it takes part: when to speak, when to stay quiet, length, tone. Edit this
+# to change how the bot *behaves*. It cannot weaken the soul file.
+introduction_path = "app/prompts/introduction.md"
+# A missing or empty file is a startup error, never a silent fallback: running
+# with an identity nobody reviewed is the failure this split exists to prevent.
+
+[logging]
+level = "INFO"

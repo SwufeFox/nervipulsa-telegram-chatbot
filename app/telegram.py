@@ -1,4 +1,4 @@
-"""Telegram long polling and send. No framework, no event loop magic.
+"""Telegram long polling and send, on top of python-telegram-bot.
 
 Two things this module is careful about:
 
@@ -7,22 +7,45 @@ rather than an exception, because a bot that dies on a service message is a bot
 that loses its poll cursor.
 
 **Send outcomes are three-valued.** A send either succeeded (we hold a message
-id), was definitively rejected by Telegram (HTTP 4xx with a parseable error), or
-is *unknown* (timeout, connection reset, 5xx, a process that died mid-request).
-Collapsing unknown into failure is how a bot posts the same message twice.
+id), was definitively rejected by Telegram (4xx / a PTB `TelegramError` that is
+not a transport fault), or is *unknown* (timeout, connection reset, 5xx, a
+process that died mid-request). Collapsing unknown into failure is how a bot
+posts the same message twice.
 
-The transport is injectable so failure experiments can substitute one.
+**Why the transport is still injectable.** `python-telegram-bot` owns the HTTP
+session in production, but the application's durability tests need to script
+failures. So `TelegramClient` accepts either an async transport (PTB) or the
+older synchronous `call(method, payload)` fake, and runs the latter in a worker
+thread. `getUpdates` is deliberately still driven by our own loop: the durable
+inbox and the persisted offset have to be committed before the cursor moves,
+which is exactly what an `Updater`/`Application` polling queue would do for us
+too early.
 """
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+import asyncio
+import inspect
+import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Awaitable, Mapping, Protocol
 
-API_ROOT = "https://api.telegram.org"
+from telegram import Bot, ReplyParameters
+from telegram.error import (
+    BadRequest,
+    NetworkError as TelegramNetworkError,
+    TelegramError,
+    TimedOut as TelegramTimedOut,
+)
+
+# Bot tokens appear inside Bot API URLs as `/bot<id>:<secret>/`, and PTB also
+# quotes the raw token in a few messages ("The token `123:abc` was rejected").
+# Both shapes are scrubbed here, matched by shape rather than by known value so
+# this works for any token. This runs before any string reaches a log or the
+# `sends` table, because a rejected token is exactly the case where a startup
+# error gets pasted into an issue.
+_TOKEN_IN_URL = re.compile(r"/bot\d+:[A-Za-z0-9_-]+")
+_BARE_TOKEN = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 
 
 class SendStatus(StrEnum):
@@ -58,48 +81,23 @@ class InboundMessage:
     raw: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class InboundReaction:
+    """A reaction change without actor identity or raw Telegram payload."""
+
+    update_id: int
+    chat_id: int
+    message_id: int
+    old_vote: str | None
+    new_vote: str | None
+
+
 class Transport(Protocol):
-    def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]: ...
+    """Either PTB's async transport, or a synchronous `call` fake."""
 
-
-class TelegramTransport:
-    """urllib, one request per call. Raises `TransportError` with a classification."""
-
-    def __init__(self, token: str, *, timeout: float = 30.0) -> None:
-        if not token:
-            raise ValueError("telegram token is required")
-        self._token = token
-        self._timeout = timeout
-
-    def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
-        url = f"{API_ROOT}/bot{self._token}/{method}"
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                body = response.read()
-        except urllib.error.HTTPError as exc:
-            detail = _read_error(exc)
-            raise TransportError(
-                kind="rejected", status=exc.code, detail=detail
-            ) from exc
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-            # The request may or may not have reached Telegram.
-            raise TransportError(kind="indeterminate", detail=str(exc)[:300]) from exc
-        try:
-            parsed = json.loads(body)
-        except (json.JSONDecodeError, UnicodeError) as exc:
-            raise TransportError(kind="indeterminate", detail="unparseable response") from exc
-        if not isinstance(parsed, dict) or not parsed.get("ok"):
-            description = ""
-            if isinstance(parsed, dict):
-                description = str(parsed.get("description") or "")
-            raise TransportError(kind="rejected", detail=description[:300])
-        return parsed
+    def call(
+        self, method: str, payload: dict[str, Any]
+    ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
 
 
 class TransportError(Exception):
@@ -110,43 +108,177 @@ class TransportError(Exception):
         self.status = status
 
 
-def _read_error(exc: urllib.error.HTTPError) -> str:
-    try:
-        body = exc.read().decode("utf-8", errors="replace")
-        parsed = json.loads(body)
-        if isinstance(parsed, dict):
-            return str(parsed.get("description") or body)[:300]
-        return body[:300]
-    except Exception:
-        return f"HTTP {exc.code}"
+def _short(exc: BaseException) -> str:
+    """A message that is safe to log: never carries the token.
+
+    Some transport errors quote the request URL, and the URL contains the bot
+    token. That string ends up in logs and in the send record, so it is
+    scrubbed here rather than trusted to be absent.
+    """
+    text = str(exc).strip() or exc.__class__.__name__
+    text = _TOKEN_IN_URL.sub("/bot<redacted>", text)
+    text = _BARE_TOKEN.sub("<redacted-token>", text)
+    return text[:300]
+
+
+class PythonTelegramBotTransport:
+    """The production transport: python-telegram-bot's async `Bot`.
+
+    PTB owns the HTTP session, timeouts and response typing. This class only
+    maps the four calls the application makes onto it, and maps PTB's exception
+    tree onto the `rejected` / `indeterminate` split the rest of the app relies
+    on. `initialize()`/`shutdown()` are exposed as `start()`/`close()` so the
+    session is opened and closed by the caller's lifecycle, not by import.
+    """
+
+    def __init__(self, bot: Bot) -> None:
+        self._bot = bot
+
+    async def start(self) -> None:
+        """Open the session.
+
+        PTB's `initialize()` calls `getMe` by itself, so a bad token fails here
+        rather than at the first poll. It is wrapped for the same reason as
+        every other call: `InvalidToken` quotes the raw token in its message,
+        and this string is printed to the console by `run_live`.
+        """
+        try:
+            await self._bot.initialize()
+        except TelegramError as exc:
+            unreachable = isinstance(
+                exc, (TelegramTimedOut, TelegramNetworkError)
+            ) and not isinstance(exc, BadRequest)
+            raise TransportError(
+                kind="indeterminate" if unreachable else "rejected",
+                detail=_short(exc),
+            ) from exc
+
+    async def close(self) -> None:
+        await self._bot.shutdown()
+
+    async def call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return await self._dispatch(method, payload)
+        except TransportError:
+            raise
+        except TelegramError as exc:
+            # `BadRequest` subclasses `NetworkError`, so the specific sentence
+            # ("Telegram answered and said no") has to be tested first. Getting
+            # this order wrong marks a real rejection as undelivered-unknown,
+            # which then never gets retried and hides a fixable error.
+            if isinstance(exc, BadRequest):
+                raise TransportError(kind="rejected", detail=_short(exc)) from exc
+            if isinstance(exc, (TelegramTimedOut, TelegramNetworkError)):
+                # The request may or may not have reached Telegram.
+                raise TransportError(kind="indeterminate", detail=_short(exc)) from exc
+            # Any other API error is a refusal carrying a description.
+            raise TransportError(kind="rejected", detail=_short(exc)) from exc
+
+    async def _dispatch(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if method == "getUpdates":
+            timeout = payload.get("timeout")
+            timeout = int(timeout) if isinstance(timeout, int) and timeout > 0 else 0
+            updates = await self._bot.get_updates(
+                offset=payload.get("offset"),
+                limit=payload.get("limit"),
+                timeout=timeout or None,
+                allowed_updates=payload.get("allowed_updates"),
+                # PTB insists the read timeout outlive the long-poll window.
+                read_timeout=float(timeout) + 10.0 if timeout else None,
+            )
+            return {"ok": True, "result": [update.to_dict() for update in updates]}
+
+        if method == "sendMessage":
+            reply_parameters = None
+            raw_reply = payload.get("reply_parameters")
+            if isinstance(raw_reply, Mapping) and isinstance(raw_reply.get("message_id"), int):
+                reply_parameters = ReplyParameters(
+                    message_id=raw_reply["message_id"],
+                    allow_sending_without_reply=bool(
+                        raw_reply.get("allow_sending_without_reply", False)
+                    ),
+                )
+            message = await self._bot.send_message(
+                chat_id=payload["chat_id"],
+                text=payload["text"],
+                message_thread_id=payload.get("message_thread_id"),
+                reply_parameters=reply_parameters,
+            )
+            return {"ok": True, "result": {"message_id": message.message_id}}
+
+        if method == "getMe":
+            user = await self._bot.get_me()
+            return {"ok": True, "result": user.to_dict()}
+
+        if method == "deleteMessage":
+            deleted = await self._bot.delete_message(
+                chat_id=payload["chat_id"], message_id=payload["message_id"]
+            )
+            return {"ok": True, "result": bool(deleted)}
+
+        # Nothing else is used by this application. Failing loudly beats a
+        # silently ignored call the caller believes succeeded.
+        raise TransportError(
+            kind="rejected", detail=f"unsupported Telegram method: {method}"
+        )
 
 
 class TelegramClient:
-    """Thin wrapper over the Bot API surface this application actually uses."""
+    """The Bot API surface this application actually uses, as coroutines.
 
-    def __init__(self, transport: Transport, *, dry_run: bool = False) -> None:
+    `transport` is either an async transport (PTB) or a synchronous
+    `call(method, payload)` fake, which is run in a worker thread.
+    """
+
+    def __init__(self, transport: Transport | PythonTelegramBotTransport, *,
+                 dry_run: bool = False) -> None:
         self._transport = transport
         self.dry_run = dry_run
+        self._is_async = inspect.iscoroutinefunction(getattr(transport, "call", None))
         self._dry_run_counter = 0
+
+    # -- lifecycle ---------------------------------------------------------
+
+    async def start(self) -> None:
+        """Open the transport's session, if it has one."""
+        hook = getattr(self._transport, "start", None)
+        if hook is not None:
+            result = hook()
+            if inspect.isawaitable(result):
+                await result
+
+    async def close(self) -> None:
+        """Close the transport's session, if it has one."""
+        hook = getattr(self._transport, "close", None)
+        if hook is not None:
+            result = hook()
+            if inspect.isawaitable(result):
+                await result
+
+    async def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._is_async:
+            return await self._transport.call(method, payload)
+        return await asyncio.to_thread(self._transport.call, method, payload)
 
     # -- inbound -----------------------------------------------------------
 
-    def get_updates(self, *, offset: int | None, timeout: int = 25,
-                    limit: int = 50) -> list[dict[str, Any]]:
+    async def get_updates(
+        self, *, offset: int | None, timeout: int = 25, limit: int = 50
+    ) -> list[dict[str, Any]]:
         payload: dict[str, Any] = {
             "timeout": timeout,
             "limit": limit,
-            "allowed_updates": ["message", "edited_message"],
+            "allowed_updates": ["message", "edited_message", "message_reaction"],
         }
         if offset is not None:
             payload["offset"] = offset
-        response = self._transport.call("getUpdates", payload)
+        response = await self._call("getUpdates", payload)
         result = response.get("result")
         return [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
 
     # -- outbound ----------------------------------------------------------
 
-    def send_message(
+    async def send_message(
         self,
         *,
         chat_id: int,
@@ -168,7 +300,7 @@ class TelegramClient:
         if topic_id is not None:
             payload["message_thread_id"] = topic_id
         try:
-            response = self._transport.call("sendMessage", payload)
+            response = await self._call("sendMessage", payload)
         except TransportError as exc:
             if exc.kind == "rejected":
                 return SendOutcome(SendStatus.FAILED, error=exc.detail)
@@ -180,12 +312,12 @@ class TelegramClient:
             return SendOutcome(SendStatus.SENT, telegram_message_id=message_id)
         return SendOutcome(SendStatus.UNKNOWN, error="no message_id in response")
 
-    def get_me(self) -> dict[str, Any]:
-        return self._transport.call("getMe", {}).get("result") or {}
+    async def get_me(self) -> dict[str, Any]:
+        return (await self._call("getMe", {})).get("result") or {}
 
-    def delete_message(self, *, chat_id: int, message_id: int) -> bool:
+    async def delete_message(self, *, chat_id: int, message_id: int) -> bool:
         try:
-            self._transport.call(
+            await self._call(
                 "deleteMessage", {"chat_id": chat_id, "message_id": message_id}
             )
             return True
@@ -272,3 +404,39 @@ def _display_name(user: Mapping[str, Any]) -> str:
     ]
     joined = " ".join(str(p) for p in parts if isinstance(p, str) and p.strip())
     return joined.strip()
+
+
+def parse_reaction_update(update: Mapping[str, Any]) -> InboundReaction | None:
+    """Parse 👍/👎 state changes only; never retain who reacted."""
+    update_id = update.get("update_id")
+    reaction = update.get("message_reaction")
+    if not isinstance(update_id, int) or not isinstance(reaction, Mapping):
+        return None
+    chat = reaction.get("chat")
+    chat_id = chat.get("id") if isinstance(chat, Mapping) else None
+    message_id = reaction.get("message_id")
+    if not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return None
+    return InboundReaction(
+        update_id=update_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        old_vote=_reaction_vote(reaction.get("old_reaction")),
+        new_vote=_reaction_vote(reaction.get("new_reaction")),
+    )
+
+
+def _reaction_vote(value: Any) -> str | None:
+    """Map a user's current reaction set to one explicit vote."""
+    if not isinstance(value, list):
+        return None
+    emojis = {
+        item.get("emoji")
+        for item in value
+        if isinstance(item, Mapping) and item.get("type") == "emoji"
+    }
+    positive = "👍" in emojis
+    negative = "👎" in emojis
+    if positive == negative:
+        return None
+    return "up" if positive else "down"

@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -111,6 +111,18 @@ CREATE TABLE IF NOT EXISTS sends (
     updated_at    REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sends_status ON sends (status);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    update_id     INTEGER PRIMARY KEY,
+    chat_id       INTEGER NOT NULL,
+    message_id    INTEGER NOT NULL,
+    decision_id   TEXT NOT NULL,
+    old_vote      TEXT CHECK (old_vote IN ('up', 'down') OR old_vote IS NULL),
+    new_vote      TEXT CHECK (new_vote IN ('up', 'down') OR new_vote IS NULL),
+    created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_events_decision
+    ON feedback_events (decision_id, created_at);
 """
 
 
@@ -157,7 +169,8 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+            "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
@@ -201,6 +214,81 @@ class Store:
                 (update_id, chat_id, message_id, _now(), json.dumps(payload, ensure_ascii=False)),
             )
             return cursor.rowcount == 1
+
+    def record_reaction_feedback(
+        self, *, update_id: int, chat_id: int, message_id: int,
+        old_vote: str | None, new_vote: str | None,
+    ) -> str:
+        """Atomically persist a reaction update and its vote delta.
+
+        Actor identity is deliberately discarded. The old/new state reported by
+        Telegram is enough to maintain aggregate counts, including vote changes.
+        """
+        allowed = {None, "up", "down"}
+        if old_vote not in allowed or new_vote not in allowed:
+            return "invalid"
+        with self._write() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (update_id, chat_id, message_id, _now(), json.dumps({
+                    "kind": "message_reaction",
+                    "old_vote": old_vote,
+                    "new_vote": new_vote,
+                })),
+            )
+            if cursor.rowcount != 1:
+                return "duplicate"
+            sent = conn.execute(
+                "SELECT decision_id FROM sends"
+                " WHERE chat_id = ? AND telegram_message_id = ? AND status = 'sent'",
+                (chat_id, message_id),
+            ).fetchone()
+            if sent is None:
+                return "unknown_target"
+            if old_vote == new_vote:
+                return "no_change"
+            conn.execute(
+                "INSERT INTO feedback_events"
+                " (update_id, chat_id, message_id, decision_id, old_vote, new_vote, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (update_id, chat_id, message_id, sent["decision_id"],
+                 old_vote, new_vote, _now()),
+            )
+            return "recorded"
+
+    def feedback_report(self, chat_id: int | None = None) -> dict[str, Any]:
+        """Read-only current vote totals and per-reply aggregates."""
+        where = " WHERE s.chat_id = ?" if chat_id is not None else ""
+        params = (chat_id,) if chat_id is not None else ()
+        rows = self._query(
+            "SELECT f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text,"
+            " SUM(CASE WHEN f.new_vote = 'up' THEN 1 ELSE 0 END)"
+            " - SUM(CASE WHEN f.old_vote = 'up' THEN 1 ELSE 0 END) AS up,"
+            " SUM(CASE WHEN f.new_vote = 'down' THEN 1 ELSE 0 END)"
+            " - SUM(CASE WHEN f.old_vote = 'down' THEN 1 ELSE 0 END) AS down,"
+            " MAX(f.created_at) AS latest_at"
+            " FROM feedback_events f JOIN sends s ON s.decision_id = f.decision_id"
+            + where
+            + " GROUP BY f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text"
+            " ORDER BY latest_at DESC",
+            params,
+        )
+        items = [{
+            "decision_id": str(row["decision_id"]),
+            "chat_id": int(row["chat_id"]),
+            "topic_id": row["topic_id"],
+            "message_id": row["telegram_message_id"],
+            "text": str(row["text"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "latest_at": float(row["latest_at"]),
+        } for row in rows]
+        return {
+            "up": sum(item["up"] for item in items),
+            "down": sum(item["down"] for item in items),
+            "items": items,
+        }
 
     def has_update(self, update_id: int) -> bool:
         return bool(self._query("SELECT 1 FROM updates WHERE update_id = ?", (update_id,)))
@@ -359,6 +447,22 @@ class Store:
                     json.dumps(detail, ensure_ascii=False), trigger, _now(),
                 ),
             )
+
+    def update_decision_detail(self, decision_id: str, detail: dict[str, Any]) -> bool:
+        """Replace a decision's detail with the post-activation version.
+
+        The policy decision is written before the model is called, so its detail
+        holds only the trigger. Token usage, latency and prompt size are known
+        afterwards. Without this the *successful* replies carry no cost data —
+        only the failed ones did, because those write a new row — which makes
+        throughput and cache-hit accounting impossible from the store.
+        """
+        with self._write() as conn:
+            cursor = conn.execute(
+                "UPDATE decisions SET detail_json = ? WHERE decision_id = ?",
+                (json.dumps(detail, ensure_ascii=False), decision_id),
+            )
+            return cursor.rowcount == 1
 
     def supersede(self, decision_id: str, superseded_by: str) -> bool:
         """Mark a decision dead. Returns True if it was still reply-pending.

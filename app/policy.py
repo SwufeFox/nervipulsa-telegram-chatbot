@@ -434,11 +434,37 @@ def _is_addressed_to_other_bot(context: TurnContext, message: StoredMessage) -> 
     return all(name.lower() != ours for name in other)
 
 
+# Words that turn "<name> ..." into talk *about* the bot rather than *to* it.
+# "先按 Alma 说的试试" mentions the bot and should not be answered; "@Alma 你说呢"
+# should be. An explicit @ is always an address, so this only gates the bare name.
+_THIRD_PERSON_AFTER = (
+    "说的", "说了", "说的一样", "说这个", "说那个",
+    "上次", "刚才", "之前", "那条", "那个", "那种",
+    "的回答", "的配置", "的方案", "的意见", "的建议",
+    "他", "她", "它",
+)
+
+
 def _mentions(text: str, bot_name: str) -> bool:
+    """Is the bot being addressed, not merely named?
+
+    The previous version answered any occurrence of the name, so a group member
+    narrating "先按 Alma 说的试试" got a bot reply about the deploy — the bot
+    interrupted a conversation that was about it, not with it. An explicit `@`
+    is unambiguous and always counts; a bare name only counts when nothing
+    follows that marks it as third person.
+    """
     if not bot_name:
         return False
     name = re.escape(bot_name.lstrip("@"))
-    return re.search(rf"(?<![A-Za-z0-9_])@?{name}(?![A-Za-z0-9_])", text, re.IGNORECASE) is not None
+    pattern = rf"(?<![A-Za-z0-9_])(@)?{name}(?![A-Za-z0-9_])(.{{0,16}})"
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        at_sign, following = match.group(1), match.group(2) or ""
+        if at_sign:
+            return True
+        if not any(word in following for word in _THIRD_PERSON_AFTER):
+            return True
+    return False
 
 
 def _interpret_verdict(verdict: Any) -> tuple[bool, dict[str, Any]]:

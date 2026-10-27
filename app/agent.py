@@ -195,6 +195,22 @@ class NervipulsaAgent:
 
             activation = await self._await_activation(runtime, before, input_event_id)
             if activation is None:
+                paused = runtime.actor.paused
+                if paused is not None:
+                    # Distinguishable from a timeout: the actor refused to run,
+                    # which is an operator problem, not a slow provider.
+                    return AgentResult(
+                        activation_id=paused.id,
+                        text=None,
+                        status="paused",
+                        detail={
+                            "tag": tag,
+                            "input_event_id": input_event_id,
+                            "error_kind": paused.error_kind,
+                            "error_message": paused.error_message,
+                            "not_this_activation": True,
+                        },
+                    )
                 return AgentResult(
                     activation_id="",
                     text=None,
@@ -247,9 +263,13 @@ class NervipulsaAgent:
                     return activation
             # A paused actor will never produce another activation without an
             # operator; stop waiting instead of burning the full timeout.
-            paused = runtime.actor.paused
-            if paused is not None:
-                return paused
+            #
+            # The paused activations is *not* returned as this call's result.
+            # It belongs to an earlier call that already failed, and handing it
+            # back would report a stale failure as if it were the answer to the
+            # prompt we just submitted — the caller cannot tell the difference.
+            if runtime.actor.paused is not None:
+                return None
         return None
 
     # -- statistics --------------------------------------------------------

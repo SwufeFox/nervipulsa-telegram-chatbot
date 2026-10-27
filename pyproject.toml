@@ -11,6 +11,10 @@ dependencies = [
     # Pinned to a verified Core commit, never a floating branch. See
     # docs/INTEGRATION_CONTRACT.md before changing this line.
     "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@6a300ce",
+    # The production Telegram transport. Pinned: PTB is pre-1.0-stable in the
+    # sense that its async surface moves between minors, and the transport here
+    # is written against the Bot methods of exactly this version.
+    "python-telegram-bot==22.8",
 ]
 
 [project.optional-dependencies]

@@ -22,12 +22,15 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
+
+from telegram import Bot
 
 from .agent import NervipulsaAgent, ScriptedAgent
 from .bot import GroupAgent
-from .config import AppConfig, load_config, load_system_prompt
+from .config import AppConfig, load_config, load_profile, load_system_prompt
 from .store import Store
-from .telegram import TelegramClient, TelegramTransport, TransportError
+from .telegram import PythonTelegramBotTransport, TelegramClient, TransportError
 from .turns import TurnManager
 
 
@@ -38,6 +41,8 @@ def setup_logging(level: str) -> None:
     )
     # Never let a library log the token or a full update payload.
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def build_settings(config: AppConfig):
@@ -50,6 +55,11 @@ def build_settings(config: AppConfig):
         api_key=config.model_api_key or "magpie",
         workspace=config.workspace,
         context_limit=config.context_limit,
+        max_output_tokens=config.max_output_tokens,
+        # The model HTTP timeout has to follow the reply budget: an unlimited
+        # reply can legitimately take minutes. `default_timeout` stays short
+        # because it bounds tool execution, and this application exposes no
+        # tools at all.
         max_timeout=config.request_timeout,
         default_timeout=min(30.0, config.request_timeout),
     )
@@ -81,23 +91,50 @@ def _offline_responder(prompt: str) -> str:
     return "I'd need to check that one"
 
 
+def profile_files(config: AppConfig) -> list[tuple[str, str]]:
+    """The identity files this config reads, as (label, path)."""
+    if config.system_prompt_path and not config.introduction_path:
+        return [("system prompt", config.system_prompt_path)]
+    return [
+        ("soul", config.soul_path),
+        ("introduction", config.introduction_path),
+    ]
+
+
+def describe_profile(config: AppConfig) -> str:
+    return " + ".join(path for _label, path in profile_files(config))
+
+
 def print_check(config: AppConfig) -> int:
     print(json.dumps({"config": config.describe()}, indent=2, ensure_ascii=False))
     problems = []
+    # A key nobody consumes is a file that lies about its own configuration.
+    # Report it rather than let it silently do nothing.
+    for key in config.unknown_keys:
+        problems.append(
+            f"unknown config key {key!r}; it has no effect "
+            f"(see config.example.toml for the accepted names)"
+        )
     if not config.telegram_token:
         problems.append("TELEGRAM_BOT_TOKEN is missing")
     if not config.allowed_chat_ids:
         problems.append("TELEGRAM_ALLOWED_CHAT_IDS is empty; the bot would refuse every chat")
     if not config.model:
         problems.append("NERVIPULSA_MODEL is empty")
-    if not Path(config.system_prompt_path).exists():
-        problems.append(f"system prompt not found: {config.system_prompt_path}")
+    # Report the identity files individually: "which one is missing" is the
+    # whole question when the bot refuses to start.
+    for label, path in profile_files(config):
+        if not path:
+            problems.append(f"{label} is not configured")
+            continue
+        if not Path(path).exists():
+            problems.append(f"{label} not found: {path}")
+    try:
+        text = load_profile(config)
+    except (OSError, ValueError) as exc:
+        problems.append(str(exc))
     else:
-        try:
-            text = load_system_prompt(config.system_prompt_path)
-            print(f"system prompt: {len(text)} chars from {config.system_prompt_path}")
-        except ValueError as exc:
-            problems.append(str(exc))
+        print(f"agent profile: {len(text)} chars from {describe_profile(config)}")
     if problems:
         print("\nNOT READY:")
         for problem in problems:
@@ -168,14 +205,18 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         return 2
 
     store = Store(config.db_path)
-    transport = TelegramTransport(config.telegram_token, timeout=config.poll_timeout + 20)
+    bot_api = Bot(config.telegram_token)
+    transport = PythonTelegramBotTransport(bot_api)
     client = TelegramClient(transport, dry_run=config.dry_run)
 
-    me = {}
+    me: dict[str, Any] = {}
     try:
-        me = client.get_me()
+        await client.start()
+        me = await client.get_me()
     except TransportError as exc:
         print(f"cannot reach Telegram: {exc.detail}", file=sys.stderr)
+        await client.close()
+        store.close()
         return 2
     bot_user_id = me.get("id")
     if isinstance(bot_user_id, int):
@@ -263,13 +304,17 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         except Exception as exc:  # never let shutdown raising hide the exit
             log.warning("final turn pass failed: %s", exc)
     await bot.stop()
+    # Close PTB's HTTP session explicitly: an unclosed client keeps its
+    # connection pool (and the process) alive after the loop ends.
+    await client.close()
     store.close()
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="nervipulsa-telegram-bot")
-    parser.add_argument("--config", type=Path, default=None, help="path to config.json")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="path to config.toml (or a legacy .json)")
     parser.add_argument("--check", action="store_true", help="validate configuration and exit")
     parser.add_argument("--replay", action="store_true", help="offline replay, no network")
     parser.add_argument("--dry-run", action="store_true", help="never call the send API")
@@ -287,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         return print_check(config)
 
     try:
-        system_prompt = load_system_prompt(config.system_prompt_path)
+        system_prompt = load_profile(config)
     except (OSError, ValueError) as exc:
         print(f"cannot load the agent profile: {exc}", file=sys.stderr)
         return 2

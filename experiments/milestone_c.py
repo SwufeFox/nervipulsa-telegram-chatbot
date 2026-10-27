@@ -32,7 +32,7 @@ from nervipulsa.providers import ScriptedBackend
 from app import fixtures
 from app.agent import NervipulsaAgent
 from app.bot import GroupAgent
-from app.config import AppConfig
+from app.config import AppConfig, load_default_profile
 from app.store import Store
 from app.telegram import TelegramClient, TransportError
 from app.turns import TurnManager
@@ -113,8 +113,7 @@ def make_bot(root: Path, store: Store, transport, prompt: str, agent, clock):
 
 
 def prompt_text() -> str:
-    return (Path(__file__).resolve().parents[1]
-            / "app" / "prompts" / "group_agent.md").read_text(encoding="utf-8")
+    return load_default_profile()
 
 
 # -- 1 ---------------------------------------------------------------------

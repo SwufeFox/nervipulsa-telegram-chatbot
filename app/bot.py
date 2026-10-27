@@ -49,7 +49,14 @@ from .policy import (
     proactive_score,
 )
 from .store import SendRecord, Store, StoredMessage
-from .telegram import InboundMessage, SendOutcome, SendStatus, TelegramClient
+from .telegram import (
+    InboundMessage,
+    InboundReaction,
+    SendOutcome,
+    SendStatus,
+    TelegramClient,
+    parse_reaction_update,
+)
 from .turns import Turn, TurnManager
 
 log = logging.getLogger(__name__)
@@ -77,6 +84,7 @@ class TickStats:
     sends_failed: int = 0
     sends_unknown: int = 0
     model_calls: int = 0
+    feedback_updates: int = 0
     errors: int = 0
     admin_commands: int = 0
     admin_refused: int = 0
@@ -234,8 +242,7 @@ class GroupAgent:
         """Fetch one batch, ingest it durably, then close and answer turns."""
         tick = TickStats()
         try:
-            updates = await asyncio.to_thread(
-                self.client.get_updates,
+            updates = await self.client.get_updates(
                 offset=offset,
                 timeout=self.config.poll_timeout,
             )
@@ -251,6 +258,10 @@ class GroupAgent:
             update_id = update.get("update_id")
             if isinstance(update_id, int):
                 highest = update_id if highest is None else max(highest, update_id)
+            reaction = parse_reaction_update(update)
+            if reaction is not None:
+                self._ingest_reaction(reaction, tick)
+                continue
             self._ingest(update, tick)
 
         # Advance the cursor only after durable ingestion of this batch.
@@ -274,12 +285,34 @@ class GroupAgent:
         tick = TickStats()
         tick.updates = len(updates)
         for update in updates:
+            reaction = parse_reaction_update(update)
+            if reaction is not None:
+                self._ingest_reaction(reaction, tick)
+                continue
             self._ingest(update, tick)
         decisions = await self.run_turns(tick)
         self.stats.absorb(tick)
         return tick, decisions
 
     # -- ingest ------------------------------------------------------------
+
+    def _ingest_reaction(self, reaction: InboundReaction, tick: TickStats) -> None:
+        if not self.config.allows_chat(reaction.chat_id):
+            tick.unauthorized += 1
+            return
+        result = self.store.record_reaction_feedback(
+            update_id=reaction.update_id,
+            chat_id=reaction.chat_id,
+            message_id=reaction.message_id,
+            old_vote=reaction.old_vote,
+            new_vote=reaction.new_vote,
+        )
+        if result == "recorded":
+            tick.feedback_updates += 1
+        elif result == "duplicate":
+            tick.duplicates += 1
+        else:
+            tick.ignored += 1
 
     def _ingest(self, update: dict[str, Any], tick: TickStats) -> None:
         inbound = _parse(update)
@@ -531,6 +564,24 @@ class GroupAgent:
             "prompt_chars": len(prompt.text),
             "prompt_messages": prompt.included_messages,
         }
+        # The activation's usage is only known now. Persist it onto the reply
+        # decision, which was written before the model call: otherwise successful
+        # replies have no token/cache accounting on record.
+        self.store.update_decision_detail(decision_id, detail)
+
+        if result.status in {"error", "timeout", "rejected", "paused"}:
+            # An adapter/provider failure is not an intentional empty answer.
+            # Keep the failed attempt visible in diagnostics and error metrics.
+            tick.errors += 1
+            self.store.record_decision(
+                decision_id=decision_id + "_error",
+                chat_id=turn.chat_id, topic_id=turn.topic_id, turn_id=turn.turn_id,
+                outcome="silent", reason="model_activation_failed",
+                detail=detail, trigger=decision.trigger,
+            )
+            self.store.close_turn(turn.turn_id, "error")
+            log.warning("agent activation failed: %s", result.detail)
+            return
 
         if reply is None:
             # The model produced nothing usable. This is not a silent decision;
@@ -592,14 +643,12 @@ class GroupAgent:
             self.store.close_turn(turn.turn_id, "not_claimed")
             return
 
-        outcome: SendOutcome = await asyncio.to_thread(
-            self.client.send_message,
+        outcome: SendOutcome = await self.client.send_message(
             chat_id=chat_id,
             text=text,
             reply_to_message_id=reply_to,
             topic_id=topic_id,
         )
-
         if outcome.status is SendStatus.SENT:
             tick.sends_ok += 1
             self.store.mark_sent(decision_id, outcome.telegram_message_id or 0)

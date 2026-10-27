@@ -34,7 +34,7 @@ from nervipulsa.config import Settings
 
 from app.agent import NervipulsaAgent
 from app.bot import GroupAgent
-from app.config import AppConfig
+from app.config import AppConfig, load_default_profile
 from app.store import Store
 from app.telegram import TelegramClient
 from app.turns import TurnManager
@@ -86,8 +86,7 @@ async def main() -> int:
     base = os.environ.get("NERVIPULSA_BASE_URL", "http://127.0.0.1:3425/v1")
     key = os.environ.get("NERVIPULSA_API_KEY", "magpie")
     root = Path(tempfile.mkdtemp(prefix="case-topics-"))
-    prompt = (Path(__file__).resolve().parents[1]
-              / "app" / "prompts" / "group_agent.md").read_text(encoding="utf-8")
+    prompt = load_default_profile()
 
     store = Store(root / "bot.sqlite3")
     transport = RecordingTransport()

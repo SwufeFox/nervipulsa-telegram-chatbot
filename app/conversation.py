@@ -153,6 +153,10 @@ _ECHO_PREFIXES = (
     "[chat ",
     CONTEXT_MARKER,
 )
+_NON_MESSAGE_STATUS = re.compile(
+    r"^(?:(?:[a-z0-9_-]+)\s+)?(?:starts?\s+typing|is\s+typing|typing|thinking)(?:[. …]*)?$",
+    re.IGNORECASE,
+)
 
 
 def parse_reply(raw: str, *, bot_name: str, dry_run: bool = False) -> Reply | None:
@@ -170,6 +174,8 @@ def parse_reply(raw: str, *, bot_name: str, dry_run: bool = False) -> Reply | No
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     if not text:
+        return None
+    if _NON_MESSAGE_STATUS.fullmatch(text):
         return None
 
     # Strip a leading self-label the model sometimes copies from the transcript.

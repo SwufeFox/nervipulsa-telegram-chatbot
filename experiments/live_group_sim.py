@@ -37,7 +37,7 @@ from nervipulsa.config import Settings
 
 from app.agent import NervipulsaAgent
 from app.bot import GroupAgent
-from app.config import AppConfig
+from app.config import AppConfig, load_default_profile
 from app.store import Store
 from app.telegram import TelegramClient
 from app.turns import TurnManager
@@ -185,8 +185,7 @@ async def main() -> int:
     args = parser.parse_args()
 
     root = Path(tempfile.mkdtemp(prefix="live-sim-"))
-    prompt = (Path(__file__).resolve().parents[1]
-              / "app" / "prompts" / "group_agent.md").read_text(encoding="utf-8")
+    prompt = load_default_profile()
     config = AppConfig(
         bot_name="Alma",
         bot_username="alma_bot",

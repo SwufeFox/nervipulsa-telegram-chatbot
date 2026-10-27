@@ -31,7 +31,7 @@ from nervipulsa.providers import ScriptedBackend
 
 from app import fixtures
 from app.bot import GroupAgent
-from app.config import AppConfig
+from app.config import AppConfig, load_default_profile
 from app.policy import ParticipationPolicy, PolicyConfig
 from app.store import Store
 from app.telegram import TelegramClient
@@ -92,9 +92,7 @@ class ChatBackend(ScriptedBackend):
 
 
 def _read_prompt() -> str:
-    return (Path(__file__).resolve().parents[1] / "app" / "prompts" / "group_agent.md").read_text(
-        encoding="utf-8"
-    )
+    return load_default_profile()
 
 
 async def scenario() -> dict:
