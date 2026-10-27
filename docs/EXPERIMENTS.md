@@ -570,6 +570,84 @@ Both were things I suspected from reading the simulation output:
 
 Recording these because a review that only lists hits is not a review.
 
+## E7d — Core change `python_host=False`, and the case that proves it
+
+G2 had been documented and left open because every application-side workaround was
+already in place. The per-topic leak fix (E7b) turned it from a waste into a
+scaling wall: one runtime per (chat, topic) meant one interpreter per topic.
+
+### The Core change
+
+`Runtime(..., python_host=False)` starts a `NullPythonHost`:
+
+- no worker process, eagerly or lazily;
+- `python.requested` is **not registered**, so a submission is refused at
+  admission with `unknown_route` instead of sitting in a mailbox whose reader
+  does not exist;
+- `status()` gains `python_enabled` and reports `python: "disabled"` — a monitor
+  can tell "quiet" from "there is no Python here";
+- `runtime_facts()` reports `namespace: "disabled"`;
+- `managed_pids()` is `[]`, `idle` is `True`, shutdown is clean.
+
+Default stays `True`. Written test-first: 6 of 7 failed with
+`TypeError: unexpected keyword argument 'python_host'`, the seventh (default
+still spawns a worker) passed — that contrast is what makes the rest meaningful.
+
+Core: `6a300ce`, 7 new tests, full suite **174 passed / 144.40s**.
+
+### The case
+
+`python experiments/case_topics_workers.py` — four forum topics, one chat, one
+model, four different planted causes.
+
+```
+[topic 11] the deploy froze because the migration ran twice, on prod
+[topic 22] invoices are wrong because the VAT rate is hardcoded, in billing
+[topic 33] login loops because the session cookie is scoped to the wrong domain
+[topic 44] the cache never expires because the TTL is set to zero seconds
+```
+
+Answers:
+
+| topic | reply |
+| --- | --- |
+| 11 | "Check if the migration lock is still held and what actually landed in the migrations table… sounds like a retry raced the first run." |
+| 22 | "Check which country and date range is wrong first, that'll tell you where that hardcoded rate lives in the billing service." |
+| 33 | "Check the `Set-Cookie` Domain header on staging vs the actual host — it's probably still hardcoded to prod." |
+| 44 | "Zero usually means your client skips setting `EXPIRE` at all… in Redis itself persistent is TTL -1, `EXPIRE 0` would just delete the key." |
+
+Every answer uses **only its own topic's** fact and adds something specific to it.
+Cross-topic subject leaks: **0**. The TTL answer even corrects a wrong premise in
+the planted message (`EXPIRE 0` deletes rather than persists) instead of
+agreeing with it.
+
+And the cost:
+
+```
+runtimes:               4
+distinct sessions:      4
+live python workers:    0
+python.requested:       0
+tools offered to model: {()}
+status['python']:       {'disabled'}
+namespace:              {'disabled'}
+```
+
+Before the change the same shape measured 10 topics → 10 workers, ~300 ms and a
+resident process each, never reclaimed while idle. Now: `experiments/worker_cost.py`
+reports **10 runtimes, 0 Python workers, 1.0 s** (was 24.3 s), and the application
+suite dropped from 24.8s to 18.3s because it stops spawning interpreters in tests.
+
+### What this does and does not prove
+
+Proves: the runtime can run an application with no execution surface at all, the
+application does not need to branch on whether Python exists, isolation across
+topics holds under a real model, and the per-topic cost is gone.
+
+Does not prove: that a *coding* application is unaffected (its 167 pre-existing
+tests still pass, but that is regression evidence, not new coverage), or anything
+about the real Telegram API — the transport is still recorded, not sent.
+
 ## E8 — Not run
 
 Stated explicitly, because the brief warns against claiming more than was measured:

@@ -19,7 +19,7 @@ message → dedupe → durable inbox → debounce window → participation polic
 | A — offline working slice | **done**, 45/45 checks pass, real Runtime |
 | B — live Telegram long polling | **code complete, not exercised against the real API** |
 | C — failure injection | **done**, 7 scenarios measured |
-| D — runtime feedback | **done**, 1 Core PR + 7 documented gaps |
+| D — runtime feedback | **done**, 2 Core PRs + 7 documented gaps |
 
 Read [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) for exactly what was executed and
 what was not.
@@ -123,10 +123,13 @@ costing one request per message.
 
 ## Security
 
-- The model is constructed with an **empty tool catalog**. `python_exec` and
+- The runtime is built with **`python_host=False`** and an **empty tool catalog**,
+  so there is no Python execution surface at all: no interpreter process, and
+  `python.requested` is not even a registered route. `python_exec` and
   `python_environment` are never offered, and a hallucinated tool call is rejected
   by the runtime with `unknown_tool` and never executed. Asserted against the real
-  runtime in `tests/test_security.py`.
+  runtime in `tests/test_security.py`, and measured in
+  `experiments/worker_cost.py` (10 topics → 0 workers).
 - Chat text is **untrusted data**. The system prompt says so; a message that looks
   like a system directive stays a user turn, and a multi-line message cannot forge
   a new speaker.

@@ -148,6 +148,12 @@ class NervipulsaAgent:
             self._workspace,
             tool_catalog=EmptyToolCatalog(),
             system_prompt=self._system_prompt,
+            # No tool is exposed, so nothing in this application can submit
+            # Python. Declining the host means no interpreter is spawned and
+            # `python.requested` is not even routable. This matters because the
+            # bot keeps one runtime per (chat, topic): with a host per runtime,
+            # ten forum topics meant ten resident interpreters.
+            python_host=False,
         )
         await runtime.start()
         self._runtime = runtime

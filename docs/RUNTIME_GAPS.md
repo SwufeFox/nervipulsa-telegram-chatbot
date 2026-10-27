@@ -41,7 +41,7 @@ contract tests).
 
 ---
 
-## G2 — `start()` always spawns a Python worker · **OPEN**
+## G2 — `start()` always spawns a Python worker · **FIXED-IN-CORE**
 
 **Evidence**
 `experiments/probe_runtime_2.py` Q1, with a tool catalog exposing zero tools:
@@ -64,20 +64,28 @@ a usable interpreter, `start()` fails for a bot that will never execute Python.
 configuration for any non-coding application, and the security argument is generic:
 an application that never grants execution should not carry an execution process.
 
-**Workaround in use**
-`EmptyToolCatalog` — zero schemas, `get()` returns `None` — so the model is never
-offered a tool and a hallucinated `tool_calls` entry is rejected with
-`unknown_tool`. Tests assert `python.requested` never appears in the trace and that
-a tool-calling model cannot create a file. This satisfies "no Python execution
-permission is exposed to group messages" but not "no execution process exists".
+**Workaround that was in use (now superseded)**
+`EmptyToolCatalog` — zero schemas, `get()` returns `None` — so the model was never
+offered a tool and a hallucinated `tool_calls` entry was rejected with
+`unknown_tool`. That satisfied "no Python execution permission is exposed" but not
+"no execution process exists".
 
-**Minimal Core interface it would need**
-`Runtime(..., python_host: bool = True)` or `Runtime(..., host_factory=...)`, where
-`False`/`None` skips `host.start()`, still answers `runtime_facts()` with
-`namespace="not_started"`, and leaves `python.requested` unroutable. Roughly 20
-lines plus the shutdown path. Not attempted here: no failure has been observed
-that the workaround does not cover, and the brief says not to extend the framework
-without evidence.
+**Escalation evidence**
+The per-topic isolation fix (G9) made the cost concrete rather than theoretical:
+one runtime per (chat, topic) meant one interpreter per topic. Measured 10 topics
+→ 10 live worker processes, never reclaimed while idle, ~300 ms each.
+
+**Fix**
+Core PR `feat/configurable-agent-profile` (`6a300ce`): `Runtime(...,
+python_host=False)` installs a `NullPythonHost`. No worker is spawned, the
+`python.*` routes are not registered (so a submission is refused with
+`unknown_route` instead of queued forever), `status()` reports
+`python: "disabled"` plus `python_enabled`, and `runtime_facts()` reports
+`namespace: "disabled"`. Default `True`; the pre-existing suite is unchanged.
+
+**Measured after the fix** (`experiments/worker_cost.py`): 10 runtimes → **0
+workers**, 1.0 s instead of 24.3 s. The application suite also got faster
+(24.8s → 18.3s) because tests stop spawning interpreters.
 
 ---
 
@@ -283,18 +291,17 @@ partition it belongs to. This is the same shape as G6: the runtime has exactly o
 implicit conversation per session.
 
 **Workaround in use**
-One `Runtime` per `(chat_id, topic_id)`. Correct, but it multiplies G2: a forum
-with twelve active topics holds twelve Python workers. For the small authorized
-chat set this version supports, acceptable. It would not be acceptable at scale.
+One `Runtime` per `(chat_id, topic_id)`. It used to multiply G2 — a forum with
+twelve active topics held twelve Python workers — but `python_host=False`
+(`6a300ce`) removed that cost: measured **10 topics → 10 runtimes, 0 workers,
+1.0 s**. What remains is one `Transcript` object per topic in memory, which is
+proportionate to the conversation it holds.
 
-**Minimal Core interface it would need**
-Either a `partition`/`scope` key on `submit_text` and `Transcript.project` that
-splits the transcript into independent views within one runtime, or an explicit
-"build me a runtime with no Python host" option (G2) so that per-scope runtimes
-are cheap. The second is smaller and already justified by G2; this gap makes the
-cost of *not* doing it concrete.
-
-Not attempted: the workaround is correct for the supported deployment, and the
-brief is explicit that Core changes need a failure the application cannot handle.
+**Minimal Core interface it would still benefit from**
+A `partition`/`scope` key on `submit_text` and `Transcript.project`, splitting one
+runtime's transcript into independent views. That would collapse N runtimes into
+one and share the mailbox and journal. Worth doing when an application needs many
+concurrent conversations in one process; not needed for a bot with a handful of
+authorized chats, and there is no measured failure to justify it yet.
 
 ---

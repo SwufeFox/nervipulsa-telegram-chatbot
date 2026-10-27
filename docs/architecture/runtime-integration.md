@@ -25,8 +25,8 @@ local green suite is not remote verification.
 
 | Surface | Signature / shape | Notes |
 | --- | --- | --- |
-| `Runtime(settings, backend, workspace, *, journal_path, echo, tool_catalog, system_prompt)` | assembly point | `tool_catalog` and `system_prompt` are the two seams an embedding app needs. `system_prompt` was **added by this application's Core PR** (see §5). |
-| `Runtime.start()` / `await Runtime.shutdown()` | lifecycle | `start()` also spawns a Python worker **[probe Q1]** (see §3). |
+| `Runtime(settings, backend, workspace, *, journal_path, echo, tool_catalog, system_prompt, python_host)` | assembly point | Three seams an embedding app needs: `tool_catalog`, `system_prompt`, `python_host`. The latter two were **added by this application's Core PRs** (see §5). |
+| `Runtime.start()` / `await Runtime.shutdown()` | lifecycle | `start()` also spawns a Python worker **[probe Q1]** unless `python_host=False` (see §3 G2 and §5). |
 | `Runtime.submit_text(text)` | → `Delivery` | The only text entry point. Emits `user.message` with `{"text": ...}` and nothing else. |
 | `Runtime.add_listener(fn)` | observe every accepted event | Called synchronously from the bus observer, after admission. |
 | `Runtime.bus.call(source, type, payload, *, reply_to, lane, lane_key, ...)` | → `Delivery` | Direct event injection. Route table is fixed at construction (`Runtime._register`). |
@@ -149,7 +149,7 @@ message, the provider received
 A group-chat bot cannot assert "I am a software engineer assistant". It must state its own
 identity, its silence rules, and the untrusted-input boundary. Resolved — see §5.
 
-### G2 — `start()` always spawns a Python worker
+### G2 — `start()` always spawns a Python worker · **FIXED-IN-CORE**
 
 **[probe Q1]**, with a tool catalog that exposes zero tools:
 
@@ -158,19 +158,23 @@ identity, its silence rules, and the untrusted-input boundary. Resolved — see 
  "worker_epoch": 1, "namespace": "current_epoch_only"}
 ```
 
-`Runtime.start()` calls `host.start()` unconditionally, which starts `_scheduler()`, which
+`Runtime.start()` called `host.start()` unconditionally, which starts `_scheduler()`, which
 calls `_ensure_worker()` before doing anything else. An application that exposes no tools
-still pays the spawn, and — more importantly for the security requirement — still has a live
-arbitrary-Python interpreter bound to its process, reachable by anything that can call
+still paid the spawn, and still had a live arbitrary-Python interpreter bound to its
+process, reachable by anything that could call
 `bus.call("...", "python.requested", ...)`.
 
 `tool_catalog=EmptyCatalog()` **does** remove `python_exec` from the model's view
-**[probe P1]**: `actor.tools == []`, and no `python.requested` event is ever emitted in a
-normal conversation. That satisfies "the model cannot call python_exec". It does not satisfy
-"no Python execution surface exists", because the worker is running anyway.
+**[probe P1]** — `actor.tools == []`, and no `python.requested` event is emitted in a normal
+conversation — but that only satisfies "the model cannot call python_exec", not "no Python
+execution surface exists".
 
 Measured contrast **[probe P1b]**: the default catalog exposes
 `['python_exec', 'python_environment']`.
+
+**Resolved** by Core `6a300ce`: `Runtime(..., python_host=False)` installs a
+`NullPythonHost` — no worker, no `python.*` routes, `status()["python"] == "disabled"`.
+This application uses it, so the number below is now zero (§6).
 
 ### G3 — No cancellation or supersession of an in-flight activation
 
@@ -303,6 +307,25 @@ a ticketing agent, a scheduler — needs to state who it is. The default prompt 
 coding-CLI identity that is wrong for every one of them. Nothing in the change mentions a
 chat platform.
 
+**PR 2: `python_host=False`** — `Runtime(..., python_host: bool = True)`, Core `6a300ce`.
+
+- `tests/test_python_host_optional.py` (7 tests) written first; 6 failed with `TypeError:
+  unexpected keyword argument 'python_host'`, the 7th (default still spawns) passed.
+- A `NullPythonHost` keeps every attribute `Runtime` reads working, so no caller branches
+  on whether Python is present. The `python.*` routes are **not registered** when disabled,
+  so a submission is refused at admission (`unknown_route`) rather than queued in a mailbox
+  whose reader does not exist.
+- `status()` reports `python: "disabled"` and `python_enabled: false` — a monitor can tell
+  "quiet" from "there is no Python here". (An earlier draft returned `"idle"`; the test was
+  corrected, not the code, because `"idle"` would be a lie.)
+- Default is unchanged; Core's pre-existing suite passes untouched.
+
+Why this is generic: an application that never grants execution should not carry an
+execution process, and "run me a runtime without a Python tool" is a configuration any
+non-coding application wants. The evidence for it came from this application (one runtime
+per topic × one interpreter per runtime), which is exactly the feedback loop the brief asks
+for.
+
 ---
 
 ## 6. Verification performed
@@ -310,20 +333,26 @@ chat platform.
 | Check | Command | Result |
 | --- | --- | --- |
 | Core baseline before changes | `python -m pytest -q` | `160 passed in 120.63s` |
-| New contract tests before fix | `python -m pytest tests/test_agent_profile.py -q` | `6 failed, 1 passed` (expected) |
-| New contract tests after fix | same | `7 passed in 1.77s` |
-| Core full suite after fix | `python -m pytest -q` | see `docs/EXPERIMENTS.md` |
-| Runtime probes | `python experiments/probe_runtime.py`, `probe_runtime_2.py` | 22 observations, recorded in `docs/EXPERIMENTS.md` |
+| PR 1 tests before fix | `pytest tests/test_agent_profile.py -q` | `6 failed, 1 passed` (expected) |
+| PR 1 tests after fix | same | `7 passed in 1.77s` |
+| PR 2 tests before fix | `pytest tests/test_python_host_optional.py -q` | `5 failed, 2 passed` (expected) |
+| PR 2 tests after fix | same | `7 passed in 3.58s` |
+| Core full suite after both | `python -m pytest -q` | `174 passed in 144.40s` |
+| Runtime probes | `experiments/probe_runtime.py`, `probe_runtime_2.py` | 22 observations, in `docs/EXPERIMENTS.md` |
+| Worker cost, after PR 2 | `experiments/worker_cost.py` | 10 topics → **0 workers**, 1.0s (was 24.3s) |
+| End-to-end case | `experiments/case_topics_workers.py` | 4 topics, 0 cross-topic leaks, 0 workers |
 
-Not verified here: hosted CI on this branch, any real provider, any real Telegram API call.
-Those are separate claims and are not made.
+Not verified here: hosted CI on these branches, or any real Telegram API call. A real
+provider *was* used (magpie) for the behavioural work; see `docs/EXPERIMENTS.md` E7b/E7d.
 
 ## 7. Pinned integration target
 
 ```
 repository: https://github.com/SwufeFox/nervipulsa
-branch:     feat/configurable-agent-profile  (Core PR)
+branch:     feat/configurable-agent-profile  (two Core PRs)
 base:       08ead0f
+commits:    9a734c4  configurable system prompt
+            6a300ce  runtime without a Python host
 ```
 
 The application pins a commit, never `main`. See `docs/INTEGRATION_CONTRACT.md`.

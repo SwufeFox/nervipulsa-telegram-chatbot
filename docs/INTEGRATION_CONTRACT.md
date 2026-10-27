@@ -9,8 +9,16 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
-commit      9a734c4   feat: let a host application own its system prompt
+commits     9a734c4   feat: let a host application own its system prompt
+            6a300ce   feat: let a runtime run without a Python host
 ```
+
+Two Core dependencies, both consumed by this application:
+
+| Commit | Contract |
+| --- | --- |
+| `9a734c4` | `Runtime(..., system_prompt=)` / `Transcript(system_prompt=)` |
+| `6a300ce` | `Runtime(..., python_host=False)` → `NullPythonHost` |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
@@ -29,6 +37,7 @@ the shared contract updated **before** either side is merged.
 | Application | Core commit | Core suite | Notes |
 | --- | --- | --- | --- |
 | 0.1.0 | `9a734c4` | 167 passed / 143.96s | first working integration |
+| 0.1.0 | `6a300ce` | 174 passed / 144.40s | + `python_host=False`; 10 topics → 0 workers |
 
 ## Depends on (public, stable)
 
@@ -68,6 +77,7 @@ Runtime(
     echo=None,
     tool_catalog: ToolCatalog | None = None,
     system_prompt: str = SYSTEM_PROMPT,     # added by 9a734c4
+    python_host: bool = True,               # added by 6a300ce
 )
 await runtime.start()
 runtime.submit_text(text) -> Delivery       # Delivery: .accepted, .event_id, .reason
@@ -104,8 +114,11 @@ This is as important as the list above.
 - **No Core persistence read-back into a session.** `inspect_durable` is called in
   experiments and diagnostics only; it is never used to reconstruct conversation
   state. Its own `notice` says it is inspectable, not resumable.
-- **No `python_host` interaction.** The application never emits `python.requested`,
-  never reads execution output, and never calls `cancel`/`cancel_running`.
+- **No `python_host` interaction, structurally.** The runtime is built with
+  `python_host=False`, so there is no host to interact with: `python.requested`
+  is not a registered route, and `status()["python"]` is `"disabled"`. The
+  application never emits `python.requested`, never reads execution output, and
+  never calls `cancel`/`cancel_running`.
 - **No assumption that `assistant.message` is delivered.** It can be dropped when
   the UI mailbox is full (`RUNTIME_GAPS.md` G5); replies are read from the
   activation.
@@ -139,9 +152,9 @@ Stated plainly so nobody infers them:
   transcript, its activation ledger, or a Python namespace. Conversation memory is
   reconstructed from the stored chat log on the next prompt, which is not the same
   thing as the runtime's own model view.
-- **Not production reliability.** The live path has not been run against the real
-  Telegram API or a real provider in this work. See `EXPERIMENTS.md` for exactly
-  what was and was not executed.
+- **Not production reliability.** A real provider has been exercised (magpie,
+  `EXPERIMENTS.md` E7b/E7d); the real Telegram API has not. See `EXPERIMENTS.md`
+  E8 for exactly what was and was not executed.
 - **Not multi-tenant.** One process, one authorized chat set, no sharding. Two
   processes on the same SQLite file would both poll; nothing prevents it yet.
 
@@ -150,7 +163,7 @@ Stated plainly so nobody infers them:
 | Fragility | Impact | Mitigation |
 | --- | --- | --- |
 | `actor.activations` is a live list, not an event | a future Core change to its shape breaks `NervipulsaAgent._await_activation` | one function, covered by `test_runtime_path.py`; `RUNTIME_GAPS.md` G6 proposes the event that would replace it |
-| `Runtime.start()` spawns a worker regardless of tools | one interpreter per chat | `RUNTIME_GAPS.md` G2 |
+| ~~`Runtime.start()` spawns a worker regardless of tools~~ | resolved by `6a300ce` | this application passes `python_host=False`; regression-guarded by `test_python_host_optional.py` in Core |
 | `inspect_durable` payload keys are not typed | diagnostics only | nothing depends on the shape |
 | `Delivery.reason` strings are free text | tests assert on `accepted`, not on `reason`, except for `"capacity_exceeded"` | prefer `accepted` in new code |
 | `Settings` requires an `api_key` for `openai`/`deepseek`/`openrouter` | a missing key raises `ProviderFailure("request_not_sent")` at the first call, not at startup | `--check` reports it up front |
