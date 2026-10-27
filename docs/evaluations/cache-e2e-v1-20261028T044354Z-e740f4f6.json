@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-10-28T04:43:54.939571+00:00",
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "script_turns_requested": 49,
+  "requests": [
+    {
+      "call_id": 1,
+      "turn": 8,
+      "body_sha256": "8d1c1498b1c0d38dd7579733834389aa2b24b6b101589958ddd683a3f08cbc27",
+      "body_bytes": 6117,
+      "message_count": 3,
+      "shared_full_messages_with_previous_call": null,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 1,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 1241,
+      "cached_tokens": 0,
+      "status": "ok",
+      "elapsed_seconds": 7.458
+    },
+    {
+      "call_id": 2,
+      "turn": 16,
+      "body_sha256": "a65213b6e008bd3a4970f554e02fc311648bf8242f54a0929c3321853a9772af",
+      "body_bytes": 7949,
+      "message_count": 5,
+      "shared_full_messages_with_previous_call": 3,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 2,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 1558,
+      "cached_tokens": 1137,
+      "status": "ok",
+      "elapsed_seconds": 11.488
+    },
+    {
+      "call_id": 3,
+      "turn": 23,
+      "body_sha256": "e996fe87dbd13c958229c3da2b7814ab466697afdaf453278ccc8a019b2d1137",
+      "body_bytes": 10566,
+      "message_count": 7,
+      "shared_full_messages_with_previous_call": 5,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 3,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 1988,
+      "cached_tokens": 1521,
+      "status": "ok",
+      "elapsed_seconds": 24.168
+    },
+    {
+      "call_id": 4,
+      "turn": 29,
+      "body_sha256": "23d23b1472df65977b55b0f436f2ea02e3917575d19ffcbfca6334287f9577bf",
+      "body_bytes": 12810,
+      "message_count": 9,
+      "shared_full_messages_with_previous_call": 7,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 4,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 2372,
+      "cached_tokens": 1905,
+      "status": "ok",
+      "elapsed_seconds": 10.991
+    },
+    {
+      "call_id": 5,
+      "turn": 32,
+      "body_sha256": "23cc1a8705c25969c1fbe123b54401d0b5ef81a38963eec1693a1abd4f286835",
+      "body_bytes": 15186,
+      "message_count": 11,
+      "shared_full_messages_with_previous_call": 9,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 5,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 2777,
+      "cached_tokens": 0,
+      "status": "ok",
+      "elapsed_seconds": 13.157
+    },
+    {
+      "call_id": 5,
+      "turn": 32,
+      "body_sha256": "23cc1a8705c25969c1fbe123b54401d0b5ef81a38963eec1693a1abd4f286835",
+      "body_bytes": 15186,
+      "message_count": 11,
+      "shared_full_messages_with_previous_call": 9,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 6,
+      "repeat_index": 1,
+      "usage_present": true,
+      "prompt_tokens": 2777,
+      "cached_tokens": 2673,
+      "status": "ok",
+      "elapsed_seconds": 6.79
+    },
+    {
+      "call_id": 5,
+      "turn": 32,
+      "body_sha256": "23cc1a8705c25969c1fbe123b54401d0b5ef81a38963eec1693a1abd4f286835",
+      "body_bytes": 15186,
+      "message_count": 11,
+      "shared_full_messages_with_previous_call": 9,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 7,
+      "repeat_index": 2,
+      "usage_present": true,
+      "prompt_tokens": 2777,
+      "cached_tokens": 2673,
+      "status": "ok",
+      "elapsed_seconds": 11.615
+    },
+    {
+      "call_id": 6,
+      "turn": 35,
+      "body_sha256": "90e390528eecb6882478629c680641a32d767174775bc1e1d98aef13fd417f58",
+      "body_bytes": 17906,
+      "message_count": 13,
+      "shared_full_messages_with_previous_call": 11,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 8,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 3219,
+      "cached_tokens": 2673,
+      "status": "ok",
+      "elapsed_seconds": 8.131
+    },
+    {
+      "call_id": 7,
+      "turn": 36,
+      "body_sha256": "ab2df378a9a66abe5b92726609367b2db17135d3a593bbc1a8aae9d3c8936e1a",
+      "body_bytes": 20591,
+      "message_count": 15,
+      "shared_full_messages_with_previous_call": 13,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 9,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 3658,
+      "cached_tokens": 3185,
+      "status": "ok",
+      "elapsed_seconds": 3.91
+    },
+    {
+      "call_id": 8,
+      "turn": 42,
+      "body_sha256": "bc7f0c2b839af8bb215990161629002ee259c9760244487b5483ae972c8050e9",
+      "body_bytes": 23163,
+      "message_count": 17,
+      "shared_full_messages_with_previous_call": 15,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 10,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 4094,
+      "cached_tokens": 3569,
+      "status": "ok",
+      "elapsed_seconds": 7.857
+    },
+    {
+      "call_id": 9,
+      "turn": 49,
+      "body_sha256": "e0a95a9b225571cfbb20af2b61c1fb51eb341fe3a7f9474ae2f768e27779e2b5",
+      "body_bytes": 25888,
+      "message_count": 19,
+      "shared_full_messages_with_previous_call": 17,
+      "body_field_names": [
+        "max_tokens",
+        "messages",
+        "model"
+      ],
+      "request_id": 11,
+      "repeat_index": 0,
+      "usage_present": true,
+      "prompt_tokens": 4544,
+      "cached_tokens": 4081,
+      "status": "ok",
+      "elapsed_seconds": 10.645
+    }
+  ],
+  "assumptions": [
+    "The endpoint's cached_tokens field reports cached prompt tokens.",
+    "The first model call is treated as the cold baseline; actual server cache state is unknown.",
+    "A matching full-message prefix is necessary evidence of client prefix stability, not proof of server cache behavior."
+  ],
+  "run_status": "completed",
+  "structure_validated": true,
+  "nonfirst_zero_calls": 1
+}

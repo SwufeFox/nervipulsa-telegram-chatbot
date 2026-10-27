@@ -54,19 +54,14 @@ min_confidence = 0.62
 provider = "magpie"
 base_url = "http://127.0.0.1:3425/v1"
 model = "opencode-go/muse-spark-1.3-contributor"
-# Both budgets are "effectively unlimited": 1M tokens each.
-#
-# The previous 40000 / 4096 pair was the binding constraint, not the model.
-# Muse Spark spends ~98% of its output on reasoning tokens, so a 4096 cap meant
-# a hard question could burn the whole budget thinking and return nothing at
-# all — measured at 2 of 10 replies in docs/LONG_CONVERSATION.md.
-#
-# "Unlimited" means "high enough never to bind", not literal infinity: the
-# provider enforces its own limits and will reject a request that is too large.
+# Core serialized model-view character budget, not a token context window.
+# The provider may impose its own context and output limits.
+# In one old 4096-output-cap run, 2 of 10 decisions had no usable content;
+# only one reached the cap. See docs/LONG_CONVERSATION.md.
 context_limit = 1000000
-# Sent as `max_tokens`.
+# Finite output token cap sent as `max_tokens`; the provider may limit it.
 max_output_tokens = 1000000
-# An unlimited reply can legitimately take minutes. Keep this above the longest
+# A long reply can legitimately take minutes. Keep this above the longest
 # reply you are willing to wait for, or a good request gets cut off mid-thought.
 request_timeout = 900.0
 
@@ -82,7 +77,8 @@ db_path = ""
 # and the untrusted-input section, or the bot may start claiming to be a person.
 soul_path = "app/prompts/soul.md"
 # How it takes part: when to speak, when to stay quiet, length, tone. Edit this
-# to change how the bot *behaves*. It cannot weaken the soul file.
+# to change how the bot *behaves*. Review it for conflicts with the soul: both
+# files form one system prompt, with no model-enforced file priority.
 introduction_path = "app/prompts/introduction.md"
 # A missing or empty file is a startup error, never a silent fallback: running
 # with an identity nobody reviewed is the failure this split exists to prevent.

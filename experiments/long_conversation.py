@@ -7,14 +7,13 @@ Two questions this answers that the unit tests cannot:
 1. **Does it hold up over a long thread?** The fixed naturalness scenarios are
    one turn each. Here five simulated members keep talking across several
    topics for dozens of turns, so the transcript actually grows.
-2. **What does it cost per turn?** Wall time, prompt tokens, completion tokens,
-   reasoning tokens and — the interesting one — `cached_tokens`, because prompt
-   prefix caching is the difference between a cheap long thread and an
-   unaffordable one.
+2. **What usage and latency does the endpoint report?** Reply-decision time, prompt,
+   completion, reasoning and `cached_tokens`. Billing and cache implementation
+   cannot be established from usage counters alone.
 
 Telegram is a recording stand-in: nothing is sent anywhere. The model is real,
-and the group members' lines are scripted so the run is reproducible and the
-token counts are comparable between runs.
+and the group members' lines are scripted; model responses and decisions may
+still differ between runs.
 
 Run:
     python experiments/long_conversation.py
@@ -30,6 +29,7 @@ import statistics
 import sys
 import tempfile
 import time
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,7 +48,7 @@ from app.turns import TurnManager  # noqa: E402
 
 MODEL = "opencode-go/muse-spark-1.3-contributor"
 BASE_URL = "http://127.0.0.1:3425/v1"
-API_KEY = os.environ.get("NERVIPULSA_API_KEY", "magpie")
+API_KEY = os.environ.get("NERVIPULSA_API_KEY", "")
 
 
 # -- the group ---------------------------------------------------------------
@@ -183,11 +183,11 @@ class TurnRecord:
     outcome: str
     reason: str
     latency_s: float
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    reasoning_tokens: int = 0
-    cached_tokens: int = 0
-    total_tokens: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    total_tokens: int | None = None
     prompt_chars: int = 0
     text: str | None = None
     decision_id: str | None = None
@@ -198,23 +198,22 @@ class TurnRecord:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
-def _usage_from_detail(detail: dict[str, Any]) -> dict[str, int]:
-    """Pull the token counters out of the activation's provider usage.
-
-    Shape comes from the OpenAI-compatible response, which this endpoint fills
-    in including `prompt_tokens_details.cached_tokens` and
-    `completion_tokens_details.reasoning_tokens`.
-    """
+def _usage_from_detail(detail: dict[str, Any]) -> dict[str, int | None]:
+    """Read provider counters without treating missing values as zero."""
     activation = detail.get("activation") or {}
-    usage = activation.get("usage") or {}
+    usage = activation.get("usage")
     if not isinstance(usage, dict):
         return {}
 
-    def num(value: Any) -> int:
-        return value if isinstance(value, int) else 0
+    def num(value: Any) -> int | None:
+        return value if type(value) is int else None
 
-    prompt_details = usage.get("prompt_tokens_details") or {}
-    completion_details = usage.get("completion_tokens_details") or {}
+    prompt_details = usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, dict):
+        prompt_details = {}
+    completion_details = usage.get("completion_tokens_details")
+    if not isinstance(completion_details, dict):
+        completion_details = {}
     return {
         "prompt_tokens": num(usage.get("prompt_tokens")),
         "completion_tokens": num(usage.get("completion_tokens")),
@@ -266,43 +265,46 @@ def _update(update_id: int, message_id: int, utterance: Utterance,
 
 
 async def run(turns: int, *, history: int, verbose: bool) -> dict[str, Any]:
-    script = SCRIPT[:turns] if turns < len(SCRIPT) else SCRIPT
-    root = Path(tempfile.mkdtemp(prefix="long-conversation-"))
-    store = Store(root / "bot.sqlite3")
-    transport = RecordingTransport()
-    config = _build_config(root, history)
-    prompt = load_profile(config)
+    async with AsyncExitStack() as stack:
+        script = SCRIPT[:turns] if turns < len(SCRIPT) else SCRIPT
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="long-conversation-", dir=ROOT)))
+        store = Store(root / "bot.sqlite3")
+        stack.callback(store.close)
+        transport = RecordingTransport()
+        config = _build_config(root, history)
+        prompt = load_profile(config)
 
-    clock = [1_700_000_000.0]
-    agent = NervipulsaAgent(
-        settings=_settings(config),
-        workspace=root / "chat",
-        system_prompt=prompt,
-        timeout=config.request_timeout,
-    )
+        clock = [1_700_000_000.0]
+        agent = NervipulsaAgent(
+            settings=_settings(config),
+            workspace=root / "chat",
+            system_prompt=prompt,
+            timeout=config.request_timeout,
+        )
+        stack.push_async_callback(agent.stop)
 
-    bot = GroupAgent(
-        config=config,
-        store=store,
-        client=TelegramClient(transport),
-        system_prompt=prompt,
-        agent_factory=lambda spec: agent,   # one topic: one runtime
-        turn_manager=TurnManager(debounce_seconds=config.debounce_seconds,
-                                 clock=lambda: clock[0]),
-        bot_user_id=fixtures.ALMA,
-        clock=lambda: clock[0],
-    )
+        bot = GroupAgent(
+            config=config,
+            store=store,
+            client=TelegramClient(transport),
+            system_prompt=prompt,
+            agent_factory=lambda spec: agent,   # one topic: one runtime
+            turn_manager=TurnManager(debounce_seconds=config.debounce_seconds,
+                                     clock=lambda: clock[0]),
+            bot_user_id=fixtures.ALMA,
+            clock=lambda: clock[0],
+        )
+        stack.push_async_callback(bot.stop)
 
-    records: list[TurnRecord] = []
-    await agent.start()
-    await bot.start()
+        records: list[TurnRecord] = []
+        await agent.start()
+        await bot.start()
 
-    message_id = 1000
-    last_bot_message = None
-    seen_decisions: set[str] = set()
-    # Pre-seed so nothing written before the run is attributed to turn 0.
-    _new_decisions(store, seen_decisions)
-    try:
+        message_id = 1000
+        last_bot_message = None
+        seen_decisions: set[str] = set()
+        # Pre-seed so nothing written before the run is attributed to turn 0.
+        _new_decisions(store, seen_decisions)
         for index, utterance in enumerate(script):
             message_id += 1
             reply_to = last_bot_message if utterance.reply_to_sender == fixtures.ALMA else None
@@ -361,16 +363,12 @@ async def run(turns: int, *, history: int, verbose: bool) -> dict[str, Any]:
                 if verbose:
                     mark = "→" if record.text else ("…" if decision.outcome == "reply" else "·")
                     print(f"{mark} [{index:02d}] {record.reason:24} {record.latency_s:5.2f}s "
-                          f"tok={record.prompt_tokens:5}/{record.completion_tokens:4} "
-                          f"cache={record.cached_tokens:5}"
+                          f"tok={_format_counter(record.prompt_tokens):>5}/{_format_counter(record.completion_tokens):>4} "
+                          f"cache={_format_counter(record.cached_tokens):>5}"
                           + (f"  {record.text[:60]!r}" if record.text else
                              (f"  [{record.send_status}]" if record.send_status else "")))
-    finally:
-        await bot.stop()
-        await agent.stop()
-        store.close()
 
-    return _summarise(records, transport, config, root)
+        return _summarise(records, transport, config, root)
 
 
 def _sent_text(store: Store, decision_id: str | None) -> str | None:
@@ -444,17 +442,22 @@ def _settings(config: AppConfig):
     )
 
 
+def _format_counter(value: int | None) -> str:
+    return f"{value:,}" if value is not None else "-"
+
+
 def _summarise(records: list[TurnRecord], transport: RecordingTransport,
                config: AppConfig, root: Path) -> dict[str, Any]:
-    # A model call is a turn that went as far as asking the runtime — i.e. a
-    # reply decision. It is *not* "a turn that reported token usage": failures
-    # and timeouts report no usage, and filtering on usage would silently drop
-    # exactly the turns that went wrong and inflate every average.
+    # A reply decision may fail before the provider runs or involve retries.
+    # Usage presence does not establish either a call count or billing.
     attempted = [r for r in records if r.outcome == "reply"]
-    billed = [r for r in attempted if r.prompt_tokens or r.completion_tokens]
+    def has_usage(r: TurnRecord) -> bool:
+        return isinstance((r.detail.get("activation") or {}).get("usage"), dict)
+
+    with_usage = [r for r in attempted if has_usage(r)]
     delivered = [r for r in records if r.send_status == "sent"]
     failed = [r for r in attempted if r.send_status in {"failed", "unknown"}]
-    no_model = [r for r in attempted if not (r.prompt_tokens or r.completion_tokens)]
+    without_usage = [r for r in attempted if not has_usage(r)]
     # A reply the orchestrator chose not to send, and why. Kept separate from
     # send failures: "we decided not to send" is not "the send broke".
     withheld: dict[str, int] = {}
@@ -463,17 +466,28 @@ def _summarise(records: list[TurnRecord], transport: RecordingTransport,
             key = record.turn_outcome or "unknown"
             withheld[key] = withheld.get(key, 0) + 1
 
-    def pct(part: float, whole: float) -> float:
-        return round(100.0 * part / whole, 1) if whole else 0.0
+    def pct(part: float, whole: float) -> float | None:
+        return round(100.0 * part / whole, 1) if whole else None
 
-    prompt_total = sum(r.prompt_tokens for r in billed)
-    cached_total = sum(r.cached_tokens for r in billed)
-    completion_total = sum(r.completion_tokens for r in billed)
-    reasoning_total = sum(r.reasoning_tokens for r in billed)
+    def known(name: str) -> list[int]:
+        return [v for r in attempted if (v := getattr(r, name)) is not None]
+
+    prompt_total = sum(known("prompt_tokens"))
+    cached_total = sum(known("cached_tokens"))
+    completion_total = sum(known("completion_tokens"))
+    reasoning_total = sum(known("reasoning_tokens"))
+    cache_pairs = [r for r in attempted if r.prompt_tokens is not None
+                   and r.prompt_tokens > 0 and r.cached_tokens is not None]
+    cache_pair_prompt = sum(r.prompt_tokens for r in cache_pairs)
+    cache_pair_cached = sum(r.cached_tokens for r in cache_pairs)
+    reasoning_pairs = [r for r in attempted if r.completion_tokens is not None
+                       and r.completion_tokens > 0 and r.reasoning_tokens is not None]
+    reasoning_pair_completion = sum(r.completion_tokens for r in reasoning_pairs)
+    reasoning_pair_tokens = sum(r.reasoning_tokens for r in reasoning_pairs)
 
     latencies = [r.latency_s for r in attempted]
-    per_turn_prompt = [r.prompt_tokens for r in billed]
-    per_turn_cached = [r.cached_tokens for r in billed]
+    per_turn_prompt = known("prompt_tokens")
+    per_turn_cached = known("cached_tokens")
 
     return {
         "config": {
@@ -482,31 +496,46 @@ def _summarise(records: list[TurnRecord], transport: RecordingTransport,
             "max_output_tokens": config.max_output_tokens,
             "debounce_seconds": config.debounce_seconds,
             "workspace": str(root),
+            "workspace_ephemeral": True,
         },
         "turns": {
             "total": len(records),
             "reply_decisions": len(attempted),
             "replies_sent": len(delivered),
             "silences": sum(1 for r in records if r.outcome != "reply"),
-            "model_calls_billed": len(billed),
-            "model_calls_without_usage": len(no_model),
+            "reply_decisions_with_usage": len(with_usage),
+            "reply_decisions_without_usage": len(without_usage),
             "send_failures": len(failed),
             "replies_withheld": withheld,
-            "empty_model_responses": sum(
-                1 for r in records if r.reason == "model_returned_nothing"
-            ),
+            "empty_model_responses": sum(1 for r in attempted if r.turn_outcome == "empty"),
             "invalid_model_responses": sum(
-                1 for r in records if r.reason == "model_activation_failed"
+                1 for r in attempted if r.turn_outcome == "error"
                 and (r.detail.get("activation") or {}).get("error_kind") == "response_invalid"
+                and not (r.detail.get("activation") or {}).get("not_this_activation")
             ),
         },
         "tokens": {
             "prompt_total": prompt_total,
             "cached_total": cached_total,
-            "cache_hit_rate_pct": pct(cached_total, prompt_total),
+            "cache_hit_rate_pct": pct(cache_pair_cached, cache_pair_prompt),
+            "cache_hit_rate_basis": {
+                "decisions_with_both_counters": len(cache_pairs),
+                "reply_decisions": len(attempted),
+                "prompt_tokens": cache_pair_prompt,
+                "cached_tokens": cache_pair_cached,
+            },
+            "known_counter_decisions": {
+                name: len(known(name)) for name in
+                ("prompt_tokens", "cached_tokens", "completion_tokens", "reasoning_tokens")
+            },
             "completion_total": completion_total,
             "reasoning_total": reasoning_total,
-            "reasoning_share_pct": pct(reasoning_total, completion_total),
+            "reasoning_share_pct": pct(reasoning_pair_tokens, reasoning_pair_completion),
+            "reasoning_share_basis": {
+                "decisions_with_both_counters": len(reasoning_pairs),
+                "completion_tokens": reasoning_pair_completion,
+                "reasoning_tokens": reasoning_pair_tokens,
+            },
             "per_turn_prompt_mean": round(statistics.fmean(per_turn_prompt), 1)
             if per_turn_prompt else 0.0,
             "per_turn_prompt_max": max(per_turn_prompt) if per_turn_prompt else 0,
@@ -519,12 +548,14 @@ def _summarise(records: list[TurnRecord], transport: RecordingTransport,
             "p90_s": round(_percentile(latencies, 0.9), 2) if latencies else 0.0,
             "max_s": round(max(latencies), 2) if latencies else 0.0,
             "replies_per_minute": round(len(delivered) / (sum(latencies) / 60.0), 2)
-            if latencies and sum(latencies) else 0.0,
+            if latencies and sum(latencies) else None,
+            "replies_per_minute_basis": "sent replies divided by the sum of reply-decision latencies; not wall-clock or concurrent throughput",
         },
         "cache_curve": [
             {"turn": r.index, "prompt": r.prompt_tokens, "cached": r.cached_tokens,
-             "hit_pct": pct(r.cached_tokens, r.prompt_tokens)}
-            for r in billed
+             "hit_pct": pct(r.cached_tokens, r.prompt_tokens)
+             if r.prompt_tokens is not None and r.cached_tokens is not None else None}
+            for r in attempted if r.prompt_tokens is not None or r.cached_tokens is not None
         ],
         "decisions": [
             {"index": r.index, "outcome": r.outcome, "reason": r.reason,
@@ -578,11 +609,17 @@ def render_markdown(result: dict[str, Any]) -> str:
 
     The JSON is for machines; this is for a person deciding whether the bot is
     any good. Each human line is followed by what the bot did — replied, or
-    stayed quiet — and the cost of that decision.
+    stayed quiet — and the measured usage for that decision.
     """
     tokens = result["tokens"]
     turns = result["turns"]
     latency = result["latency"]
+    def percent(value: float | None) -> str:
+        return f"{value}%" if value is not None else "-"
+
+    coverage = tokens["known_counter_decisions"]
+    cache_basis = tokens["cache_hit_rate_basis"]
+    reasoning_basis = tokens["reasoning_share_basis"]
     lines = [
         "# 长对话实测记录",
         "",
@@ -598,15 +635,21 @@ def render_markdown(result: dict[str, Any]) -> str:
         f"| 决定回复 | {turns['reply_decisions']} |",
         f"| 实际发出 | {turns['replies_sent']} |",
         f"| 沉默 | {turns['silences']} |",
-        f"| 计费模型调用 | {turns['model_calls_billed']} |",
+        f"| 带 usage 的回复决策 | {turns['reply_decisions_with_usage']} |",
+        f"| 缺失 usage 的回复决策 | {turns['reply_decisions_without_usage']} |",
         f"| 发送失败 | {turns['send_failures']} |",
-        f"| prompt 总 | {tokens['prompt_total']:,} |",
-        f"| 命中缓存 | {tokens['cached_total']:,}（{tokens['cache_hit_rate_pct']}%） |",
-        f"| completion 总 | {tokens['completion_total']:,} |",
-        f"| 其中推理 | {tokens['reasoning_total']:,}（{tokens['reasoning_share_pct']}%） |",
+        f"| prompt 已知总数 | {tokens['prompt_total']:,}（{coverage['prompt_tokens']}/{turns['reply_decisions']} 个回复决策） |",
+        f"| cached 已知总数 | {tokens['cached_total']:,}（{coverage['cached_tokens']}/{turns['reply_decisions']} 个回复决策） |",
+        f"| 缓存占比 | {percent(tokens['cache_hit_rate_pct'])}（仅 {cache_basis['decisions_with_both_counters']} 个 prompt 和 cached 均已知的决策） |",
+        f"| completion 已知总数 | {tokens['completion_total']:,}（{coverage['completion_tokens']}/{turns['reply_decisions']} 个回复决策） |",
+        f"| reasoning 已知总数 | {tokens['reasoning_total']:,}（{coverage['reasoning_tokens']}/{turns['reply_decisions']} 个回复决策） |",
+        f"| reasoning 占比 | {percent(tokens['reasoning_share_pct'])}（仅 {reasoning_basis['decisions_with_both_counters']} 个 completion 和 reasoning 均已知的决策） |",
         f"| 延迟 均值/中位/p90/最大 | {latency['mean_s']} / {latency['p50_s']} / "
         f"{latency['p90_s']} / {latency['max_s']} s |",
-        f"| 发出速率 | {latency['replies_per_minute']} 条/分钟 |",
+        f"| 发出速率 | {latency['replies_per_minute'] if latency['replies_per_minute'] is not None else '-'} 条/分钟 |",
+        "",
+        "发出速率 = 成功发送数 ÷ 回复决策耗时之和；不是整段墙钟速率或并发吞吐。",
+        "Usage 是端点报告的数值，不能据此判断计费；缺失字段不参与对应比例。",
         "",
         "## 对话",
         "",
@@ -616,9 +659,9 @@ def render_markdown(result: dict[str, Any]) -> str:
         if row["bot"]:
             lines.append(
                 f"> 🤖 {row['bot']}  \n"
-                f"> `{row['latency_s']}s` · prompt {row['prompt_tokens']:,} "
-                f"(cached {row['cached_tokens']:,}) · out {row['completion_tokens']:,} "
-                f"(reasoning {row['reasoning_tokens']:,})"
+                f"> `{row['latency_s']}s` · prompt {_format_counter(row['prompt_tokens'])} "
+                f"(cached {_format_counter(row['cached_tokens'])}) · out {_format_counter(row['completion_tokens'])} "
+                f"(reasoning {_format_counter(row['reasoning_tokens'])})"
             )
         elif row["bot_decision"] == "reply":
             lines.append(f"> ⚠️ 决定回复但没有发出（`{row['turn_outcome']}`）")

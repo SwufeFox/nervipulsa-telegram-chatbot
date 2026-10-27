@@ -1,0 +1,85 @@
+{
+  "rows": [
+    {
+      "turn": 7,
+      "messages": 3,
+      "total_chars": 5386,
+      "unique_chars": 608,
+      "repeated_chars": 0,
+      "prompt_tokens": 1241,
+      "cached_tokens": 1137
+    },
+    {
+      "turn": 15,
+      "messages": 5,
+      "total_chars": 6060,
+      "unique_chars": 955,
+      "repeated_chars": 309,
+      "prompt_tokens": 1544,
+      "cached_tokens": 1137
+    },
+    {
+      "turn": 22,
+      "messages": 7,
+      "total_chars": 7035,
+      "unique_chars": 1346,
+      "repeated_chars": 868,
+      "prompt_tokens": 1992,
+      "cached_tokens": 1521
+    },
+    {
+      "turn": 28,
+      "messages": 9,
+      "total_chars": 7915,
+      "unique_chars": 1584,
+      "repeated_chars": 1485,
+      "prompt_tokens": 2419,
+      "cached_tokens": 1905
+    },
+    {
+      "turn": 31,
+      "messages": 11,
+      "total_chars": 8821,
+      "unique_chars": 1753,
+      "repeated_chars": 2197,
+      "prompt_tokens": 2857,
+      "cached_tokens": 2417
+    },
+    {
+      "turn": 34,
+      "messages": 13,
+      "total_chars": 9799,
+      "unique_chars": 1987,
+      "repeated_chars": 2916,
+      "prompt_tokens": 3310,
+      "cached_tokens": 2801
+    },
+    {
+      "turn": 35,
+      "messages": 15,
+      "total_chars": 10794,
+      "unique_chars": 2137,
+      "repeated_chars": 3736,
+      "prompt_tokens": 3781,
+      "cached_tokens": 3185
+    },
+    {
+      "turn": 41,
+      "messages": 17,
+      "total_chars": 11762,
+      "unique_chars": 2301,
+      "repeated_chars": 4515,
+      "prompt_tokens": 4237,
+      "cached_tokens": 3697
+    },
+    {
+      "turn": 48,
+      "messages": 19,
+      "total_chars": 12741,
+      "unique_chars": 2484,
+      "repeated_chars": 5286,
+      "prompt_tokens": 4707,
+      "cached_tokens": 4209
+    }
+  ]
+}

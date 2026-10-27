@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "A restrained Telegram group agent built on the Nervipulsa runtime"
 requires-python = ">=3.11"
 dependencies = [
-    # Pinned to a verified Core commit, never a floating branch. See
+    # Pinned to a specific Core commit, never a floating branch. See
     # docs/INTEGRATION_CONTRACT.md before changing this line.
-    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@6a300ce",
+    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@13c75ec49de0b6af13370413c83b6eaac81b9991",
     # The production Telegram transport. Pinned: PTB is pre-1.0-stable in the
     # sense that its async surface moves between minors, and the transport here
     # is written against the Bot methods of exactly this version.

@@ -125,6 +125,97 @@ def test_a_reply_is_produced_by_the_real_runtime(tmp_path: Path, config, transpo
     store.close()
 
 
+def test_old_recoverable_pause_waits_for_its_new_input(tmp_path: Path, system_prompt) -> None:
+    """An input can be accepted before the actor has cleared an old pause."""
+    from types import SimpleNamespace
+
+    agent = build(tmp_path, system_prompt)
+    agent._timeout = 1.0
+    old = SimpleNamespace(id="old", status="paused", error_kind="response_invalid",
+                          error_message="empty", context_metrics={"attempts": [{}]})
+    actor = SimpleNamespace(paused=old, activations=[old])
+    pending = []
+
+    async def release() -> None:
+        await asyncio.sleep(0.16)  # More than one polling interval.
+        actor.paused = None
+        actor.activations.append(SimpleNamespace(
+            id="new", status="committed", error_kind=None,
+            input_event_ids=("new-input",), context_metrics={},
+            response=ModelResponse(content="new answer", model="scripted"),
+        ))
+
+    def submit_text(prompt):
+        pending.append(asyncio.create_task(release()))
+        return SimpleNamespace(accepted=True, event_id="new-input")
+
+    agent._runtime = SimpleNamespace(actor=actor, submit_text=submit_text)
+
+    async def body() -> None:
+        result = await agent.ask(chat_id=1, prompt="new message", tag="new")
+        await asyncio.gather(*pending)
+        assert result.status == "committed"
+        assert result.activation_id == "new"
+        assert result.text == "new answer"
+
+    run(body())
+
+
+def test_old_nonrecoverable_pause_is_reported_without_waiting(tmp_path: Path, system_prompt) -> None:
+    from types import SimpleNamespace
+
+    async def body() -> None:
+        for kind in ("response_unknown", "commit_interrupted"):
+            agent = build(tmp_path, system_prompt)
+            agent._timeout = 1.0
+            old = SimpleNamespace(id="old", status="paused", error_kind=kind,
+                                  error_message="blocked", context_metrics={"attempts": [{}]})
+            actor = SimpleNamespace(paused=old, activations=[old])
+            agent._runtime = SimpleNamespace(
+                actor=actor,
+                submit_text=lambda prompt: SimpleNamespace(accepted=True, event_id="new-input"),
+            )
+            result = await asyncio.wait_for(
+                agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=0.5
+            )
+            assert result.status == "paused"
+            assert result.detail["error_kind"] == kind
+            assert result.detail["not_this_activation"] is True
+
+    run(body())
+
+
+def test_failed_retry_of_old_pause_does_not_wait_for_full_timeout(tmp_path: Path, system_prompt) -> None:
+    from types import SimpleNamespace
+
+    agent = build(tmp_path, system_prompt)
+    agent._timeout = 2.0
+    old = SimpleNamespace(id="old", status="paused", error_kind="provider_error",
+                          error_message="retry failed", context_metrics={"attempts": [{}]})
+    actor = SimpleNamespace(paused=old, activations=[old])
+    pending = []
+
+    async def retry_fails() -> None:
+        await asyncio.sleep(0.16)
+        old.context_metrics["attempts"].append({})
+
+    def submit_text(prompt):
+        pending.append(asyncio.create_task(retry_fails()))
+        return SimpleNamespace(accepted=True, event_id="new-input")
+
+    agent._runtime = SimpleNamespace(actor=actor, submit_text=submit_text)
+
+    async def body() -> None:
+        result = await asyncio.wait_for(
+            agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=0.8
+        )
+        await asyncio.gather(*pending)
+        assert result.status == "paused"
+        assert result.detail["not_this_activation"] is True
+
+    run(body())
+
+
 def test_no_python_execution_ever_happens(tmp_path: Path, config, transport, clock,
                                           system_prompt) -> None:
     agent = build(tmp_path, system_prompt)
@@ -416,5 +507,32 @@ def test_provider_failure_is_surfaced_as_an_error_result(tmp_path: Path,
         assert result.text is None
         assert result.detail["error_kind"] == "response_unknown"
         await agent.stop()
+
+    run(body())
+
+
+def test_real_runtime_recovers_from_invalid_reply_on_new_input(tmp_path: Path, system_prompt) -> None:
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return ModelResponse(content="" if len(calls) == 1 else "new answer", model="scripted")
+
+    agent = build(tmp_path, system_prompt, ScriptedBackend(respond))
+
+    async def body() -> None:
+        await agent.start()
+        try:
+            first = await agent.ask(chat_id=1, prompt="old message", tag="old")
+            second = await agent.ask(chat_id=1, prompt="new message", tag="new")
+            assert first.status == "error"
+            assert first.detail["error_kind"] == "response_invalid"
+            assert second.status == "committed"
+            assert second.text == "new answer"
+            assert second.activation_id != first.activation_id
+            assert len(calls) == 2
+            assert any(message.get("content") == "new message" for message in calls[1].messages)
+        finally:
+            await agent.stop()
 
     run(body())

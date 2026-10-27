@@ -11,14 +11,16 @@ base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
+            13c75ec49de0b6af13370413c83b6eaac81b9991   configurable output-token cap
 ```
 
-Two Core dependencies, both consumed by this application:
+Core features consumed by this application:
 
 | Commit | Contract |
 | --- | --- |
 | `9a734c4` | `Runtime(..., system_prompt=)` / `Transcript(system_prompt=)` |
 | `6a300ce` | `Runtime(..., python_host=False)` → `NullPythonHost` |
+| `13c75ec` | `Settings.max_output_tokens` / `ModelRequest.max_output_tokens` |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
@@ -38,9 +40,8 @@ the shared contract updated **before** either side is merged.
 | --- | --- | --- | --- |
 | 0.1.0 | `9a734c4` | 167 passed / 143.96s | first working integration |
 | 0.1.0 | `6a300ce` | 174 passed / 144.40s | + `python_host=False`; 10 topics → 0 workers |
-| working tree | based on `6a300ce` | Core 175 passed; app 131 passed | optional output-token cap; not yet pinned |
-
-The current application code uses the local Core extension `Settings.max_output_tokens` and `ModelRequest.max_output_tokens`. `pyproject.toml` still pins `6a300ce`, which does not include that extension. The evaluation and tests in this workspace imported the sibling Core checkout. Before a clean install or release, commit/publish the Core change and update the application pin to that exact revision.
+| historical working tree | based on `6a300ce` | Core 175 passed; app 131 passed | tests imported the sibling Core checkout with the optional output-token extension |
+| current pin | `13c75ec49de0b6af13370413c83b6eaac81b9991` | not verified by a clean install | includes the output-token extension required by the application |
 
 ## Depends on (public, stable)
 
@@ -88,18 +89,22 @@ Fields used: `provider`, `base_url`, `model`, `api_key`, `workspace`,
 Constructed directly rather than via `load_settings` so the application owns its own
 configuration file and never picks up the user's CLI config by accident.
 
-`context_limit` and `max_output_tokens` both default to `1_000_000` (effectively
-unlimited), and `max_timeout` follows `request_timeout` (default 900s). The reply
-budget is not decoration: with the earlier 4096 cap, a model that spends ~98% of
-its output on reasoning could exhaust the budget and return no content at all —
-measured at 2 of 10 replies (`docs/LONG_CONVERSATION.md`).
+The application defaults `context_limit` to 1,000,000 characters for Core’s
+serialized model view, and `max_output_tokens` to a finite 1,000,000-token output
+cap. The provider may impose its own limits. `max_timeout` follows
+`request_timeout` (default 900s). In the old 4096-cap run, 2 of 10 reply
+decisions had no usable content; only one reached the cap. The later run had
+9 successful replies from 9 decisions; see `docs/LONG_CONVERSATION.md` for
+the evidence and limitations.
 
 ### The agent profile is two files
 
 `Runtime(..., system_prompt=)` receives a string the application composes at
 startup from `app/prompts/soul.md` (identity, hard limits, untrusted input) and
 `app/prompts/introduction.md` (participation rules, tone), in that order. Core sees
-one system prompt; the split is entirely application-side.
+one system prompt; the split and ordering organize the files and do not establish
+model-enforced priority. The introduction can conflict with or weaken the soul,
+so the combined prompt needs review.
 
 Two consequences the contract has to state:
 

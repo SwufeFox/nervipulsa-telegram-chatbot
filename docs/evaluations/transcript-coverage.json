@@ -1,0 +1,20 @@
+{
+  "full": {
+    "mode": "full",
+    "turns": 49,
+    "transcript_user_messages": 10,
+    "transcript_chars": 5558,
+    "group_utterances": 50,
+    "visible_to_model": 50,
+    "invisible_to_model": 0
+  },
+  "delta": {
+    "mode": "delta",
+    "turns": 49,
+    "transcript_user_messages": 10,
+    "transcript_chars": 1051,
+    "group_utterances": 50,
+    "visible_to_model": 10,
+    "invisible_to_model": 40
+  }
+}

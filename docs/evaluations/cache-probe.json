@@ -1,0 +1,107 @@
+{
+  "rows": [
+    {
+      "turn": 7,
+      "messages": 3,
+      "chars": 5386,
+      "prompt_tokens": 1241,
+      "cached_tokens": 0
+    },
+    {
+      "turn": 15,
+      "messages": 5,
+      "chars": 6168,
+      "prompt_tokens": 1580,
+      "cached_tokens": 1137,
+      "shared_messages": 3,
+      "total_messages": 5,
+      "shared_chars": 5386,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 22,
+      "messages": 7,
+      "chars": 7157,
+      "prompt_tokens": 2029,
+      "cached_tokens": 1521,
+      "shared_messages": 5,
+      "total_messages": 7,
+      "shared_chars": 6168,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 28,
+      "messages": 9,
+      "chars": 8087,
+      "prompt_tokens": 2475,
+      "cached_tokens": 1905,
+      "shared_messages": 7,
+      "total_messages": 9,
+      "shared_chars": 7157,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 31,
+      "messages": 11,
+      "chars": 9037,
+      "prompt_tokens": 2927,
+      "cached_tokens": 2417,
+      "shared_messages": 9,
+      "total_messages": 11,
+      "shared_chars": 8087,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 34,
+      "messages": 13,
+      "chars": 10082,
+      "prompt_tokens": 3410,
+      "cached_tokens": 2801,
+      "shared_messages": 11,
+      "total_messages": 13,
+      "shared_chars": 9037,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 35,
+      "messages": 15,
+      "chars": 11126,
+      "prompt_tokens": 3901,
+      "cached_tokens": 3313,
+      "shared_messages": 13,
+      "total_messages": 15,
+      "shared_chars": 10082,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 41,
+      "messages": 17,
+      "chars": 12146,
+      "prompt_tokens": 4378,
+      "cached_tokens": 3825,
+      "shared_messages": 15,
+      "total_messages": 17,
+      "shared_chars": 11126,
+      "system_identical": true,
+      "first_user_identical": true
+    },
+    {
+      "turn": 48,
+      "messages": 19,
+      "chars": 13175,
+      "prompt_tokens": 4873,
+      "cached_tokens": 4337,
+      "shared_messages": 17,
+      "total_messages": 19,
+      "shared_chars": 12146,
+      "system_identical": true,
+      "first_user_identical": true
+    }
+  ]
+}

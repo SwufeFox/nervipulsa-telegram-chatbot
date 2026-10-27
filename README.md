@@ -103,21 +103,22 @@ The settings you are most likely to touch:
 | `debounce_seconds` | `3.5` | How long it waits for more messages before answering, so a two-line question is one answer. |
 | `history_messages` | `24` | How much history the model sees. The main cost driver. |
 | `proactive.enabled` | `false` | Whether it may ever speak without being addressed. Off by default. |
-| `max_output_tokens` | `1000000` | Reply budget. Effectively unlimited; see below. |
+| `context_limit` | `1000000` | Character budget for Core’s serialized model view. |
+| `max_output_tokens` | `1000000` | Finite output token cap sent to the provider; see below. |
 | `request_timeout` | `900` | Must outlive a long reply, or a good answer gets cut off. |
 
 ### About the token budgets
 
-Both the context window and the reply budget default to **1,000,000 tokens** —
-high enough never to bind. This is deliberate. The model used during development
-spends ~98% of its output on internal reasoning, so an earlier 4096-token cap
-meant a hard question could burn the entire budget thinking and return *nothing*.
-That happened in 2 of 10 replies. With the cap raised, the same conversation
-produced 9 replies and zero empty ones.
+`context_limit` defaults to 1,000,000 characters for Core’s serialized model
+view; it is not a model context window measured in tokens. `max_output_tokens`
+defaults to a finite 1,000,000-token output cap, sent as `max_tokens`. Both are
+configurable, and the provider may impose its own context and output limits.
 
-"Unlimited" means "high enough never to bind", not literal infinity — the
-provider still enforces its own limits and will reject a request it considers too
-large. Both values are overridable.
+In one run with the old 4096 output cap, 2 of 10 reply decisions returned no
+usable content; only one reached the cap. A repeat with the new defaults produced
+9 replies from 9 decisions. These small runs do not establish a failure rate, a
+latency cause, or that the new cap eliminates truncation. See
+[the experiment](docs/LONG_CONVERSATION.md) for the observations and limits.
 
 ## Teaching it who it is
 
@@ -131,16 +132,16 @@ The bot's identity is **two files**, not one, and the split matters:
 At startup they are concatenated — **soul first, then introduction** — and become
 the model's system prompt.
 
-The order is not cosmetic. Putting the limits first means a reviewer reading the
-composed prompt sees what the bot must never do before seeing how it should
-sound, and editing the tone file cannot accidentally delete the impersonation
-ban. The safety test (`tests/test_security.py`) asserts the rules are still there
-after composition.
+The order helps people organize and review the prompt; it does not give either
+file a model-enforced priority. An introduction can conflict with or weaken the
+soul’s instructions, so review the composed prompt as a whole. The safety tests
+check for specific rules; they do not guarantee model compliance.
 
 ### Changing how it behaves
 
 Edit `introduction.md`. If it talks too much, tighten "When you speak". If it is
-too terse, relax "Length and tone". Nothing in that file can weaken the soul.
+too terse, relax "Length and tone". Check that the resulting instructions remain
+consistent with the soul.
 
 ```markdown
 ## When you speak

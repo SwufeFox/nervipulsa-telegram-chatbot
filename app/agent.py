@@ -183,6 +183,8 @@ class NervipulsaAgent:
 
         async with self._lock:
             before = len(runtime.actor.activations)
+            paused_before = runtime.actor.paused
+            prior_attempts = len((getattr(paused_before, "context_metrics", None) or {}).get("attempts") or [])
             delivery = runtime.submit_text(prompt)
             if not delivery.accepted:
                 return AgentResult(
@@ -193,7 +195,9 @@ class NervipulsaAgent:
                 )
             input_event_id = delivery.event_id
 
-            activation = await self._await_activation(runtime, before, input_event_id)
+            activation = await self._await_activation(
+                runtime, before, input_event_id, paused_before, prior_attempts
+            )
             if activation is None:
                 paused = runtime.actor.paused
                 if paused is not None:
@@ -244,7 +248,8 @@ class NervipulsaAgent:
             )
 
     async def _await_activation(
-        self, runtime: Runtime, before: int, input_event_id: str | None
+        self, runtime: Runtime, before: int, input_event_id: str | None,
+        paused_before: Any | None, prior_attempts: int,
     ) -> Any | None:
         """Poll the activation ledger for the activation that consumed our event.
 
@@ -261,15 +266,20 @@ class NervipulsaAgent:
                     if activation.status in {"running"}:
                         continue
                     return activation
-            # A paused actor will never produce another activation without an
-            # operator; stop waiting instead of burning the full timeout.
-            #
-            # The paused activations is *not* returned as this call's result.
-            # It belongs to an earlier call that already failed, and handing it
-            # back would report a stale failure as if it were the answer to the
-            # prompt we just submitted — the caller cannot tell the difference.
-            if runtime.actor.paused is not None:
-                return None
+            # A prior pause may still be visible while the actor asynchronously
+            # handles this user message. Core only blocks automatic recovery for
+            # these two kinds; for other kinds, wait for the correlated input.
+            # If retrying the old activation has already failed again, there is
+            # no reason to wait for the held input until the full timeout.
+            paused = runtime.actor.paused
+            if paused is not None:
+                if paused is not paused_before or paused.error_kind in {
+                    "response_unknown", "commit_interrupted"
+                }:
+                    return None
+                attempts = len((getattr(paused, "context_metrics", None) or {}).get("attempts") or [])
+                if paused.status == "paused" and attempts > prior_attempts:
+                    return None
         return None
 
     # -- statistics --------------------------------------------------------

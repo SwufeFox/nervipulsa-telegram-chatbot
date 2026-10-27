@@ -1,0 +1,93 @@
+{
+  "rounds": 12,
+  "gap_seconds": 10,
+  "rows": [
+    {
+      "round": 0,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.5
+    },
+    {
+      "round": 1,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.6
+    },
+    {
+      "round": 2,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.2
+    },
+    {
+      "round": 3,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 5.5
+    },
+    {
+      "round": 4,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.7
+    },
+    {
+      "round": 5,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.8
+    },
+    {
+      "round": 6,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 4.5
+    },
+    {
+      "round": 7,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 5.1
+    },
+    {
+      "round": 8,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 5.6
+    },
+    {
+      "round": 9,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 5.1
+    },
+    {
+      "round": 10,
+      "prompt_tokens": 406,
+      "cached_tokens": 369,
+      "cache_write_tokens": 0,
+      "seconds": 5.6
+    },
+    {
+      "round": 11,
+      "prompt_tokens": 406,
+      "cached_tokens": 0,
+      "cache_write_tokens": 0,
+      "seconds": 5.8
+    }
+  ],
+  "misses": [
+    11
+  ]
+}

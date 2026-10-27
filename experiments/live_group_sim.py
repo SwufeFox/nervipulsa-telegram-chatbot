@@ -43,7 +43,7 @@ from app.telegram import TelegramClient
 from app.turns import TurnManager
 
 BASE_URL = os.environ.get("NERVIPULSA_BASE_URL", "http://127.0.0.1:3425/v1")
-API_KEY = os.environ.get("NERVIPULSA_API_KEY", "magpie")
+API_KEY = os.environ.get("NERVIPULSA_API_KEY", "")
 
 CHAT = -1001234567890
 ALICE, BOB, CAROL, MARCO, ALMA = 111111, 222222, 333333, 444444, 999999
