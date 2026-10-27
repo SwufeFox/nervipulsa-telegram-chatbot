@@ -1,0 +1,27 @@
+.alma-snapshots
+# Local secrets and state. Never commit any of these.
+.env
+.env.*
+config.local.json
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+bot-state/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Test and experiment artifacts
+.pytest_cache/
+.scratch/
+.coverage
+htmlcov/
+
+# Runtime workspaces created by a live run
+chat_*/

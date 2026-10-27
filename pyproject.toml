@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nervipulsa-telegram-chatbot"
+version = "0.1.0"
+description = "A restrained Telegram group agent built on the Nervipulsa runtime"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned to a verified Core commit, never a floating branch. See
+    # docs/INTEGRATION_CONTRACT.md before changing this line.
+    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@d3ad007",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+nervipulsa-telegram-bot = "app.main:main"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["prompts/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -p no:cacheprovider"
+# Keep test scratch inside the repo so a restricted %TEMP% cannot break the suite.
+filterwarnings = ["error::DeprecationWarning"]
