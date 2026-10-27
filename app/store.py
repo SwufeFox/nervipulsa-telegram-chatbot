@@ -310,9 +310,14 @@ class Store:
         self, *, turn_id: str, chat_id: int, topic_id: int | None,
         first_message: int, last_message: int, trigger: str,
     ) -> None:
+        """Claim a window. Idempotent: re-opening an existing turn is a no-op.
+
+        INSERT OR REPLACE here would reset `outcome` and re-stamp `opened_at` if
+        the same turn were opened twice, hiding a completed turn's result.
+        """
         with self._write() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO turns (turn_id, chat_id, topic_id, first_message,"
+                "INSERT OR IGNORE INTO turns (turn_id, chat_id, topic_id, first_message,"
                 " last_message, opened_at, closed_at, trigger, outcome)"
                 " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
                 (turn_id, chat_id, topic_id, first_message, last_message, _now(), trigger),

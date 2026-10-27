@@ -46,7 +46,6 @@ REASON_ALREADY_ANSWERED = "already_answered_by_member"
 REASON_DUPLICATE = "would_repeat_recent_reply"
 REASON_JUDGE_DECLINED = "model_judge_declined"
 REASON_JUDGE_UNAVAILABLE = "model_judge_unavailable"
-REASON_BUDGET = "turn_budget_exhausted"
 
 TRIGGER_MENTION = "mention"
 TRIGGER_REPLY = "reply"
@@ -134,7 +133,6 @@ class PolicyConfig:
     min_interval_seconds: float = 240.0
     max_per_hour: int = 4
     threshold: float = 0.62
-    has_judge: bool = False
 
 
 class ParticipationPolicy:
@@ -276,9 +274,6 @@ class ParticipationPolicy:
 
         # Only the borderline band is worth a model request. Anything far above
         # the threshold is already a clear yes.
-        if self._judge is not None and not config.has_judge:
-            config.has_judge = True
-
         if score < config.threshold + 0.18:
             if self._judge is None:
                 # No judge configured: the deterministic score decides, and the

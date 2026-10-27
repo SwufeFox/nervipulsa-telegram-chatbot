@@ -280,7 +280,7 @@ python -m pytest -q
 ```
 
 ```
-99 passed in 23.23s (0:00:23)
+108 passed in 26.29s (0:00:26)
 ```
 
 Distribution and what each file is for:
@@ -288,11 +288,12 @@ Distribution and what each file is for:
 | File | Tests | Purpose |
 | --- | --- | --- |
 | `test_security.py` | 13 | tool exposure, injection, redaction, unauthorized chats |
-| `test_behavior.py` | 36 | the nine behavioural requirements, scoring, reply parsing |
+| `test_behavior.py` | 37 | the nine behavioural requirements, scoring, reply parsing |
 | `test_durability.py` | 24 | dedupe, cursor ordering, three-valued send state, constraints |
-| `test_runtime_path.py` | 7 | proof that the real Runtime path is exercised |
+| `test_runtime_path.py` | 9 | proof the real Runtime path is exercised; per-topic isolation |
 | `test_recovery.py` | 8 | inbound recovery and its authorization gate |
 | `test_admin.py` | 12 | pause / proactive / purge, CLI `--check` and `--replay` |
+| `test_resilience.py` | 6 | one bad turn or poll must not stop the bot (E7c) |
 
 No test sleeps: the clock is injected everywhere it matters. The full suite runs in
 ~23s, mostly runtime startup and shutdown.
@@ -484,6 +485,91 @@ here is not a low score, it is a *high* score on a plausible-looking turn. A
 future judge step should target invented specifics and empty filler, not
 relevance — relevance is already what the score measures.
 
+## E7c — Adversarial review of the code that produced E7b
+
+After the simulation looked good, the code was probed for *fault containment*
+rather than features. Four suspicions, four different answers. The suite was
+already green (101 tests) during all of this, which is the finding: it tested
+that things work, not that one failure stays local.
+
+### Confirmed bug — one bad turn destroyed the rest of the batch, and then the bot
+
+Three turns in one `run_turns()` call, the middle one raising (a real shape: a
+SQLite error, a timeout, a malformed turn):
+
+```
+run_turns RAISED: RuntimeError: simulated DB error on this turn
+turns attempted: [11, 22]      <- the third was never reached
+turns in store: 1  (3 expected)
+decisions: 1       (3 expected)
+-> turns silently dropped: 2
+```
+
+Worse, in the full chain through `poll_once`:
+
+```
+after poll: messages stored=3 cursor=4 (advanced past 3 updates)
+poll_once RAISED RuntimeError: one bad turn
+-> uncaught in run_live's while loop => the bot stops polling
+stranded messages (recovered only by a RESTART): [(11,801), (22,2), (33,3)]
+```
+
+So: one malformed turn could stop the whole bot, and the messages it never got to
+were only picked up on the next restart. Two of three turns lost per incident.
+
+**Fixed.** `run_turns` contains each turn; a failure is recorded as
+`decisions.reason='turn_failed'` plus `turns.outcome='error'` (so it is visible,
+not swallowed), the remaining turns still run, and `run_live` wraps `poll_once`
+in a backoff loop instead of exiting. `turns.open_turn` became `INSERT OR IGNORE`
+so recording a failure cannot reset an already-completed turn's outcome.
+
+Covered by `tests/test_resilience.py` (6 tests), including
+`test_poll_once_survives_a_failing_turn` and
+`test_open_turn_is_idempotent`.
+
+### Confirmed bug — a configured knob that did nothing
+
+`proactive_min_confidence` was read from the config file and the environment
+(`BOT_PROACTIVE_MIN_CONFIDENCE`), validated, reported by `--check`, and then
+dropped: `GroupAgent` built `PolicyConfig` with every field except `threshold`.
+Changing it had no effect on anything. Fixed, with
+`test_configured_threshold_reaches_the_policy` asserting through the bot's own
+default wiring rather than an injected policy (the first version of that test
+passed a policy explicitly and therefore proved nothing).
+
+### Confirmed: a real cost, decision still open — a worker per forum topic
+
+The `(chat_id, topic_id)` keying that fixed the transcript leak (E7b) means one
+`Runtime` per topic, and `Runtime.start()` spawns a Python worker unconditionally
+(G2). Measured:
+
+```
+10 simulated forum topics
+  spawn ~290-310ms each, 24.3s of wall time total
+  live worker processes: 10
+  live after 5s idle:   10      <- they do not exit when unused
+  after stop():          0      <- only an explicit shutdown reclaims them
+```
+
+For a forum with a dozen active topics that is a dozen interpreters resident for
+the life of the process, none of which the bot can ever use (it exposes no
+tools). Not fixed here: the correct fix is caching plus idle eviction *or* the
+Core change in G2, and choosing between them needs a decision about whether a
+transcript may be discarded. Documented as G9/G2 rather than papered over.
+
+### Not bugs (checked, then dismissed)
+
+Both were things I suspected from reading the simulation output:
+
+- **"The bot replies to its own message instead of the one that asked."** It does
+  not. The send carries `reply_parameters.message_id` of the triggering message
+  (the bot's own id appears only in `from`). Verified directly.
+- **"The duplicate guard drops legitimate repeat replies."** It only fires on a
+  *normalised exact match* against bot history, so `"Thank you!"` and
+  `"Thanks!"` both survive. Verified with a probe reply before concluding.
+
+Recording these because a review that only lists hits is not a review.
+
 ## E8 — Not run
 
 Stated explicitly, because the brief warns against claiming more than was measured:
@@ -491,7 +577,7 @@ Stated explicitly, because the brief warns against claiming more than was measur
 - **No live Telegram API call.** No bot token was used; `getUpdates`/`sendMessage`
   were exercised only through the recording transport. Milestone B's code path
   exists and is tested at the transport boundary, but has not touched the real API.
-- **No real LLM provider for the *tests*.** The 101-test suite uses
+- **No real LLM provider for the *tests*.** The 108-test suite uses
   `ScriptedBackend` exclusively, deliberately: a suite that needs a network peer
   is not a suite you can run before every commit. A real provider *was* used for
   the behavioural simulation in E7b (magpie, `muse-spark-1.3-contributor`), and that is where

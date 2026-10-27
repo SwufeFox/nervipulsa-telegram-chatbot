@@ -141,7 +141,8 @@ costing one request per message.
 **Application-owned (tested):** `update_id` dedupe; durable ingest before the poll
 cursor advances; recovery of ingested-but-undecided messages on restart; at most one
 send attempt per decision; UNKNOWN is terminal and never retried; supersession
-before the send; recorded silence; topic/chat isolation; zero tool exposure.
+before the send; recorded silence; topic/chat isolation; zero tool exposure;
+one failing turn does not stop the batch or the poll loop.
 
 **Nervipulsa-owned:** the event kernel and mailbox admission, the activation ledger,
 the transcript and context budgeting, the provider adapter, and the journal.
@@ -185,7 +186,7 @@ app/
   prompts/group_agent.md   the agent profile (system prompt)
   fixtures.py       synthetic chat events, no real content
 experiments/        probe_runtime*.py, milestone_a.py, milestone_c.py
-tests/              99 tests
+tests/              108 tests
 docs/               architecture, gaps, contract, experiments
 ```
 

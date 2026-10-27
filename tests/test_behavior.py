@@ -507,6 +507,29 @@ def test_score_decays_with_message_age() -> None:
     assert fresh_score > stale_score
 
 
+def test_configured_threshold_reaches_the_policy(store, transport, clock,
+                                                system_prompt) -> None:
+    """proactive_min_confidence used to be read from config and then dropped on
+    the floor: PolicyConfig got every field except the threshold."""
+    from app.config import AppConfig
+
+    config = AppConfig(
+        bot_name="Alma", allowed_chat_ids=(fixtures.TEST_CHAT,),
+        workspace=".", model="scripted", proactive_min_confidence=0.87,
+    )
+    # No explicit policy: this must go through the bot's own default wiring,
+    # which is where the field was being dropped.
+    bot = GroupAgent(
+        config=config, store=store, client=TelegramClient(transport),
+        system_prompt=system_prompt, agent_factory=lambda spec: ScriptedAgent(lambda p: "x"),
+        turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
+        bot_user_id=fixtures.ALMA, clock=clock,
+    )
+    assert bot.policy.config.threshold == 0.87
+    assert bot.policy.config.proactive_enabled is False
+    assert bot.policy.config.max_per_hour == config.proactive_max_per_hour
+
+
 def test_score_is_deterministic() -> None:
     msg = message(1, "why is the cron late?", at=100.0)
     context = TurnContext(turn=turn_of(msg), recent_messages=[msg],

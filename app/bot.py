@@ -154,6 +154,9 @@ class GroupAgent:
                 proactive_enabled=config.proactive_enabled,
                 min_interval_seconds=config.proactive_min_interval_seconds,
                 max_per_hour=config.proactive_max_per_hour,
+                # This was configured and read into AppConfig but never reached
+                # the policy, so the knob did nothing.
+                threshold=config.proactive_min_confidence,
             )
         )
         self.bot_user_id = bot_user_id
@@ -359,7 +362,19 @@ class GroupAgent:
 
             decisions: list[Decision] = []
             for turn in closed:
-                decision = await self._process_turn(turn, tick)
+                # One bad turn must not take the batch with it. A failure is
+                # recorded on that turn, the rest still get decided, and the
+                # caller never sees an exception that would stop the poll loop.
+                try:
+                    decision = await self._process_turn(turn, tick)
+                except Exception:
+                    tick.errors += 1
+                    log.exception(
+                        "turn %s failed (chat=%s topic=%s); continuing with the rest",
+                        turn.turn_id, turn.chat_id, turn.topic_id,
+                    )
+                    self._record_failed_turn(turn, tick)
+                    continue
                 decisions.append(decision)
                 tick.turns_closed += 1
                 if decision.is_reply:
@@ -370,6 +385,31 @@ class GroupAgent:
         finally:
             if owns_tick:
                 self.stats.absorb(tick)
+
+    def _record_failed_turn(self, turn: Turn, tick: TickStats) -> None:
+        """Persist a turn that raised, so it is visible and not silently lost.
+
+        `open_turn` writes the window's high-water mark, which is what stops the
+        same batch being answered twice after a restart. It is written here too:
+        if the failure happened after the claim, re-opening it on restart would
+        duplicate whatever did get sent.
+        """
+        try:
+            self.store.open_turn(
+                turn_id=turn.turn_id, chat_id=turn.chat_id, topic_id=turn.topic_id,
+                first_message=turn.first_message_id, last_message=turn.last_message_id,
+                trigger="error",
+            )
+            self.store.record_decision(
+                decision_id=f"dec_{uuid.uuid4().hex[:12]}",
+                chat_id=turn.chat_id, topic_id=turn.topic_id, turn_id=turn.turn_id,
+                outcome="silent", reason="turn_failed",
+                detail={"messages": len(turn.messages), "error": True},
+                trigger=TRIGGER_PROACTIVE,
+            )
+            self.store.close_turn(turn.turn_id, "error")
+        except Exception:
+            log.exception("could not record the failed turn %s", turn.turn_id)
 
     async def _process_turn(self, turn: Turn, tick: TickStats) -> Decision:
         decision_id = f"dec_{uuid.uuid4().hex[:12]}"

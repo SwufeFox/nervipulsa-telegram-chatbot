@@ -16,7 +16,7 @@ The application pins a **commit**, never `main`. Before upgrading Core:
 
 1. apply the new commit in the Core working tree;
 2. run `python -m pytest -q` in Core (currently 167 passed);
-3. run `python -m pytest -q` here (currently 99 passed);
+3. run `python -m pytest -q` here (currently 108 passed);
 4. run `python experiments/milestone_a.py` and `milestone_c.py` and compare the
    recorded observations in `EXPERIMENTS.md`;
 5. update the commit id above and the compatibility table below.

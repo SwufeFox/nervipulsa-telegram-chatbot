@@ -220,33 +220,50 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
     # keeps ingesting durably and simply decides "silent" for every turn.
     offset = store.get_update_cursor()
     pause_logged = False
-    try:
-        while not stop.is_set():
-            if bot.stats.paused and not pause_logged:
-                print("paused: still recording messages, will not reply")
-                pause_logged = True
-            elif not bot.stats.paused:
-                pause_logged = False
+    log = logging.getLogger(__name__)
+    consecutive_failures = 0
+    while not stop.is_set():
+        if bot.stats.paused and not pause_logged:
+            print("paused: still recording messages, will not reply")
+            pause_logged = True
+        elif not bot.stats.paused:
+            pause_logged = False
+        try:
             offset, tick = await bot.poll_once(offset=offset)
-            if tick.updates or tick.messages_stored:
-                logging.getLogger(__name__).info(
-                    "tick: %d updates, %d stored, %d dup, %d unauth, %d sends%s",
-                    tick.updates, tick.messages_stored, tick.duplicates,
-                    tick.unauthorized, tick.sends_ok,
-                    " (paused)" if bot.stats.paused else "",
-                )
-    finally:
-        # Close any open debounce window so a message that arrived in the last
-        # few seconds is still decided rather than silently dropped on exit.
-        pending = bot.hold_open_turns()
-        print(f"\nshutting down; {pending} open turn(s) to process")
-        if pending:
+            consecutive_failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A polling loop that exits on one bad cycle is a bot that dies
+            # quietly. Back off and keep going; the durable inbox means nothing
+            # is lost by the delay.
+            consecutive_failures += 1
+            log.exception("poll cycle failed (%d in a row)", consecutive_failures)
+            delay = min(30.0, 2.0 ** min(consecutive_failures, 4))
             try:
-                await asyncio.wait_for(bot.run_turns(), timeout=10)
-            except Exception as exc:  # never let shutdown raising hide the exit
-                logging.getLogger(__name__).warning("final turn pass failed: %s", exc)
-        await bot.stop()
-        store.close()
+                await asyncio.wait_for(stop.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            continue
+        if tick.updates or tick.messages_stored:
+            log.info(
+                "tick: %d updates, %d stored, %d dup, %d unauth, %d sends%s",
+                tick.updates, tick.messages_stored, tick.duplicates,
+                tick.unauthorized, tick.sends_ok,
+                " (paused)" if bot.stats.paused else "",
+            )
+
+    # Close any open debounce window so a message that arrived in the last few
+    # seconds is still decided rather than silently dropped on exit.
+    pending = bot.hold_open_turns()
+    print(f"\nshutting down; {pending} open turn(s) to process")
+    if pending:
+        try:
+            await asyncio.wait_for(bot.run_turns(), timeout=10)
+        except Exception as exc:  # never let shutdown raising hide the exit
+            log.warning("final turn pass failed: %s", exc)
+    await bot.stop()
+    store.close()
     return 0
 
 
