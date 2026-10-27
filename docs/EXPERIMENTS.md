@@ -4,7 +4,7 @@ Everything here was executed on this machine. Where something was **not** run, i
 says so. Reproduce with the commands given.
 
 Environment: Windows 10, Python 3.13.14, pytest 9.1.1.
-Core at `d3ad007` (base `08ead0f`).
+Core at `9a734c4` (base `08ead0f`).
 
 ---
 
@@ -280,7 +280,7 @@ python -m pytest -q
 ```
 
 ```
-98 passed in 20.39s (0:00:20)
+99 passed in 23.23s (0:00:23)
 ```
 
 Distribution and what each file is for:
@@ -292,10 +292,18 @@ Distribution and what each file is for:
 | `test_durability.py` | 24 | dedupe, cursor ordering, three-valued send state, constraints |
 | `test_runtime_path.py` | 7 | proof that the real Runtime path is exercised |
 | `test_recovery.py` | 8 | inbound recovery and its authorization gate |
-| `test_admin.py` | 11 | pause / proactive / purge, CLI `--check` and `--replay` |
+| `test_admin.py` | 12 | pause / proactive / purge, CLI `--check` and `--replay` |
 
 No test sleeps: the clock is injected everywhere it matters. The full suite runs in
-~20s, mostly runtime startup and shutdown.
+~23s, mostly runtime startup and shutdown.
+
+### A correctness note found while reviewing the live loop
+
+The first version of `run_live` `continue`d without polling while paused. That is
+wrong: `getUpdates` only returns updates past the offset and Telegram discards
+unacknowledged batches, so a paused bot would *lose* messages rather than defer
+them. Pausing now keeps ingesting durably and records an `operator_paused` silence
+for every turn (`test_admin.py::test_pause_keeps_recording_but_never_replies`).
 
 ---
 
@@ -317,7 +325,7 @@ Stated explicitly, because the brief warns against claiming more than was measur
 
 ## E9 — What this work changed in Core
 
-Exactly one commit, `d3ad007`, adding `system_prompt` to `Transcript`, `LLMActor`,
+Exactly one commit, `9a734c4`, adding `system_prompt` to `Transcript`, `LLMActor`,
 and `Runtime`. Root cause was a duplicated constant read in three places, so the
 fix moved ownership of the value into `Transcript` rather than adding a parameter
 that three call sites would each have to remember.

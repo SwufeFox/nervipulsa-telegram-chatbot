@@ -165,7 +165,7 @@ app/
   prompts/group_agent.md   the agent profile (system prompt)
   fixtures.py       synthetic chat events, no real content
 experiments/        probe_runtime*.py, milestone_a.py, milestone_c.py
-tests/              98 tests
+tests/              99 tests
 docs/               architecture, gaps, contract, experiments
 ```
 

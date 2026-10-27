@@ -30,7 +30,7 @@ security problem: the prompt is where the untrusted-input rule lives.
 scheduler — needs to state who it is. Nothing about the fix mentions a platform.
 
 **Fix**
-Core PR `feat/configurable-agent-profile` (`d3ad007`), branched from `08ead0f`:
+Core PR `feat/configurable-agent-profile` (`9a734c4`), branched from `08ead0f`:
 `system_prompt` keyword on `Transcript`, `LLMActor`, `Runtime`. `Transcript` owns
 the value and `_system_message()` is the single source for all three read sites, so
 size accounting, the projected view, and the compaction floor cannot disagree.

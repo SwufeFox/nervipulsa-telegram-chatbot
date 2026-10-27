@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Pinned to a verified Core commit, never a floating branch. See
     # docs/INTEGRATION_CONTRACT.md before changing this line.
-    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@d3ad007",
+    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@9a734c4",
 ]
 
 [project.optional-dependencies]

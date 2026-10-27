@@ -374,6 +374,27 @@ class GroupAgent:
         history = self.store.recent_messages(
             turn.chat_id, topic_id=turn.topic_id, limit=self.config.history_messages
         )
+        # A paused bot still ingests (see main.run_live) but never replies.
+        if self.stats.paused:
+            decision = Decision.silent(
+                reason="operator_paused", trigger=TRIGGER_PROACTIVE,
+                confidence=0.0, detail={"messages": len(turn.messages)},
+            )
+            self.store.open_turn(
+                turn_id=turn.turn_id, chat_id=turn.chat_id, topic_id=turn.topic_id,
+                first_message=turn.first_message_id, last_message=turn.last_message_id,
+                trigger=decision.trigger,
+            )
+            self.store.record_decision(
+                decision_id=decision_id, chat_id=turn.chat_id, topic_id=turn.topic_id,
+                turn_id=turn.turn_id, outcome=decision.outcome,
+                reason=decision.reason, detail=decision.detail, trigger=decision.trigger,
+            )
+            self.store.close_turn(turn.turn_id, "silent")
+            log.info("silent chat=%s turn=%s reason=operator_paused",
+                     turn.chat_id, turn.turn_id)
+            return decision
+
         context = self._context(turn, history)
         decision = self.policy.decide(context)
 
@@ -627,6 +648,15 @@ class GroupAgent:
     # -- admin -------------------------------------------------------------
 
     ADMIN_COMMANDS = ("pause", "resume", "proactive", "stats", "purge", "help")
+
+    def hold_open_turns(self) -> int:
+        """Close every open debounce window so shutdown can answer them.
+
+        The caller then runs `run_turns()`. Returns how many windows were closed.
+        """
+        closed = self.turns.flush()
+        self._pending_turns.extend(closed)
+        return len(closed)
 
     def _handle_admin(self, message: StoredMessage, tick: TickStats) -> bool:
         """Handle an admin command. Returns True if the message was consumed.

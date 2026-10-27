@@ -52,6 +52,35 @@ def test_admin_can_pause_and_resume(store, config, transport, clock, system_prom
     run(body())
 
 
+def test_pause_keeps_recording_but_never_replies(store, config, transport, clock,
+                                                 system_prompt) -> None:
+    """A paused bot must still ingest (Telegram drops unacked batches) and must
+    record a silence for every turn it sees."""
+    bot, agent = make_bot(store, config, transport, clock, system_prompt)
+
+    async def body() -> None:
+        await bot.start()
+        bot.pause()
+        await bot.step([fixtures.mention()])
+        clock.advance(3.0)
+        decisions = await bot.run_turns()
+        assert decisions and decisions[0].reason == "operator_paused"
+        assert transport.sends == [], "a paused bot replied"
+        assert agent.calls == [], "a paused bot called the model"
+        assert store.stats()["messages"] == 1, "a paused bot dropped the message"
+        rows = store._query("SELECT reason FROM decisions")
+        assert rows[0]["reason"] == "operator_paused"
+        # After resume it answers normally again.
+        bot.resume()
+        await bot.step([fixtures.reply_to_bot()])
+        clock.advance(3.0)
+        await bot.run_turns()
+        assert len(transport.sends) == 1
+        await bot.stop()
+
+    run(body())
+
+
 def test_admin_can_disable_proactive(store, config, transport, clock, system_prompt) -> None:
     config.proactive_enabled = True
     bot, agent = make_bot(store, config, transport, clock, system_prompt)

@@ -9,14 +9,14 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
-commit      d3ad007   feat: let a host application own its system prompt
+commit      9a734c4   feat: let a host application own its system prompt
 ```
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
 1. apply the new commit in the Core working tree;
 2. run `python -m pytest -q` in Core (currently 167 passed);
-3. run `python -m pytest -q` here (currently 98 passed);
+3. run `python -m pytest -q` here (currently 99 passed);
 4. run `python experiments/milestone_a.py` and `milestone_c.py` and compare the
    recorded observations in `EXPERIMENTS.md`;
 5. update the commit id above and the compatibility table below.
@@ -28,7 +28,7 @@ the shared contract updated **before** either side is merged.
 
 | Application | Core commit | Core suite | Notes |
 | --- | --- | --- | --- |
-| 0.1.0 | `d3ad007` | 167 passed / 143.96s | first working integration |
+| 0.1.0 | `9a734c4` | 167 passed / 143.96s | first working integration |
 
 ## Depends on (public, stable)
 
@@ -67,7 +67,7 @@ Runtime(
     journal_path=None,
     echo=None,
     tool_catalog: ToolCatalog | None = None,
-    system_prompt: str = SYSTEM_PROMPT,     # added by d3ad007
+    system_prompt: str = SYSTEM_PROMPT,     # added by 9a734c4
 )
 await runtime.start()
 runtime.submit_text(text) -> Delivery       # Delivery: .accepted, .event_id, .reason

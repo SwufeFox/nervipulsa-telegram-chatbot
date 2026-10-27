@@ -284,8 +284,8 @@ def test_a_reply_generated_while_superseded_is_dropped(store, config, transport,
 # -- Requirement 6: no repeats, no self-loops ------------------------------
 
 
-def test_unknown_tool_free_catalog_never_repeats_identical_text(store, config, transport,
-                                                               clock, system_prompt) -> None:
+def test_identical_reply_is_not_sent_twice(store, config, transport, clock,
+                                           system_prompt) -> None:
     """The model repeats itself; the duplicate guard drops the second send."""
     bot, agent = make_bot(store, config, transport, clock, system_prompt,
                           responder=lambda p: "the cron runs in UTC")
@@ -465,8 +465,10 @@ def test_admin_can_disable_proactive_at_runtime(store, config, transport, clock,
         assert bot.policy.config.proactive_enabled is False
         bot.set_proactive(True)
         assert bot.policy.config.proactive_enabled is True
+        assert bot.stats.proactive_enabled is True, "the switch did not reach the stats"
         bot.set_proactive(False)
         assert bot.policy.config.proactive_enabled is False
+        assert bot.stats.proactive_enabled is False
         await bot.stop()
 
     run(body())

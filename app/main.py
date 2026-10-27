@@ -214,27 +214,37 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
     print(f"{config.bot_name} is listening on chat(s) {list(config.allowed_chat_ids)}; "
           f"proactive={'on' if config.proactive_enabled else 'off'}")
 
+    # Pausing must not stop polling. `getUpdates` only returns updates newer than
+    # the offset, and Telegram drops unacknowledged batches after ~24h; skipping
+    # the poll while paused would lose messages, not defer them. So a paused bot
+    # keeps ingesting durably and simply decides "silent" for every turn.
     offset = store.get_update_cursor()
+    pause_logged = False
     try:
         while not stop.is_set():
-            if bot.stats.paused:
-                await asyncio.sleep(1)
-                continue
+            if bot.stats.paused and not pause_logged:
+                print("paused: still recording messages, will not reply")
+                pause_logged = True
+            elif not bot.stats.paused:
+                pause_logged = False
             offset, tick = await bot.poll_once(offset=offset)
             if tick.updates or tick.messages_stored:
                 logging.getLogger(__name__).info(
-                    "tick: %d updates, %d stored, %d dup, %d unauth, %d sends",
+                    "tick: %d updates, %d stored, %d dup, %d unauth, %d sends%s",
                     tick.updates, tick.messages_stored, tick.duplicates,
                     tick.unauthorized, tick.sends_ok,
+                    " (paused)" if bot.stats.paused else "",
                 )
     finally:
-        print("\nshutting down; flushing open turns")
-        for turn in bot.turns.flush():
-            bot._pending_turns.append(turn)
-        try:
-            await asyncio.wait_for(bot.run_turns(), timeout=10)
-        except Exception:
-            pass
+        # Close any open debounce window so a message that arrived in the last
+        # few seconds is still decided rather than silently dropped on exit.
+        pending = bot.hold_open_turns()
+        print(f"\nshutting down; {pending} open turn(s) to process")
+        if pending:
+            try:
+                await asyncio.wait_for(bot.run_turns(), timeout=10)
+            except Exception as exc:  # never let shutdown raising hide the exit
+                logging.getLogger(__name__).warning("final turn pass failed: %s", exc)
         await bot.stop()
         store.close()
     return 0
