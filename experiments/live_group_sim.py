@@ -177,7 +177,7 @@ class Sim:
 
 async def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="group/solstice")
+    parser.add_argument("--model", default="opencode-go/muse-spark-1.3-contributor")
     parser.add_argument("--proactive", action="store_true")
     parser.add_argument("--debounce", type=float, default=3.5)
     parser.add_argument("--scenario", default="main",

@@ -152,11 +152,17 @@ transcript or Python namespace; production reliability; multi-process safety. Se
 
 ## Known risk: proactive participation can invent specifics
 
-Measured, not hypothetical. In the simulated group, one model (`glm-5.3`) took a
-turn that scored 0.7 and volunteered that "that migration was supposed to run
-before the deploy" — nobody had said that. The scorer correctly judged the turn
-*looked* worth joining; it cannot judge whether the model will join it honestly.
-A different model (`deepseek-v4.1-flash`) stayed silent on the same turn.
+Measured, not hypothetical. The same scored-0.7 turn ("wait / the migration
+script / what about it") drew three different responses from three models:
+
+| model | what it did |
+| --- | --- |
+| `deepseek-v4.1-flash` | stayed silent |
+| `muse-spark-1.3-contributor` | "Hope it's nothing serious." — harmless filler |
+| a third model | invented that the migration was supposed to run before the deploy |
+
+The scorer correctly judged the turn *looked* worth joining. It cannot judge what
+the model does once it joins — fabricate a premise, emit filler, or say nothing.
 
 Full comparison in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) E7b.
 

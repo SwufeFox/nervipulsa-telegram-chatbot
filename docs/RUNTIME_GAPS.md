@@ -247,6 +247,8 @@ the process, not by the runtime releasing memory.
 
 ---
 
+---
+
 ## G8 — Telegram delivery reliability · **WONTFIX-IN-CORE**
 
 Nervipulsa's durable effect protocol covers `python_host` execution
@@ -255,3 +257,44 @@ must not be read as if it did. The application owns a separate outbox with three
 terminal states and treats UNKNOWN as terminal. This belongs in the application
 permanently: `chat_id` and Telegram error codes must never enter a generic runtime
 protocol.
+
+---
+
+## G9 — No way to give an agent per-scope identity without a Runtime per scope · **OPEN**
+
+**Evidence**
+`experiments/live_group_sim.py --scenario topics`, first run: asked in forum topic
+B "what did we just say about the timeout?", the bot answered from topic A's
+transcript.
+
+`GroupAgent` cached its agent by `chat_id`, so every topic in one forum shared a
+single `Runtime` and therefore one `Transcript`, which is append-only for the
+life of a Runtime. Fixed on the application side by keying on `(chat_id,
+topic_id)`.
+
+**Failed scenario**
+Any application with a hierarchical conversation — forum topics, threads, email
+subjects, ticket sub-conversations — either shares one model view across all of
+them, or pays a full `Runtime` (with a Python worker, see G2) per branch.
+
+**Generic?** Yes. "One conversation" is not always one chat, and the runtime gives
+an application no way to partition `Transcript` or to tell an activation which
+partition it belongs to. This is the same shape as G6: the runtime has exactly one
+implicit conversation per session.
+
+**Workaround in use**
+One `Runtime` per `(chat_id, topic_id)`. Correct, but it multiplies G2: a forum
+with twelve active topics holds twelve Python workers. For the small authorized
+chat set this version supports, acceptable. It would not be acceptable at scale.
+
+**Minimal Core interface it would need**
+Either a `partition`/`scope` key on `submit_text` and `Transcript.project` that
+splits the transcript into independent views within one runtime, or an explicit
+"build me a runtime with no Python host" option (G2) so that per-scope runtimes
+are cheap. The second is smaller and already justified by G2; this gap makes the
+cost of *not* doing it concrete.
+
+Not attempted: the workaround is correct for the supported deployment, and the
+brief is explicit that Core changes need a failure the application cannot handle.
+
+---
