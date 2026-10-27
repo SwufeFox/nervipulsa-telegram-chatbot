@@ -159,8 +159,9 @@ class GroupAgent:
         self.bot_user_id = bot_user_id
         self._clock = clock
         self._sleep = sleep
-        self._agents: dict[int, AgentAdapter] = {}
-        self._agent_failures: dict[int, str] = {}
+        # Keyed by (chat_id, topic_id): a forum topic gets its own runtime.
+        self._agents: dict[tuple[int, int | None], AgentAdapter] = {}
+        self._agent_failures: dict[tuple[int, int | None], str] = {}
         # Turns closed by the size cap during ingest, waiting for run_turns.
         self._pending_turns: list[Turn] = []
         # Set by an admin command; surfaced in diagnostics so a pause is visible.
@@ -215,11 +216,12 @@ class GroupAgent:
             )
 
     async def stop(self) -> None:
-        for chat_id, agent in list(self._agents.items()):
+        for (chat_id, topic_id), agent in list(self._agents.items()):
             try:
                 await agent.stop()
             except Exception as exc:
-                log.warning("agent for chat %s failed to stop: %s", chat_id, exc)
+                log.warning("agent for chat %s topic %s failed to stop: %s",
+                            chat_id, topic_id, exc)
         self._agents.clear()
         self._started = False
 
@@ -441,10 +443,11 @@ class GroupAgent:
         history: Sequence[StoredMessage],
         tick: TickStats,
     ) -> None:
-        agent = await self._agent_for(turn.chat_id)
+        agent = await self._agent_for(turn.chat_id, turn.topic_id)
         if agent is None:
             self.store.close_turn(turn.turn_id, "silent")
-            log.warning("no agent available for chat %s", turn.chat_id)
+            log.warning("no agent available for chat %s topic %s",
+                        turn.chat_id, turn.topic_id)
             return
 
         prompt = build_prompt(
@@ -626,23 +629,34 @@ class GroupAgent:
             now=now,
         )
 
-    async def _agent_for(self, chat_id: int) -> AgentAdapter | None:
-        existing = self._agents.get(chat_id)
+    async def _agent_for(self, chat_id: int, topic_id: int | None) -> AgentAdapter | None:
+        """One agent per (chat, topic).
+
+        Keying by chat alone would let two forum topics share one `Transcript`,
+        which is the runtime's model view and is append-only for the life of a
+        Runtime. A live simulation caught exactly that: asked in topic B "what did
+        we just say about the timeout", the bot answered from topic A's history.
+        The application's store already scopes by topic; the agent must match it.
+        """
+        key = (chat_id, topic_id)
+        existing = self._agents.get(key)
         if existing is not None:
             return existing
+        suffix = f"chat_{chat_id}" if topic_id is None else f"chat_{chat_id}_topic_{topic_id}"
         spec = AgentSpec(
             chat_id=chat_id,
-            workspace=Path(self.config.workspace) / f"chat_{chat_id}",
+            workspace=Path(self.config.workspace) / suffix,
             system_prompt=self.system_prompt,
         )
         try:
             agent = self._agent_factory(spec)
             await agent.start()
         except Exception as exc:
-            self._agent_failures[chat_id] = str(exc)
-            log.exception("could not start an agent for chat %s", chat_id)
+            self._agent_failures[key] = str(exc)
+            log.exception("could not start an agent for chat %s topic %s",
+                          chat_id, topic_id)
             return None
-        self._agents[chat_id] = agent
+        self._agents[key] = agent
         return agent
 
     # -- admin -------------------------------------------------------------
@@ -718,11 +732,11 @@ class GroupAgent:
         data["config"] = self.config.describe()
         data["store"] = self.store.stats()
         data["agents"] = {
-            str(chat_id): {
-                "failed": self._agent_failures.get(chat_id),
+            f"{chat_id}" if topic_id is None else f"{chat_id}/topic_{topic_id}": {
+                "failed": self._agent_failures.get((chat_id, topic_id)),
                 "stats": getattr(agent, "stats", lambda: {})() if hasattr(agent, "stats") else {},
             }
-            for chat_id, agent in self._agents.items()
+            for (chat_id, topic_id), agent in self._agents.items()
         }
         data["open_turns"] = [list(key) for key in self.turns.open_keys()]
         data["last_admin_action"] = self._admin_note

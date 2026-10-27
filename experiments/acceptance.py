@@ -280,7 +280,8 @@ async def main() -> int:
         if verdict != "PASS":
             print(f"  FAILED: {name} — {evidence}")
     print("\nNot measured here (see docs/EXPERIMENTS.md E8): live Telegram API,")
-    print("real model provider, hosted CI, multi-process deployment.")
+    print("hosted CI, multi-process deployment. A real model *was* exercised by")
+    print("experiments/live_group_sim.py (magpie); the suite itself stays offline.")
     return 0 if passed == len(ROWS) else 1
 
 

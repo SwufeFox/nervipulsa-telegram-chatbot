@@ -249,6 +249,98 @@ class _NullTransport:
         return {"ok": True, "result": {"message_id": 1}}
 
 
+def test_two_forum_topics_get_separate_runtimes(tmp_path: Path, config, clock,
+                                                system_prompt) -> None:
+    """A live simulation caught this: keying agents by chat alone let topic B
+    answer from topic A's transcript. One runtime per (chat, topic)."""
+    created: dict[str, NervipulsaAgent] = {}
+
+    def factory(spec):
+        key = str(spec.workspace)
+        agent = NervipulsaAgent(
+            settings=Settings(model="scripted", workspace=str(spec.workspace),
+                              max_timeout=30, default_timeout=30),
+            workspace=spec.workspace, system_prompt=spec.system_prompt,
+            backend=PromptsSeenBackend(), timeout=20,
+        )
+        created[key] = agent
+        return agent
+
+    store = Store(tmp_path / "bot.sqlite3")
+    bot = GroupAgent(
+        config=config, store=store, client=TelegramClient(_NullTransport()),
+        system_prompt=system_prompt, agent_factory=factory,
+        turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
+        bot_user_id=fixtures.ALMA, clock=clock,
+    )
+
+    async def body() -> None:
+        await bot.start()
+        await bot.step([
+            fixtures.message(update_id=1, message_id=1, sender_id=fixtures.ALICE,
+                             username="alice", text="Alma what is the deploy timeout?",
+                             topic_id=fixtures.TOPIC_A),
+            fixtures.message(update_id=2, message_id=2, sender_id=fixtures.CAROL,
+                             username="carol", text="Alma what did we just say?",
+                             topic_id=fixtures.TOPIC_B),
+        ])
+        clock.advance(3.0)
+        await bot.step([])
+
+        assert len(created) == 2, f"expected two runtimes, got {list(created)}"
+        first, second = created.values()
+        assert first is not second
+        assert first.runtime.bus.session_id != second.runtime.bus.session_id
+        assert first.runtime.actor.transcript is not second.runtime.actor.transcript
+        # Neither transcript contains the other topic's prompt.
+        for agent, forbidden in ((first, "what did we just say"),
+                                 (second, "deploy timeout")):
+            rendered = json.dumps(agent.runtime.actor.transcript.messages,
+                                  ensure_ascii=False)
+            assert forbidden not in rendered, f"cross-topic leak: {forbidden!r}"
+        await bot.stop()
+
+    run(body())
+    store.close()
+
+
+def test_same_topic_reuses_its_runtime(tmp_path: Path, config, clock,
+                                      system_prompt) -> None:
+    """Reuse must still happen, or every message would start a new worker."""
+    created: list[str] = []
+
+    def factory(spec):
+        created.append(str(spec.workspace))
+        return NervipulsaAgent(
+            settings=Settings(model="scripted", workspace=str(spec.workspace),
+                              max_timeout=30, default_timeout=30),
+            workspace=spec.workspace, system_prompt=spec.system_prompt,
+            backend=PromptsSeenBackend(), timeout=20,
+        )
+
+    store = Store(tmp_path / "bot.sqlite3")
+    bot = GroupAgent(
+        config=config, store=store, client=TelegramClient(_NullTransport()),
+        system_prompt=system_prompt, agent_factory=factory,
+        turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
+        bot_user_id=fixtures.ALMA, clock=clock,
+    )
+
+    async def body() -> None:
+        await bot.start()
+        await bot.step([fixtures.mention()])
+        clock.advance(3.0)
+        await bot.step([])
+        await bot.step([fixtures.reply_to_bot()])
+        clock.advance(3.0)
+        await bot.step([])
+        assert len(created) == 1, f"a second runtime was created: {created}"
+        await bot.stop()
+
+    run(body())
+    store.close()
+
+
 def test_transcript_grows_only_with_what_the_runtime_was_given(tmp_path: Path,
                                                                config, transport, clock,
                                                                system_prompt) -> None:
