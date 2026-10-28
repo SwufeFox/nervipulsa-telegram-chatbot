@@ -9,12 +9,33 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
+pinned      7618bd0   (the newest commit that is on origin)
+
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
             13c75ec   configurable output-token cap
-            1eb558ca3a4c3b1cade8db71bddf41375ae89eb6   fix: preserve retry activation state
-            8498fb400d3b53d86da580c93b434bf11df3fa3e   feat: structured observations + pre-tool commit hook
+            1eb558c   fix: preserve retry activation state
+            8498fb4   feat: structured observations + pre-tool commit hook
+            a6f102f   feat: restore the model view from the last committed transcript
+            9e8e1a3   docs: clarify transcript restore deduplication limits
+            7618bd0   fix: surface corrupt transcript snapshots
+            5f65658   fix: a malformed response must pause the actor, not kill it
+                      ^ LOCAL ONLY: bump `pyproject.toml` to this commit in the
+                        same push that publishes it, or a fresh clone fails to
+                        resolve the dependency.
 ```
+
+`5f65658` is what this working tree runs against. `pyproject.toml` still pins
+`7618bd0` because that is the newest commit `origin` can actually serve; pinning
+an unpushed commit makes `pip install -e .` fail for anyone else.
+
+### Why the newer commits matter
+
+| Commit | What breaks without it |
+| --- | --- |
+| `a6f102f` | the agent forgets the whole conversation on restart |
+| `7618bd0` | a corrupt snapshot is reported as "no history", so memory loss looks like a fresh start |
+| `5f65658` | one malformed model response kills the actor task; every later turn in that runtime is dead and reported only as a timeout |
 
 Core features consumed by this application:
 
@@ -25,6 +46,9 @@ Core features consumed by this application:
 | `13c75ec` | `Settings.max_output_tokens` / `ModelRequest.max_output_tokens` |
 | `1eb558c` | retired `agent.retry` no longer produces a second activation; a recovered activation no longer keeps its stale pause error |
 | `8498fb4` | `Runtime.submit_observation(mapping)` admits a bounded structured observation and projects it as a `runtime_event` with its event id; `Runtime(..., response_commit_hook=)` runs after response validation and before recording or dispatching tools, and a raising hook pauses as `response_commit_failed`; observations reset the between-input activation budget while internal events stay capped |
+| `a6f102f` | `Runtime(..., session_id=)` + `restore_transcript()` reload the last committed model view; only the transcript is restored - no mailbox, activation ledger, Python namespace or pending effect |
+| `7618bd0` | `journal.latest_transcript_snapshot()` raises on a corrupt or structurally invalid snapshot instead of returning None, and validates message/event list shapes |
+| `5f65658` | `LLMActor` type-checks a `ModelResponse` before validating its contents; a bad field pauses that activation as `response_invalid` instead of raising inside the actor task |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
