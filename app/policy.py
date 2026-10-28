@@ -121,6 +121,7 @@ class TurnContext:
     last_bot_reply_text: str | None = None
     replies_last_hour: int = 0
     now: float = 0.0
+    bot_username: str = ""
 
     def __post_init__(self) -> None:
         if not self.now:
@@ -184,7 +185,7 @@ class ParticipationPolicy:
 
         # Check for self-reply loop before anything else can approve a reply.
         last = substantive[-1]
-        mentions = _mentions(last.text, context.bot_name)
+        mentions = _mentions(last.text, context.bot_name, context.bot_username)
         replies_to_bot = _is_bot_sender(context, last) is False and last.reply_to_bot
         if not mentions and not replies_to_bot:
             if context.last_bot_message_at is not None:
@@ -209,7 +210,7 @@ class ParticipationPolicy:
                     reason=REASON_OTHER_BOT, trigger=TRIGGER_MENTION,
                     confidence=0.0, detail={"message_id": message.message_id},
                 )
-            if _mentions(message.text, context.bot_name):
+            if _mentions(message.text, context.bot_name, context.bot_username):
                 return Decision.reply(
                     reason=REASON_MENTION, trigger=TRIGGER_MENTION, confidence=1.0,
                     detail={"message_id": message.message_id, "messages": len(turn.messages)},
@@ -319,7 +320,7 @@ def proactive_score(context: TurnContext) -> tuple[float, dict[str, float]]:
     combined = " ".join(m.text for m in substantive)
 
     question = QUESTION_RE.search(combined) is not None
-    address = _mentions(combined, context.bot_name)
+    address = any(_mentions(m.text, context.bot_name, context.bot_username) for m in substantive)
     topic = _topic_overlap(combined, context.last_bot_reply_text)
     unanswered = not _answered_by_member(context)
     freshness = _freshness(context)
@@ -430,7 +431,7 @@ def _is_addressed_to_other_bot(context: TurnContext, message: StoredMessage) -> 
     other = re.findall(r"@([A-Za-z0-9_]{4,32})", message.text)
     if not other:
         return False
-    ours = context.bot_name.lower().lstrip("@")
+    ours = (context.bot_username or context.bot_name).lower().lstrip("@")
     return all(name.lower() != ours for name in other)
 
 
@@ -445,24 +446,21 @@ _THIRD_PERSON_AFTER = (
 )
 
 
-def _mentions(text: str, bot_name: str) -> bool:
-    """Is the bot being addressed, not merely named?
-
-    The previous version answered any occurrence of the name, so a group member
-    narrating "先按 Alma 说的试试" got a bot reply about the deploy — the bot
-    interrupted a conversation that was about it, not with it. An explicit `@`
-    is unambiguous and always counts; a bare name only counts when nothing
-    follows that marks it as third person.
-    """
-    if not bot_name:
+def _mentions(text: str, bot_name: str, bot_username: str = "") -> bool:
+    """Recognize an exact @username or a bare name addressed to the bot."""
+    username = (bot_username or bot_name).lstrip("@")
+    if username and re.search(
+        rf"(?<![A-Za-z0-9_@])@{re.escape(username)}(?![A-Za-z0-9_])",
+        text, re.IGNORECASE,
+    ):
+        return True
+    name = bot_name.lstrip("@")
+    if not name:
         return False
-    name = re.escape(bot_name.lstrip("@"))
-    pattern = rf"(?<![A-Za-z0-9_])(@)?{name}(?![A-Za-z0-9_])(.{{0,16}})"
+    pattern = rf"(?<![A-Za-z0-9_@]){re.escape(name)}(?![A-Za-z0-9_])"
     for match in re.finditer(pattern, text, re.IGNORECASE):
-        at_sign, following = match.group(1), match.group(2) or ""
-        if at_sign:
-            return True
-        if not any(word in following for word in _THIRD_PERSON_AFTER):
+        following = text[match.end():match.end() + 16].lstrip()
+        if not following.startswith(_THIRD_PERSON_AFTER):
             return True
     return False
 

@@ -26,6 +26,9 @@ from tests.test_behavior import make_bot
     "@Alma",
     "alma 你说呢",
     "Alma 你怎么看",
+    "Alma 你觉得他说的对吗？",
+    "Alma，你怎么看它的配置？",
+    "Alma 你说的对吗？",
 ])
 def test_an_address_counts(text: str) -> None:
     assert _mentions(text, "Alma") is True
@@ -35,12 +38,57 @@ def test_an_address_counts(text: str) -> None:
     "先按 Alma 说的试试",
     "问一下 Alma 那个方案",
     "Alma 的回答挺准",
+    "Alma 的配置挺好",
     "刚 alice 说的和 Alma 说的一样",
     "按 Alma 的建议改了",
     "Alma 上次提过这个",
 ])
 def test_talk_about_the_bot_does_not_count(text: str) -> None:
     assert _mentions(text, "Alma") is False
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("@Alma_Helper 你怎么看", True),
+    ("@alma_helper 你怎么看", True),
+    ("@Alma 你怎么看", False),
+    ("@Alma_Helper_extra 你怎么看", False),
+    ("先按 Alma 说的试试", False),
+    ("Alma 说的试试，Alma 呢", True),
+])
+def test_configured_username_and_multiple_names(text: str, expected: bool) -> None:
+    assert _mentions(text, "Alma", "Alma_Helper") is expected
+
+
+@pytest.mark.parametrize(("text", "should_reply"), [
+    ("@Alma_Helper 你怎么看", True),
+    ("@Alma 你怎么看", False),
+    ("先按 Alma 说的试试", False),
+    ("Alma 的配置挺好", False),
+    ("Alma 你觉得他说的对吗？", True),
+    ("Alma，你怎么看它的配置？", True),
+    ("Alma 你说的对吗？", True),
+])
+def test_inbound_username_reaches_policy(
+    text, should_reply, store, config, transport, clock, system_prompt
+) -> None:
+    config.bot_username = "Alma_Helper"
+    bot, agent = make_bot(store, config, transport, clock, system_prompt)
+
+    async def body() -> None:
+        await bot.start()
+        await bot.step([fixtures.message(
+            update_id=502, message_id=502, sender_id=fixtures.BOB,
+            username="bob", text=text,
+        )])
+        clock.advance(3.0)
+        await bot.step([])
+        assert bool(agent.calls) is should_reply
+        assert bool(transport.sends) is should_reply
+        await bot.stop()
+
+    import asyncio
+    asyncio.run(body())
+
 
 
 def test_third_person_mention_does_not_produce_a_reply(

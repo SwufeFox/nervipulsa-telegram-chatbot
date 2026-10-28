@@ -216,6 +216,87 @@ def test_failed_retry_of_old_pause_does_not_wait_for_full_timeout(tmp_path: Path
     run(body())
 
 
+def test_input_waits_for_inflight_explicit_retry(tmp_path: Path, system_prompt) -> None:
+    from nervipulsa.ports import ProviderFailure
+
+    async def body() -> None:
+        retry_started = asyncio.Event()
+        release_retry = asyncio.Event()
+        calls = []
+
+        async def respond(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise ProviderFailure("response_unknown", "unknown outcome")
+            if len(calls) == 2:
+                retry_started.set()
+                await release_retry.wait()
+                return ModelResponse(content="old answer", model="scripted")
+            return ModelResponse(content="new answer", model="scripted")
+
+        agent = build(tmp_path, system_prompt, ScriptedBackend(respond))
+        await agent.start()
+        try:
+            first = await agent.ask(chat_id=1, prompt="old message", tag="old")
+            assert first.detail["error_kind"] == "response_unknown"
+            agent.runtime.retry()
+            await asyncio.wait_for(retry_started.wait(), 2)
+            task = asyncio.create_task(agent.ask(chat_id=1, prompt="new message", tag="new"))
+            await asyncio.sleep(0.2)
+            assert not task.done()
+            release_retry.set()
+            result = await asyncio.wait_for(task, 2)
+            assert result.status == "committed"
+            assert result.text == "new answer"
+            assert result.activation_id != first.activation_id
+            activation = next(a for a in agent.runtime.actor.activations if a.id == result.activation_id)
+            assert result.detail["input_event_id"] in activation.input_event_ids
+            assert any(m.get("content") == "new message" for m in calls[-1].messages)
+        finally:
+            release_retry.set()
+            await agent.stop()
+
+    run(body())
+
+
+def test_inflight_retry_that_fails_again_reports_pause(tmp_path: Path, system_prompt) -> None:
+    from nervipulsa.ports import ProviderFailure
+
+    async def body() -> None:
+        retry_started = asyncio.Event()
+        release_retry = asyncio.Event()
+        calls = 0
+
+        async def respond(request):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                retry_started.set()
+                await release_retry.wait()
+            raise ProviderFailure("request_not_sent", "offline")
+
+        agent = build(tmp_path, system_prompt, ScriptedBackend(respond))
+        await agent.start()
+        try:
+            first = await agent.ask(chat_id=1, prompt="old message", tag="old")
+            agent.runtime.retry()
+            await asyncio.wait_for(retry_started.wait(), 2)
+            task = asyncio.create_task(agent.ask(chat_id=1, prompt="new message", tag="new"))
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            release_retry.set()
+            result = await asyncio.wait_for(task, 2)
+            assert result.status == "paused"
+            assert result.activation_id == first.activation_id
+            assert result.detail["not_this_activation"] is True
+            assert result.text is None
+        finally:
+            release_retry.set()
+            await agent.stop()
+
+    run(body())
+
+
 def test_no_python_execution_ever_happens(tmp_path: Path, config, transport, clock,
                                           system_prompt) -> None:
     agent = build(tmp_path, system_prompt)

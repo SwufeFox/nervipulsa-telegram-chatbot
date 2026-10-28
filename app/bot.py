@@ -712,6 +712,7 @@ class GroupAgent:
             recent_messages=history,
             bot_user_id=self.bot_user_id,
             bot_name=self.config.bot_name,
+            bot_username=self.config.bot_username,
             last_bot_message_at=last_bot_at,
             last_bot_reply_text=last_bot_text,
             replies_last_hour=replies_last_hour,

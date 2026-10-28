@@ -11,7 +11,8 @@ base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
-            13c75ec49de0b6af13370413c83b6eaac81b9991   configurable output-token cap
+            13c75ec   configurable output-token cap
+            1eb558ca3a4c3b1cade8db71bddf41375ae89eb6   fix: preserve retry activation state
 ```
 
 Core features consumed by this application:
@@ -21,12 +22,13 @@ Core features consumed by this application:
 | `9a734c4` | `Runtime(..., system_prompt=)` / `Transcript(system_prompt=)` |
 | `6a300ce` | `Runtime(..., python_host=False)` → `NullPythonHost` |
 | `13c75ec` | `Settings.max_output_tokens` / `ModelRequest.max_output_tokens` |
+| `1eb558c` | retired `agent.retry` no longer produces a second activation; a recovered activation no longer keeps its stale pause error |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
 1. apply the new commit in the Core working tree;
-2. run `python -m pytest -q` in Core (currently 175 passed);
-3. run `python -m pytest -q` here (currently 131 passed);
+2. run `python -m pytest -q` in Core;
+3. run `python -m pytest -q` here;
 4. run `python experiments/milestone_a.py` and `milestone_c.py` and compare the
    recorded observations in `EXPERIMENTS.md`;
 5. update the commit id above and the compatibility table below.
@@ -41,7 +43,8 @@ the shared contract updated **before** either side is merged.
 | 0.1.0 | `9a734c4` | 167 passed / 143.96s | first working integration |
 | 0.1.0 | `6a300ce` | 174 passed / 144.40s | + `python_host=False`; 10 topics → 0 workers |
 | historical working tree | based on `6a300ce` | Core 175 passed; app 131 passed | tests imported the sibling Core checkout with the optional output-token extension |
-| current pin | `13c75ec49de0b6af13370413c83b6eaac81b9991` | not verified by a clean install | includes the output-token extension required by the application |
+| 0.1.0 | `13c75ec` | 175 passed alongside 3 intermittent Windows failures in one full run | configurable output-token cap; clean dependency install verified 2026-10-28 |
+| 0.1.0 | `1eb558ca3a4c3b1cade8db71bddf41375ae89eb6` | 181 passed | fixes retry control-event double activation and stale pause error; verified with the App suite (194 passed) and offline milestones |
 
 ## Depends on (public, stable)
 
