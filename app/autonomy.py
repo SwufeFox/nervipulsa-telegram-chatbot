@@ -259,15 +259,16 @@ class AutonomousLoop:
         if self.max_activations_per_hour is not None:
             used = self.store.count_activations_since(chat_id, hour_ago)
             if used >= self.max_activations_per_hour:
-                return "deferred_budget"
+                return f"activations_per_hour({used}/{self.max_activations_per_hour})"
         if self.min_action_interval_seconds and self.min_action_interval_seconds > 0:
             last = self.store.last_action_at(chat_id)
             if last is not None and now - last < self.min_action_interval_seconds:
-                return "deferred_budget"
+                remaining = int(self.min_action_interval_seconds - (now - last))
+                return f"min_interval({remaining}s left)"
         if self.max_actions_per_hour is not None:
             used = self.store.count_actions_since(chat_id, hour_ago)
             if used >= self.max_actions_per_hour:
-                return "deferred_budget"
+                return f"actions_per_hour({used}/{self.max_actions_per_hour})"
         return None
 
     # -- one autonomous turn ----------------------------------------------
@@ -457,6 +458,7 @@ class AutonomousLoop:
                 continue
             if self._send is None:
                 self.store.finish_action(action_id, "failed", error="no transport")
+                self._report_result(row, action_id, "failed", "no transport")
                 continue
             try:
                 outcome = await self._send(
@@ -467,10 +469,13 @@ class AutonomousLoop:
                 )
             except Exception as exc:
                 # Unknown, not failed: the request may have reached Telegram.
-                self.store.finish_action(action_id, "unknown", error=str(exc)[:500])
+                detail = str(exc)[:500]
+                self.store.finish_action(action_id, "unknown", error=detail)
+                self._report_result(row, action_id, "unknown", detail)
                 continue
             status = getattr(outcome, "status", None)
             name = getattr(status, "value", status)
+            error = getattr(outcome, "error", None)
             if name == "sent":
                 self.actions_sent += 1
                 telegram_id = getattr(outcome, "telegram_message_id", None)
@@ -483,12 +488,46 @@ class AutonomousLoop:
                         sender_label=self.bot_name, sender_id=self.bot_user_id,
                         created_at=self._clock(),
                     )
+                self._report_result(row, action_id, "sent", None)
             elif name == "unknown":
-                self.store.finish_action(action_id, "unknown",
-                                         error=getattr(outcome, "error", None))
+                self.store.finish_action(action_id, "unknown", error=error)
+                self._report_result(row, action_id, "unknown", error)
             else:
-                self.store.finish_action(action_id, "failed",
-                                         error=getattr(outcome, "error", None))
+                self.store.finish_action(action_id, "failed", error=error)
+                self._report_result(row, action_id, "failed", error)
+
+    def _report_result(self, row: Any, action_id: str, status: str,
+                       error: str | None) -> None:
+        """Feed a *surprising* delivery outcome back as an observation.
+
+        Only failures and unconfirmed deliveries become observations. A
+        successful send tells the agent nothing she does not already know -
+        she chose to speak and the tool said it was accepted - and putting it
+        in the stream would wake her on her own message, which is how a bot
+        starts answering itself. The sent message still enters the chat log,
+        so later turns see it as history.
+
+        The two cases that do get reported are exactly the ones that change
+        what she believes about the conversation: a message that failed to
+        send, and one whose delivery is unknown, where the group may be
+        looking at a sentence she thinks never arrived.
+        """
+        if status == "sent":
+            return
+        chat_id = int(row["chat_id"])
+        topic_id = row["topic_id"]
+        try:
+            self.store.record_action_result(
+                action_id=action_id, chat_id=chat_id, topic_id=topic_id,
+                status=status, text=str(row["text"]), error=error,
+            )
+        except Exception:
+            # Recording the outcome must never take down the sender.
+            log.exception("could not record the result of action %s", action_id)
+            return
+        log.warning("action %s ended %s for chat %s: %s",
+                    action_id, status, chat_id, error or "(no detail)")
+        self.note_activity(chat_id, topic_id)
 
 
 class _ActionHandler:

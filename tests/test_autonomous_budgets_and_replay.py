@@ -173,7 +173,9 @@ def test_hourly_activation_budget_defers_instead_of_silencing(tmp_path):
         second = await bot.autonomous_step()
         try:
             assert second and second[0].state == "deferred", second
-            assert second[0].outcome == "deferred_budget"
+            # The reason names which limit bound, so a stuck budget is
+            # diagnosable from the log instead of just "deferred".
+            assert second[0].outcome.startswith("activations_per_hour"), second
             assert len(calls) == 1, "the model ran despite an exhausted budget"
             # Not silent: the observation is still queued for later.
             assert store.pending_observations(
@@ -205,7 +207,7 @@ def test_speak_interval_defers_without_dropping_observations(tmp_path):
             clock.advance(5)
             second = await bot.autonomous_step()
             assert second and second[0].state == "deferred", second
-            assert second[0].outcome == "deferred_budget"
+            assert second[0].outcome.startswith("min_interval"), second
             assert [s["text"] for s in transport.sends] == ["hello"]
             assert store.pending_observations(
                 fixtures.TEST_CHAT, fixtures.TOPIC_A), "input was dropped"
@@ -268,3 +270,89 @@ def test_deferred_scope_is_not_retried_on_every_tick(tmp_path):
             store.close()
 
     run(scenario())
+
+
+# -- cursor identity -------------------------------------------------------
+# A non-forum chat has topic_id NULL, and SQLite treats NULL as distinct from
+# itself inside a UNIQUE/PRIMARY KEY. The cursor table therefore accepted a new
+# row per completed workflow, the read path returned whichever row came first,
+# and the watermark sat at its oldest value forever. In production that showed
+# up as seven cursor rows for one private chat.
+
+
+def test_cursor_collapses_across_many_turns_in_one_scope(tmp_path):
+    store = Store(tmp_path / "cursor.db")
+    try:
+        for i in range(1, 6):
+            store._conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, NULL, 'message', ?, ?)",
+                (i, fixtures.TEST_CHAT, 100.0 + i, '{"text": "x"}'),
+            )
+            store._conn.commit()
+            workflow = store.open_workflow(
+                chat_id=fixtures.TEST_CHAT, topic_id=None,
+                first_sequence=i, last_sequence=i, workflow_id=f"wf{i}",
+            )
+            assert store.close_workflow(workflow, "completed", outcome="silent")
+
+        rows = store._query("SELECT * FROM observation_cursors")
+        assert len(rows) == 1, [dict(row) for row in rows]
+        assert store.observation_cursor(fixtures.TEST_CHAT, None) == 5
+        assert store.pending_observations(fixtures.TEST_CHAT, None) == []
+    finally:
+        store.close()
+
+
+def test_topic_and_non_topic_scopes_stay_separate(tmp_path):
+    store = Store(tmp_path / "scopes.db")
+    try:
+        for topic, seq in ((None, 1), (fixtures.TOPIC_A, 2), (fixtures.TOPIC_B, 3)):
+            store._conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, ?, 'message', ?, ?)",
+                (seq, fixtures.TEST_CHAT, topic, 100.0 + seq, '{"text": "x"}'),
+            )
+            store._conn.commit()
+            workflow = store.open_workflow(
+                chat_id=fixtures.TEST_CHAT, topic_id=topic,
+                first_sequence=seq, last_sequence=seq, workflow_id=f"wf{seq}",
+            )
+            store.close_workflow(workflow, "completed", outcome="silent")
+
+        assert store.observation_cursor(fixtures.TEST_CHAT, None) == 1
+        assert store.observation_cursor(fixtures.TEST_CHAT, fixtures.TOPIC_A) == 2
+        assert store.observation_cursor(fixtures.TEST_CHAT, fixtures.TOPIC_B) == 3
+    finally:
+        store.close()
+
+
+def test_broken_cursor_table_is_migrated_in_place(tmp_path):
+    """A database written before the fix must heal, keeping the newest value."""
+    path = tmp_path / "legacy.db"
+    store = Store(path)
+    store._conn.execute("DROP TABLE observation_cursors")
+    store._conn.executescript(
+        "CREATE TABLE observation_cursors ("
+        " chat_id INTEGER NOT NULL, topic_id INTEGER,"
+        " last_processed INTEGER NOT NULL, updated_at REAL NOT NULL,"
+        " PRIMARY KEY (chat_id, topic_id));"
+    )
+    for value in (2, 3, 3, 4, 5):
+        store._conn.execute(
+            "INSERT INTO observation_cursors VALUES (?, NULL, ?, ?)",
+            (fixtures.TEST_CHAT, value, 100.0 + value),
+        )
+    store._conn.commit()
+    store.close()
+
+    reopened = Store(path)
+    try:
+        rows = reopened._query("SELECT * FROM observation_cursors")
+        assert len(rows) == 1, [dict(row) for row in rows]
+        # The greatest watermark wins: never roll progress backwards.
+        assert reopened.observation_cursor(fixtures.TEST_CHAT, None) == 5
+    finally:
+        reopened.close()

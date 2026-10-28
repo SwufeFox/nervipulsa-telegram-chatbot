@@ -79,6 +79,12 @@ class InboundMessage:
     chat_type: str
     chat_title: str
     raw: Mapping[str, Any]
+    # What kind of attachment this was, if any, and the cheapest useful hint
+    # about it (a sticker's emoji, a document's name). Text and caption stay in
+    # `text`; these carry the part a text-only pipeline used to drop on the
+    # floor, so a bare sticker is no longer indistinguishable from silence.
+    media_kind: str = ""
+    media_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -375,6 +381,7 @@ def parse_update(update: Mapping[str, Any]) -> InboundMessage | None:
             reply_to_sender = origin["id"]
 
     date = message.get("date")
+    media_kind, media_hint = _media_of(message)
 
     return InboundMessage(
         update_id=update_id,
@@ -391,7 +398,58 @@ def parse_update(update: Mapping[str, Any]) -> InboundMessage | None:
         chat_type=str(chat.get("type") or ""),
         chat_title=str(chat.get("title") or ""),
         raw=update,
+        media_kind=media_kind,
+        media_hint=media_hint,
     )
+
+
+def _media_of(message: Mapping[str, Any]) -> tuple[str, str]:
+    """Classify an attachment and pull out the cheapest useful hint.
+
+    Only what Telegram already puts in the update: no download, no API call.
+    A sticker's emoji is the whole content of most sticker replies, so losing
+    it turns a deliberate reaction into a blank message.
+
+    Order matters only in that Telegram sends at most one of these per message;
+    the list is ordered by how specific the hint is.
+    """
+    sticker = message.get("sticker")
+    if isinstance(sticker, Mapping):
+        emoji = sticker.get("emoji")
+        parts = [emoji] if isinstance(emoji, str) and emoji else []
+        if sticker.get("is_animated"):
+            parts.append("animated")
+        if sticker.get("is_video"):
+            parts.append("video")
+        pack = sticker.get("set_name")
+        if isinstance(pack, str) and pack:
+            parts.append(f"pack:{pack}")
+        return "sticker", " ".join(parts)
+
+    if isinstance(message.get("photo"), list) and message["photo"]:
+        # The last entry is the largest render Telegram offers.
+        largest = message["photo"][-1]
+        if isinstance(largest, Mapping):
+            width, height = largest.get("width"), largest.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                return "photo", f"{width}x{height}"
+        return "photo", ""
+
+    for kind, keys in (
+        ("animation", ("file_name", "mime_type")),
+        ("video", ("duration", "file_name")),
+        ("video_note", ("duration", "length")),
+        ("voice", ("duration",)),
+        ("audio", ("title", "performer", "duration")),
+        ("document", ("file_name", "mime_type")),
+    ):
+        blob = message.get(kind)
+        if not isinstance(blob, Mapping):
+            continue
+        hints = [str(blob[key]) for key in keys if blob.get(key) not in (None, "")]
+        return kind, " ".join(hints)
+
+    return "", ""
 
 
 def _display_name(user: Mapping[str, Any]) -> str:

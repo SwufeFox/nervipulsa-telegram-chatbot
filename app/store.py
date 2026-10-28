@@ -166,12 +166,22 @@ CREATE INDEX IF NOT EXISTS workflows_scope
 
 -- Continuation watermark per (chat, topic). Only advanced once a workflow has
 -- reached a terminal state, so a crash replays unprocessed observations.
+--
+-- `topic_id` is NULL for a non-forum chat, and SQLite treats NULL as distinct
+-- from itself in a UNIQUE/PRIMARY KEY. `PRIMARY KEY (chat_id, topic_id)` was
+-- therefore not a constraint at all: every upsert inserted a *new* row, the
+-- read path returned whichever came first, and the watermark effectively froze
+-- at the oldest value. A non-NULL scope_key is the identity instead; it is a
+-- stored generated column, so callers keep passing NULL for "no topic".
 CREATE TABLE IF NOT EXISTS observation_cursors (
     chat_id        INTEGER NOT NULL,
     topic_id       INTEGER,
+    scope_key      TEXT    GENERATED ALWAYS AS (
+                       CAST(chat_id AS TEXT) || ':' || COALESCE(CAST(topic_id AS TEXT), '-')
+                   ) STORED,
     last_processed INTEGER NOT NULL,
     updated_at     REAL    NOT NULL,
-    PRIMARY KEY (chat_id, topic_id)
+    UNIQUE (scope_key)
 );
 
 -- Why an observation never made it into a model request. A silent gap here is
@@ -271,6 +281,12 @@ class StoredMessage:
     text: str
     created_at: float
     reply_to_bot: bool = False
+    # Attachment classification; empty for plain text. Not stored in the
+    # `messages` table (its columns are about conversation, not media), but
+    # carried into the observation payload so the agent can tell a sticker
+    # from a silent pause.
+    media_kind: str = ""
+    media_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -305,6 +321,7 @@ class Store:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate_observation_cursors()
         self._conn.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -313,6 +330,41 @@ class Store:
         self._conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
+
+    def _migrate_observation_cursors(self) -> None:
+        """Replace a pre-scope_key cursors table with the keyed one.
+
+        `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a
+        database created before this fix keeps the broken shape: several rows
+        per scope and no usable constraint. Rebuild it once, keeping the
+        greatest watermark per scope (the newest progress, never a regression).
+        """
+        columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(observation_cursors)")
+        }
+        if not columns or "scope_key" in columns:
+            return
+        with self._conn:
+            self._conn.execute("ALTER TABLE observation_cursors RENAME TO observation_cursors_old")
+            self._conn.executescript("""
+CREATE TABLE observation_cursors (
+    chat_id        INTEGER NOT NULL,
+    topic_id       INTEGER,
+    scope_key      TEXT    GENERATED ALWAYS AS (
+                       CAST(chat_id AS TEXT) || ':' || COALESCE(CAST(topic_id AS TEXT), '-')
+                   ) STORED,
+    last_processed INTEGER NOT NULL,
+    updated_at     REAL    NOT NULL,
+    UNIQUE (scope_key)
+);
+""")
+            self._conn.execute(
+                "INSERT INTO observation_cursors (chat_id, topic_id, last_processed, updated_at)"
+                " SELECT chat_id, topic_id, MAX(last_processed), MAX(updated_at)"
+                " FROM observation_cursors_old GROUP BY chat_id, topic_id"
+            )
+            self._conn.execute("DROP TABLE observation_cursors_old")
 
     def _now(self) -> float:
         """Current time on this store's injected clock."""
@@ -401,17 +453,18 @@ class Store:
         return rows
 
     def observation_cursor(self, chat_id: int, topic_id: int | None) -> int:
-        if topic_id is None:
-            rows = self._query(
-                "SELECT last_processed FROM observation_cursors"
-                " WHERE chat_id = ? AND topic_id IS NULL", (chat_id,),
-            )
-        else:
-            rows = self._query(
-                "SELECT last_processed FROM observation_cursors"
-                " WHERE chat_id = ? AND topic_id = ?", (chat_id, topic_id),
-            )
-        return int(rows[0]["last_processed"]) if rows else 0
+        """Newest consumed sequence for one scope, or 0.
+
+        MAX, not the first row: databases created before the scope_key fix can
+        still hold several rows for one scope (NULL topic_id defeated the old
+        primary key), and reading the oldest of those would silently replay a
+        backlog the agent has already seen.
+        """
+        rows = self._query(
+            "SELECT MAX(last_processed) AS latest FROM observation_cursors"
+            " WHERE chat_id = ? AND topic_id IS ?", (chat_id, topic_id),
+        )
+        return int(rows[0]["latest"]) if rows and rows[0]["latest"] is not None else 0
 
     def open_workflow(
         self, *, chat_id: int, topic_id: int | None,
@@ -468,20 +521,64 @@ class Store:
             )
             if state == "completed":
                 cursor = conn.execute(
-                    "SELECT last_processed FROM observation_cursors"
+                    "SELECT MAX(last_processed) AS latest FROM observation_cursors"
                     " WHERE chat_id = ? AND topic_id IS ?",
                     (row["chat_id"], row["topic_id"]),
                 ).fetchone()
-                previous = int(cursor["last_processed"]) if cursor else 0
+                previous = int(cursor["latest"]) if cursor and cursor["latest"] is not None else 0
                 if int(row["last_sequence"]) > previous:
+                    # Conflict target is scope_key, not (chat_id, topic_id):
+                    # a NULL topic_id never conflicts, so the old upsert kept
+                    # appending rows and the watermark stopped advancing.
                     conn.execute(
                         "INSERT INTO observation_cursors (chat_id, topic_id, last_processed, updated_at)"
-                        " VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, topic_id)"
+                        " VALUES (?, ?, ?, ?) ON CONFLICT(scope_key)"
                         " DO UPDATE SET last_processed = excluded.last_processed,"
                         " updated_at = excluded.updated_at",
                         (row["chat_id"], row["topic_id"], row["last_sequence"], self._now()),
                     )
             return True
+
+    def record_action_result(
+        self, *, action_id: str, chat_id: int, topic_id: int | None,
+        status: str, text: str, error: str | None = None,
+    ) -> int:
+        """Put the outcome of our own send back into the observation stream.
+
+        Before this the result lived only in the `actions` table: the agent saw
+        `accepted/pending` when it chose to speak and then never learned
+        whether the message arrived. An `unknown` delivery - a timeout where
+        Telegram may or may not have accepted it - was completely invisible,
+        which is exactly the case where knowing matters most.
+
+        Synthetic update_id: these rows have no Telegram update behind them, so
+        a negative monotonic value keeps the UNIQUE constraint satisfied
+        without ever colliding with a real (always positive) update id.
+        """
+        with self._write() as conn:
+            next_sequence = conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM observation_events"
+            ).fetchone()[0]
+            payload: dict[str, Any] = {
+                "action_id": action_id,
+                "status": status,
+                "text": text[:500],
+            }
+            if status == "unknown":
+                payload["note"] = (
+                    "delivery unconfirmed: the message may already be visible "
+                    "in the group. It is not retried."
+                )
+            if error:
+                payload["error"] = error[:300]
+            conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, ?, 'action_result', ?, ?)",
+                (-int(next_sequence), chat_id, topic_id, self._now(),
+                 json.dumps(payload, ensure_ascii=False)),
+            )
+            return int(next_sequence)
 
     def record_observation_skip(
         self, *, sequence: int, chat_id: int, topic_id: int | None, reason: str,
@@ -552,7 +649,15 @@ class Store:
                 continue
             allowed = row["event_types_json"]
             kinds = json.loads(allowed) if allowed else None
-            if kinds is None or kind in kinds:
+            if kinds is not None and kind in kinds:
+                if self.resolve_wait(str(row["wait_id"]), "satisfied"):
+                    satisfied.append(str(row["wait_id"]))
+            elif kinds is None and kind != "action_result":
+                # An unfiltered wait means "something new from the group". The
+                # agent's own delivery receipt is not that: letting it satisfy
+                # the wait would mean a message she sent wakes the very wait
+                # that was meant to await someone else's answer. Asking for
+                # `action_result` explicitly still works.
                 if self.resolve_wait(str(row["wait_id"]), "satisfied"):
                     satisfied.append(str(row["wait_id"]))
         return satisfied
@@ -867,9 +972,14 @@ class Store:
                  ).fetchone() else "message", self._now(), json.dumps({
                      "message_id": message.message_id, "sender_id": message.sender_id,
                      "sender_label": message.sender_label, "is_bot": message.is_bot,
-                     "text": message.text, "created_at": message.created_at,
-                     "reply_to_bot": message.reply_to_bot,
-                 }, ensure_ascii=False)),
+                    "text": message.text, "created_at": message.created_at,
+                    "reply_to_bot": message.reply_to_bot,
+                    # Only present when there was an attachment, so a plain
+                    # text message keeps its old payload shape.
+                    **({"media": {"kind": message.media_kind,
+                                  "hint": message.media_hint}}
+                       if message.media_kind else {}),
+                }, ensure_ascii=False)),
             )
             inserted = conn.execute(
                 "INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"

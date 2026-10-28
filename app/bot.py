@@ -446,6 +446,8 @@ class GroupAgent:
                 self.bot_user_id is not None
                 and inbound.reply_to_sender_id == self.bot_user_id
             ),
+            media_kind=inbound.media_kind,
+            media_hint=inbound.media_hint,
         )
         if not self.store.record_inbound_message(
             message, update_id=inbound.update_id, payload=_minimal_payload(inbound)
