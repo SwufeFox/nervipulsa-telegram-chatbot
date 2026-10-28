@@ -119,6 +119,8 @@ class NervipulsaAgent:
         timeout: float = 60.0,
         tool_catalog: Any | None = None,
         response_commit_hook: Any | None = None,
+        session_id: str | None = None,
+        restore: bool = False,
     ) -> None:
         if not system_prompt.strip():
             raise ValueError("a non-empty system prompt is required")
@@ -136,6 +138,13 @@ class NervipulsaAgent:
         self._timeout = timeout
         self._tool_catalog = tool_catalog
         self._response_commit_hook = response_commit_hook
+        # A stable session id is what makes the model view survive a restart:
+        # the journal is keyed by it, and a random id per process would make
+        # every conversation start from nothing. Default stays random for
+        # callers that do not want persistence.
+        self._session_id = session_id
+        self._restore = restore
+        self.restore_report: dict[str, Any] | None = None
         self._runtime: Runtime | None = None
         self._lock = asyncio.Lock()
 
@@ -159,9 +168,30 @@ class NervipulsaAgent:
             # bot keeps one runtime per (chat, topic): with a host per runtime,
             # ten forum topics meant ten resident interpreters.
             python_host=False,
+            session_id=self._session_id,
         )
         await runtime.start()
         self._runtime = runtime
+        if self._restore:
+            # Restore only the model view. Mailbox frames, the activation
+            # ledger and any pending effect stay untouched: replaying those
+            # would re-run side effects. Observations the app still has not
+            # consumed are absorbed by the restored `seen` set.
+            try:
+                self.restore_report = runtime.restore_transcript()
+            except Exception:
+                # A restore failure must not silently look like a fresh start:
+                # that would hide broken memory behind plausible behaviour.
+                await runtime.shutdown()
+                self._runtime = None
+                raise
+            if self.restore_report.get("restored"):
+                log.info(
+                    "restored model view for session %s: %s messages, %s ids",
+                    self._session_id,
+                    self.restore_report.get("restored_messages"),
+                    self.restore_report.get("restored_event_ids"),
+                )
         # Fail loudly at startup rather than on the first message. The only
         # acceptable tool set is the closed action catalog: a stray python_exec
         # (or any other executor) here would hand the model arbitrary code in

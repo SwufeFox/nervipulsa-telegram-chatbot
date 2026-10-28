@@ -132,6 +132,8 @@ class AgentSpec:
     system_prompt: str
     tool_catalog: Any = None
     response_commit_hook: Any = None
+    session_id: str | None = None
+    restore: bool = False
 
 
 class GroupAgent:
@@ -569,6 +571,17 @@ class GroupAgent:
     async def _recover_work(self, tick: TickStats) -> None:
         await asyncio.gather(*self._take_recovery(tick))
 
+    def _session_id_for(self, chat_id: int, topic_id: int | None) -> str:
+        """A stable per-scope session id, derived rather than random.
+
+        The journal stores the transcript under this id, so it must not change
+        between restarts. Scope is included because one sqlite journal can
+        serve several chats; sharing an id would leak one group's history into
+        another's model view.
+        """
+        scope = f"chat_{chat_id}" if topic_id is None else f"chat_{chat_id}_topic_{topic_id}"
+        return f"tg_{scope}"
+
     def _tool_catalog_for(self) -> Any:
         """One catalog per agent; the handler is rebound per workflow."""
         if self.autonomy is None:
@@ -996,6 +1009,8 @@ class GroupAgent:
             system_prompt=self.system_prompt,
             tool_catalog=self._tool_catalog_for(),
             response_commit_hook=self._response_hook_for(chat_id, topic_id),
+            session_id=self._session_id_for(chat_id, topic_id),
+            restore=self.autonomy is not None,
         )
         try:
             agent = self._agent_factory(spec)

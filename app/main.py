@@ -81,6 +81,8 @@ def build_agent_factory(config: AppConfig, system_prompt: str, *, offline: bool 
             # snapshots its schema list at construction.
             tool_catalog=getattr(spec, "tool_catalog", None),
             response_commit_hook=getattr(spec, "response_commit_hook", None),
+            session_id=getattr(spec, "session_id", None),
+            restore=getattr(spec, "restore", False),
         )
 
     return factory
