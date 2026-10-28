@@ -28,6 +28,9 @@ def test_batch_call_and_untrusted_outcome_are_safe(caplog):
     class Agent:
         async def observe(self, payload, tag, handler):
             await handler("finish_silently", {}, None, None, None)
+            # `outcome` on a result is not part of the real AgentResult; this
+            # stand-in includes it deliberately, as untrusted text, to prove the
+            # loop neither logs it nor lets it override the tool's own outcome.
             return SimpleNamespace(status="ok", outcome=SECRET, detail={"secret": SECRET})
 
     clock = FakeClock()
@@ -40,7 +43,9 @@ def test_batch_call_and_untrusted_outcome_are_safe(caplog):
     assert "observations=2 seq=1-2" in caplog.text
     assert "backlog_after=0" in caplog.text
     assert "agent call started" in caplog.text
-    assert "outcome=other elapsed_ms=" in caplog.text
+    # The tool decided; the untrusted `outcome` string on the result must not
+    # become the recorded outcome.
+    assert "outcome=silent elapsed_ms=" in caplog.text
     assert "pending_actions=0 waits=0" in caplog.text
     assert SECRET not in caplog.text
     store.close()
@@ -100,7 +105,9 @@ def test_pending_counts_include_created_action_and_wait(caplog):
         async def observe(self, payload, tag, handler):
             await handler("send_message", {"text": SECRET}, None, None, None)
             await handler("wait_for_event", {"purpose": SECRET}, None, None, None)
-            return SimpleNamespace(status="ok", outcome="waiting", detail={})
+            # No `outcome` here on purpose: the real AgentResult does not carry
+            # one either, so the turn's outcome has to come from the tools.
+            return SimpleNamespace(status="ok", detail={})
 
     async def send(**kwargs):
         return SimpleNamespace(status="sent", telegram_message_id=None)
@@ -111,7 +118,10 @@ def test_pending_counts_include_created_action_and_wait(caplog):
     loop = make_loop(store, clock, Agent(), send=send)
     with caplog.at_level(logging.INFO, logger="app.autonomy"):
         run(loop.activate(42, 7))
-    assert "outcome=waiting" in caplog.text
+    # A turn that spoke and *also* armed a wait is reported by what it did to
+    # the chat - it spoke - while the trailing counts show the wait is still
+    # outstanding. The result's own `outcome` no longer overrides this.
+    assert "outcome=speak elapsed_ms=" in caplog.text
     assert "pending_actions=1 waits=1" in caplog.text
     assert "outcome=claimed" in caplog.text
     assert "outcome=sent" in caplog.text

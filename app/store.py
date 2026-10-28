@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS action_result_events (
     sequence INTEGER NOT NULL UNIQUE
 );
 
+-- Observations the application generates on the agent's behalf: a timer it
+-- asked for coming due, or a turn that failed to decide. Keyed so a retried
+-- tick cannot inject the same one twice.
+CREATE TABLE IF NOT EXISTS synthetic_observations (
+    dedupe_key TEXT PRIMARY KEY,
+    sequence   INTEGER NOT NULL UNIQUE
+);
+
 CREATE TABLE IF NOT EXISTS autonomous_responses (
     activation_id TEXT PRIMARY KEY,
     chat_id INTEGER NOT NULL,
@@ -651,6 +659,52 @@ class Store:
         conn.execute("INSERT INTO action_result_events (action_id, sequence) VALUES (?, ?)",
                      (action_id, sequence))
         return sequence
+
+    def append_synthetic_observation(
+        self, *, dedupe_key: str, chat_id: int, topic_id: int | None,
+        kind: str, payload: dict[str, Any],
+    ) -> int | None:
+        """Put an application-generated event into the observation stream.
+
+        Two things depend on this:
+
+        * A timer the agent registered (`wait_until`) must actually produce an
+          activation. Before this, a due timer only re-armed the batch window,
+          and `_batches` discarded it for having no pending observations - so
+          the agent's own "look at this again in two minutes" never fired
+          unless somebody unrelated happened to speak.
+        * The agent must be able to see *why* it is being woken. A bare
+          activation with no new messages would be indistinguishable from a
+          random interruption; the payload carries the purpose it wrote down.
+
+        Idempotent on `dedupe_key`: a tick that runs twice, or a process that
+        restarts between the insert and the wake, cannot inject a duplicate.
+        Returns the sequence, or None when this key was already present.
+        """
+        with self._write(immediate=True) as conn:
+            if conn.execute(
+                "SELECT 1 FROM synthetic_observations WHERE dedupe_key = ?",
+                (dedupe_key,),
+            ).fetchone():
+                return None
+            # Synthetic ids must stay clear of real (always positive) update
+            # ids and of the ones action receipts use.
+            update_id = conn.execute(
+                "SELECT MIN(COALESCE(MIN(update_id), 0), 0) - 1 FROM observation_events"
+            ).fetchone()[0]
+            cursor = conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (update_id, chat_id, topic_id, kind, self._now(),
+                 json.dumps(payload, ensure_ascii=False)),
+            )
+            sequence = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT INTO synthetic_observations (dedupe_key, sequence)"
+                " VALUES (?, ?)", (dedupe_key, sequence),
+            )
+            return sequence
 
     def record_observation_skip(
         self, *, sequence: int, chat_id: int, topic_id: int | None, reason: str,

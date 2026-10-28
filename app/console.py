@@ -268,6 +268,19 @@ class Console:
         paused = getattr(getattr(self.bot, "stats", None), "paused", None)
         if paused is not None:
             extra.append(f"  paused={paused} watching={self._watching_label()}")
+        # What the agent is currently waiting for is part of "where do we
+        # stand": a silent bot with an armed timer is behaving correctly, and
+        # that looks identical to one that is stuck unless it is shown.
+        armed = self.store._query(
+            "SELECT chat_id, topic_id, kind, purpose, due_at, expires_at"
+            " FROM agent_waits WHERE status = 'active' ORDER BY created_at")
+        now = time.time()
+        for row in armed:
+            deadline = row["due_at"] or row["expires_at"]
+            when = (f"due in {_age(float(deadline) - now)}" if deadline
+                    else "no deadline")
+            extra.append(f"  waiting {self._label(int(row['chat_id']), row['topic_id'])}"
+                         f" {row['kind']} {when}: {_clip(row['purpose'], 40)}")
         return list(lines) + extra
 
     def cmd_chats(self, args: Sequence[str]) -> Iterable[str]:

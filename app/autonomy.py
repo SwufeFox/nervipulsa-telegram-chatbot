@@ -253,6 +253,11 @@ class AutonomousLoop:
         dispatched tasks re-arm the wake event on completion.
         """
         now = self._monotonic()
+        # Timers first. `_wake_due` writes the wake as an observation, so doing
+        # it after the batch list is computed would make every timer cost an
+        # extra tick before the agent could act on its own reminder.
+        for wait in self.store.due_waits(self._clock()):
+            self._wake_due(wait)
         if force:
             ready = list(self._batch_started)
         else:
@@ -275,8 +280,6 @@ class AutonomousLoop:
 
             task.add_done_callback(_finished)
             tasks.append(task)
-        for wait in self.store.due_waits(self._clock()):
-            self._wake_due(wait)
         if await_tasks and tasks:
             # Gather, not sequential awaits: two topics must be able to wait on
             # the model at the same time. Per-topic ordering still comes from
@@ -292,9 +295,67 @@ class AutonomousLoop:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     def _wake_due(self, wait: Any) -> None:
-        """A timer is a reason to look again, not permission to speak."""
+        """A timer the agent registered has come due: deliver it as input.
+
+        Before this, a due timer only re-armed the batch window, and `_batches`
+        threw that window away for having no pending observations. So
+        `wait_until` was decoration: the agent's own "look again in two minutes"
+        fired only if somebody unrelated happened to speak, and the wait row was
+        never resolved, so `due_waits` returned it on every tick forever - the
+        scheduler woke, found nothing to do, and woke again.
+
+        Two fixes, in this order on purpose:
+
+        1. Write the wake as a durable observation *first*. If the process dies
+           before the wait is resolved, the next tick re-attempts it and the
+           dedupe key keeps the wake from appearing twice.
+        2. Resolve the wait, so it fires exactly once.
+
+        The payload carries the agent's own stated purpose, because an
+        activation with no new messages and no explanation is indistinguishable
+        from being interrupted at random.
+        """
+        chat_id = int(wait["chat_id"])
         topic_id = wait["topic_id"]
-        self.note_activity(int(wait["chat_id"]), topic_id)
+        wait_id = str(wait["wait_id"])
+        now = self._clock()
+        due_at = wait["due_at"]
+        expires_at = wait["expires_at"]
+
+        # A due timer and a closed window are different events: one means "the
+        # moment you asked for arrived", the other "the chance passed".
+        due = due_at is not None and float(due_at) <= now
+        status = "satisfied" if due else "expired"
+        if not due and (expires_at is None or float(expires_at) > now):
+            return  # nothing has actually happened yet
+
+        self.store.append_synthetic_observation(
+            dedupe_key=f"wait:{wait_id}",
+            chat_id=chat_id,
+            topic_id=topic_id,
+            kind="timer",
+            payload={
+                "kind": "timer",
+                "status": status,
+                "wait_id": wait_id,
+                "wait_kind": str(wait["kind"]),
+                "purpose": str(wait["purpose"]),
+                "due_at": due_at,
+                "note": (
+                    "The timer you set earlier has come due. Nothing new may "
+                    "have been said since; reconsider what you were waiting to "
+                    "do about it."
+                    if due else
+                    "The window you set for this wait has closed without it "
+                    "being satisfied."
+                ),
+            },
+        )
+        self.store.resolve_wait(wait_id, status)
+        self.note_activity(chat_id, topic_id)
+        log.info("timer fired %s wait_id=%s status=%s purpose=%r",
+                 _label(self.chat_kinds, chat_id, topic_id), wait_id, status,
+                 str(wait["purpose"])[:60])
 
     # -- budgets -----------------------------------------------------------
 
@@ -362,6 +423,40 @@ class AutonomousLoop:
             log.warning("scope paused chat_id=%s topic_id=%s; not retrying until "
                         "the actor is explicitly resumed", chat_id, topic_id)
         self._wake.set()
+
+    @staticmethod
+    def _undecided(handler: Any) -> bool:
+        """True when a turn produced no decision at all.
+
+        Any tool that records something counts: an action, a wait, a state
+        note, or an explicit `finish_silently`. Text alone does not - ordinary
+        assistant text is never delivered, so leaving it at that means the turn
+        evaporated.
+        """
+        return not (handler.actions or handler.waits or handler.states
+                    or handler.outcome)
+
+    def _decision_reminder(self, payload: dict[str, Any], result: Any) -> dict[str, Any]:
+        """One explicit second chance to decide, carrying what went wrong.
+
+        Bounded to a single retry: a model that keeps answering in prose is
+        misbehaving, and retrying forever would spend the budget on it.
+        """
+        produced = (getattr(result, "text", None) or "").strip()
+        reminder = dict(payload)
+        reminder["kind"] = "decision_required"
+        reminder["note"] = (
+            "Your previous response"
+            + (f" ({len(produced)} characters of text)" if produced else "")
+            + " did not call any tool. Text is never delivered to the chat, and "
+            "nothing was recorded, so that turn had no effect.\n"
+            "Call exactly one tool now: send_message to speak, "
+            "finish_silently to end without speaking, wait_for_event / "
+            "wait_until to be woken later, or update_state to remember "
+            "something."
+        )
+        reminder["observations"] = payload.get("observations", [])
+        return reminder
 
     async def activate(self, chat_id: int, topic_id: int | None) -> WorkflowResult | None:
         key = (chat_id, topic_id)
@@ -488,6 +583,27 @@ class AutonomousLoop:
 
         self.model_calls += 1
         status = getattr(result, "status", "error")
+        # A successful activation that called no tool and left no other trace
+        # did not reach a decision. It may have written text, and that text was
+        # never delivered - so it is not silence, and recording it as
+        # `no_action` invented a conclusion the model never reached. Ask once,
+        # explicitly, before calling the turn anything.
+        if status in {"ok", "committed", "succeeded"} and self._undecided(handler):
+            log.info("activation produced no decision %s workflow=%s; asking once",
+                     _label(self.chat_kinds, chat_id, topic_id), workflow_id)
+            try:
+                if hasattr(agent, "observe"):
+                    result = await agent.observe(
+                        self._decision_reminder(observation_payload, result),
+                        tag=workflow_id, handler=handler,
+                    )
+                    self.model_calls += 1
+                    status = getattr(result, "status", "error")
+            except Exception as exc:
+                log.warning("decision reminder failed %s workflow=%s error_type=%s",
+                            _label(self.chat_kinds, chat_id, topic_id),
+                            workflow_id, type(exc).__name__)
+
         if status in {"error", "timeout", "rejected", "paused"}:
             log.info("agent call ended %s workflow=%s outcome=model_activation_failed "
                  "activation_status=%s elapsed_ms=%.1f pending_actions=%s waits=%s",
@@ -514,8 +630,27 @@ class AutonomousLoop:
             )
             return WorkflowResult(workflow_id, "failed", "model_activation_failed")
 
-        outcome = getattr(result, "outcome", None) or handler.outcome or "no_action"
-        logged_outcome = outcome if isinstance(outcome, str) and outcome in {"silent", "no_action", "speak", "waiting"} else "other"
+        # The outcome is the agent's, never a default the application supplies.
+        # `noted` covers a turn that only wrote state down; `undecided` is the
+        # honest label for one that still chose nothing after being asked.
+        outcome = handler.outcome or ("noted" if handler.states else "undecided")
+        if outcome == "undecided":
+            # Audit only - deliberately NOT a new observation. An observation
+            # would immediately wake her again, and a model that answers in
+            # prose twice would then write another notice, forever, at two
+            # model calls per cycle. `observation_skips` is the ledger for
+            # "recorded with a reason, never silent" that does not queue a turn.
+            self.store.record_observation_skip(
+                sequence=observations[-1].sequence, chat_id=chat_id,
+                topic_id=topic_id,
+                reason="undecided: no tool call after an explicit reminder",
+            )
+            log.warning("turn undecided %s workflow=%s; recorded as a skip, "
+                        "not replayed", _label(self.chat_kinds, chat_id, topic_id),
+                        workflow_id)
+        known_outcomes = {"silent", "no_action", "speak", "waiting",
+                          "noted", "undecided"}
+        logged_outcome = outcome if isinstance(outcome, str) and outcome in known_outcomes else "other"
         log.info("agent call ended %s workflow=%s outcome=%s elapsed_ms=%.1f "
                  "pending_actions=%s waits=%s",
                  _label(self.chat_kinds, chat_id, topic_id), workflow_id, logged_outcome,

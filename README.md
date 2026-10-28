@@ -30,8 +30,31 @@ You add the bot to a group, give it a name, and mostly forget it is there. Then:
   said") — it does not jump in. Being talked *about* is not being talked *to*.
 
 If it does not know something, it says which setting to check rather than
-inventing a value. It has no tools and cannot run anything — it can only send a
-message, and it says so if asked.
+inventing a value.
+
+## How it actually works
+
+There is no keyword rule and no participation score. Every authorized message
+becomes a durable observation, and the model decides what to do with the batch
+it was given. Its tool set is small and closed:
+
+| tool | effect |
+| --- | --- |
+| `send_message` | put one message in the chat (durable outbox, then Telegram) |
+| `finish_silently` | end this turn without speaking |
+| `wait_for_event` | end now, be woken by a matching future event |
+| `wait_until` | end now, be woken at a wall-clock time |
+| `update_state` | remember a small note for later turns |
+
+Ordinary assistant text is never delivered — only `send_message` posts. A turn
+that calls no tool has not decided anything: it is asked once more, explicitly,
+and only then recorded as `undecided` rather than being counted as silence.
+
+It has no shell, no Python, no network access, and no way to read files. It can
+send a message, wait, and remember a note. If asked, it says so.
+
+Background and the known gaps are in
+[`docs/architecture/autonomous-participation-design.md`](docs/architecture/autonomous-participation-design.md).
 
 ## Quick start (no credentials needed)
 
@@ -251,22 +274,27 @@ reasoning rather than text.
 
 ```
 app/
-  bot.py            orchestrator: inbox → turn → decision → runtime → outbox
-  policy.py         participation rules and the proactive score
-  turns.py          debounce windows per (chat, topic)
-  conversation.py   prompt rendering and reply parsing
-  agent.py          the only module that touches Nervipulsa
-  store.py          SQLite: updates, messages, turns, decisions, sends, feedback
-  telegram.py       Telegram transport, update parsing, three-valued send outcome
-  config.py         TOML/JSON config, agent profile composition
-  main.py           CLI entry point
+  bot.py              orchestrator: inbox → observation → runtime → outbox
+  autonomy.py         the autonomous loop: batching, activation, waits, actions
+  autonomous_tools.py the closed action tool set the model may call
+  agent.py            the only module that touches Nervipulsa
+  vision.py           turns a Telegram photo/sticker reference into model input
+  store.py            SQLite: durable queue, cursors, workflows, actions, waits
+  telegram.py         transport, update parsing, three-valued send outcome
+  logwatch.py         readable logs: scope labels, status snapshots
+  console.py          the interactive console (`status`, `watch`, `queue`, ...)
+  config.py           TOML/JSON config, agent profile composition
+  main.py             CLI entry point
+  policy.py           legacy keyword/score path — offline replay only
+  turns.py            debounce windows (legacy path)
+  conversation.py     prompt rendering (legacy path)
   prompts/
-    soul.md         who the bot is
-    introduction.md how it takes part
-  fixtures.py       synthetic chat events, no real content
-experiments/        measurement scripts
-tests/              the test suite
-docs/               architecture, gaps, contract, measurements
+    soul.md           who the bot is
+    introduction.md   how it takes part
+  fixtures.py         synthetic chat events, no real content
+experiments/          measurement scripts
+tests/                the test suite
+docs/                 architecture, gaps, contract, measurements
 ```
 
 Three design decisions worth knowing about:
@@ -279,9 +307,11 @@ automatically, because that is how a bot posts the same message twice.
 **Every chat and forum topic gets its own runtime.** Sharing one would let topic B
 answer from topic A's history; a live simulation caught exactly that.
 
-**The bot never gets tools.** The runtime is started with an empty tool catalog,
-and a startup assertion fails loudly if that ever changes. In a group chat, a
-model with a shell is not a feature.
+**The bot never gets an executor.** It gets five action tools and nothing else.
+A startup assertion compares the runtime's exposed schema list against that
+closed set and refuses to start on any difference, so a stray `python_exec`
+cannot reach the model even if a dependency adds it. In a group chat, a model
+with a shell is not a feature; a model with `send_message` is the point.
 
 ## Something not working?
 
