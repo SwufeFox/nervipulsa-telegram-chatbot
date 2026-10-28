@@ -49,8 +49,9 @@ context_limit = 1000000
 # 输出上限必须给输入留出空间：provider 会把 input + max_output 一起
 # 和模型窗口（1,048,576）比较。设成 1000000 时，只要历史超过约 4.8 万
 # token 就会被 400 context_length_exceeded 拒绝——而 context_limit 显示
-# 还很宽裕，非常容易误判。狐狸一条消息几十个 token 就够，给 8k 足矣。
-max_output_tokens = 8192
+# 还很宽裕，非常容易误判。狐狸一条消息几十个 token 就够；16k 给推理留余量
+# （实测 reasoning 约占输出九成），同时仍为输入留下约 100 万 token 的空间。
+max_output_tokens = 16384
 request_timeout = 900.0
 
 [runtime]
