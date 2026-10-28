@@ -30,12 +30,12 @@ max_batch_seconds = 15.0
 max_batch_observations = 24
 history_messages = 24
 
-# 资源与打扰上限。这是执行边界，不是社交判断：
-# 预算用完时，观察留在队列里，只是模型这次不被叫起来。
+# 模型调用预算；用完时观察仍保留，稍后再处理。
 max_activations_per_hour = 60
+# 发言限制只作用于投递，不阻止继续接收和理解消息。
 max_actions_per_hour = 20
-# 两条发言之间至少隔多久（秒）。按群计算，跨话题共享。
-min_action_interval_seconds = 30.0
+# 不强加固定的发言间隔；每小时发送上限仍然生效。
+min_action_interval_seconds = 0.0
 
 [proactive]
 # 保留字段，仅对 --replay 的旧路径生效；自主路径不看它。

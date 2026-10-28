@@ -123,14 +123,14 @@ def test_send_maps_topic_and_reply_into_ptb_arguments() -> None:
 
 
 @pytest.mark.parametrize(
-    "error, expected",
+    "error, expected, category",
     [
-        (TimedOut("read timed out"), SendStatus.UNKNOWN),
-        (NetworkError("connection reset"), SendStatus.UNKNOWN),
-        (BadRequest("chat not found"), SendStatus.FAILED),
+        (TimedOut("read timed out"), SendStatus.UNKNOWN, "timeout"),
+        (NetworkError("connection reset"), SendStatus.UNKNOWN, "network"),
+        (BadRequest("chat not found"), SendStatus.FAILED, "api_rejected"),
     ],
 )
-def test_send_classifies_ptb_errors(error: Exception, expected: SendStatus) -> None:
+def test_send_classifies_ptb_errors(error: Exception, expected: SendStatus, category: str) -> None:
     """A timeout may have delivered; a BadRequest certainly did not."""
     bot = StubBot()
     bot.fail = error
@@ -141,6 +141,7 @@ def test_send_classifies_ptb_errors(error: Exception, expected: SendStatus) -> N
 
     outcome = run(body())
     assert outcome.status is expected
+    assert outcome.error_category == category
 
 
 def test_dry_run_never_touches_ptb() -> None:

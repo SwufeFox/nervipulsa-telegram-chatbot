@@ -112,6 +112,7 @@ class AutonomousLoop:
         agent_for: Callable[[int, int | None], Awaitable[Any | None]],
         system_prompt: str,
         clock: Callable[[], float] = time.time,
+        monotonic_clock: Callable[[], float] | None = None,
         idle_seconds: float = DEFAULT_IDLE_SECONDS,
         max_batch_seconds: float = DEFAULT_MAX_BATCH_SECONDS,
         max_batch_observations: int = DEFAULT_MAX_BATCH_OBSERVATIONS,
@@ -122,11 +123,15 @@ class AutonomousLoop:
         max_activations_per_hour: int | None = 60,
         max_actions_per_hour: int | None = 20,
         min_action_interval_seconds: float = 20.0,
+        max_concurrent_scopes: int = 4,
+        max_actions_per_flush: int = 20,
     ) -> None:
         self.store = store
         self._agent_for = agent_for
         self.system_prompt = system_prompt
         self._clock = clock
+        # Preserve callers that inject one fake clock for both time domains.
+        self._monotonic = monotonic_clock or (time.monotonic if clock is time.time else clock)
         self.idle_seconds = idle_seconds
         self.max_batch_seconds = max_batch_seconds
         self.max_batch_observations = max_batch_observations
@@ -137,6 +142,13 @@ class AutonomousLoop:
         self.max_activations_per_hour = max_activations_per_hour
         self.max_actions_per_hour = max_actions_per_hour
         self.min_action_interval_seconds = min_action_interval_seconds
+        # How many scopes may be inside a model call at the same time. Topics
+        # beyond this stay queued in `_batch_started` rather than becoming
+        # tasks that only wait for a slot.
+        self.max_concurrent_scopes = max(1, int(max_concurrent_scopes))
+        # How many pending intents one outbox pass may examine. Bounded so a
+        # single chat's throttled backlog cannot crowd out other chats.
+        self.max_actions_per_flush = max(1, int(max_actions_per_flush))
 
         self._wake = asyncio.Event()
         # Opened/last-activity per scope, both on the injected clock. Using
@@ -151,7 +163,9 @@ class AutonomousLoop:
         self._retry_after: dict[tuple[int, int | None], float] = {}
         self._locks: dict[tuple[int, int | None], asyncio.Lock] = {}
         self._flush_lock = asyncio.Lock()
+        self._throttled_actions: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
+        self._active_topics: dict[tuple[int, int | None], asyncio.Task] = {}
         self._stopped = False
 
         # Counters the tests and diagnostics assert on.
@@ -168,7 +182,7 @@ class AutonomousLoop:
     def note_activity(self, chat_id: int, topic_id: int | None) -> None:
         """An observation landed; start (or continue) a batch window."""
         key = (chat_id, topic_id)
-        now = self._clock()
+        now = self._monotonic()
         self._batch_started.setdefault(key, now)
         self._last_activity[key] = now
         self._wake.set()
@@ -205,26 +219,57 @@ class AutonomousLoop:
             self._wake.clear()
             await self.tick()
 
-    async def tick(self, *, force: bool = False) -> list[WorkflowResult]:
+    async def tick(self, *, force: bool = False,
+                   await_tasks: bool = True) -> list[WorkflowResult]:
         """Process whatever is due. One pass; safe to call from tests.
 
         `force` closes every open window immediately (shutdown, and tests that
         drive a fake clock). It bypasses the debounce, never the ordering lock.
+
+        `await_tasks=False` is the live mode: dispatch what fits the concurrency
+        budget and return. A long model call must not hold the scheduler, or a
+        scope that is queued behind the cap would never be picked up - the pass
+        that would pick it up is the one still waiting for the model. The
+        dispatched tasks re-arm the wake event on completion.
         """
-        results: list[WorkflowResult] = []
-        now = self._clock()
+        now = self._monotonic()
         if force:
             ready = list(self._batch_started)
         else:
             ready = self._batches(now)
-        for chat_id, topic_id in ready:
-            result = await self.activate(chat_id, topic_id)
-            if result is not None:
-                results.append(result)
-        for wait in self.store.due_waits(now):
+        results: list[WorkflowResult | None] = []
+        tasks: list[asyncio.Task] = []
+        for key in ready:
+            # The same topic is already being decided; a second task would only
+            # queue behind the lock and grow the wait list. Scopes that do not
+            # fit the concurrency budget are left in `_batch_started`, so the
+            # next pass picks them up instead of spending a task to wait.
+            if key in self._active_topics or len(self._active_topics) >= self.max_concurrent_scopes:
+                continue
+            task = asyncio.create_task(self.activate(*key))
+            self._active_topics[key] = task
+
+            def _finished(finished: asyncio.Task, scope: tuple[int, int | None] = key) -> None:
+                self._active_topics.pop(scope, None)
+                self._wake.set()
+
+            task.add_done_callback(_finished)
+            tasks.append(task)
+        for wait in self.store.due_waits(self._clock()):
             self._wake_due(wait)
+        if await_tasks and tasks:
+            # Gather, not sequential awaits: two topics must be able to wait on
+            # the model at the same time. Per-topic ordering still comes from
+            # `activate()`'s lock, and the cap above bounds how many run at once.
+            results = list(await asyncio.gather(*tasks))
         await self.flush_actions()
-        return results
+        return [result for result in results if result is not None]
+
+    async def drain(self) -> None:
+        """Let in-flight activations finish before the store is closed."""
+        tasks = list(self._active_topics.values())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _wake_due(self, wait: Any) -> None:
         """A timer is a reason to look again, not permission to speak."""
@@ -234,44 +279,69 @@ class AutonomousLoop:
     # -- budgets -----------------------------------------------------------
 
     def _budget_retry_delay(self) -> float:
-        """How long to wait before asking again after a budget refusal."""
-        # The interval limit is usually the shorter one, so use it when set;
-        # otherwise poll the hourly window a few times a minute.
-        if self.min_action_interval_seconds and self.min_action_interval_seconds > 0:
-            return float(self.min_action_interval_seconds)
+        """How long to wait before retrying an activation budget refusal."""
         return 30.0
 
-    def _budget_verdict(self, chat_id: int) -> str | None:
-        """Why the model must not run right now, or None if it may.
+    def _failure_retry_delay(self) -> float:
+        """How long to wait before retrying a turn that failed before deciding.
 
-        Two independent limits, both of them about resources and disturbance
-        rather than about how interesting a message looks:
-
-        * `max_activations_per_hour` bounds model cost.
-        * `min_action_interval_seconds` bounds how often the bot can speak.
-
-        The second is a delivery-facing limit that the agent does not get to
-        reinterpret as "I should stay quiet": the observation stays queued and
-        the turn is deferred, so it can still act once the interval passes.
+        Shorter than the budget retry: a provider hiccup or a missing runtime
+        should not cost the agent half a minute of the conversation.
         """
+        return 5.0
+
+    def _paused_retry_delay(self) -> float:
+        """A paused actor will refuse the same request; do not hammer it."""
+        return 300.0
+
+    def _budget_verdict(self, chat_id: int) -> str | None:
+        """Return the model cost limit, independently of delivery limits."""
         now = self._clock()
         hour_ago = now - 3600
         if self.max_activations_per_hour is not None:
             used = self.store.count_activations_since(chat_id, hour_ago)
             if used >= self.max_activations_per_hour:
                 return f"activations_per_hour({used}/{self.max_activations_per_hour})"
-        if self.min_action_interval_seconds and self.min_action_interval_seconds > 0:
-            last = self.store.last_action_at(chat_id)
-            if last is not None and now - last < self.min_action_interval_seconds:
-                remaining = int(self.min_action_interval_seconds - (now - last))
-                return f"min_interval({remaining}s left)"
-        if self.max_actions_per_hour is not None:
-            used = self.store.count_actions_since(chat_id, hour_ago)
-            if used >= self.max_actions_per_hour:
-                return f"actions_per_hour({used}/{self.max_actions_per_hour})"
         return None
 
+    def _pending_counts(self, chat_id: int, topic_id: int | None) -> tuple[int, int]:
+        actions = self.store._query(
+            "SELECT COUNT(*) AS n FROM actions WHERE chat_id = ? AND topic_id IS ? AND status = 'pending'",
+            (chat_id, topic_id),
+        )
+        return int(actions[0]["n"]), len(self.store.active_waits(chat_id, topic_id))
+
     # -- one autonomous turn ----------------------------------------------
+
+    def _requeue_after_failure(self, chat_id: int, topic_id: int | None,
+                               *, activation_status: str | None = None) -> None:
+        """Put a scope back in the queue after a turn failed without consuming input.
+
+        A failed workflow does not advance the cursor, so its observations are
+        still pending - but the batch window was already cleared before the
+        call. Without re-arming, those observations would sit there until some
+        unrelated message happened to arrive in the same topic, or the process
+        restarted. Retry on a real interval so a broken provider cannot spin
+        the scheduler.
+
+        A *paused* actor is the exception. `response_unknown` and
+        `commit_interrupted` mean Core deliberately stopped making requests:
+        retrying them automatically would re-send a request whose answer may
+        already exist, and Core itself refuses to resume on new input for those
+        kinds. The scope is left queued (so nothing is lost and a restart or an
+        operator retry can pick it up) but the retry clock is set far enough out
+        that this loop does not spin against a decided "no".
+        """
+        now = self._monotonic()
+        self._batch_started[(chat_id, topic_id)] = now
+        paused = activation_status == "paused"
+        self._retry_after[(chat_id, topic_id)] = now + (
+            self._paused_retry_delay() if paused else self._failure_retry_delay()
+        )
+        if paused:
+            log.warning("scope paused chat_id=%s topic_id=%s; not retrying until "
+                        "the actor is explicitly resumed", chat_id, topic_id)
+        self._wake.set()
 
     async def activate(self, chat_id: int, topic_id: int | None) -> WorkflowResult | None:
         key = (chat_id, topic_id)
@@ -302,10 +372,10 @@ class AutonomousLoop:
             # 250 ms tick, which would spin the scheduler and flood the log
             # while the window is still closed.
             self._retry_after[(chat_id, topic_id)] = (
-                self._clock() + self._budget_retry_delay()
+                self._monotonic() + self._budget_retry_delay()
             )
-            self._batch_started[(chat_id, topic_id)] = self._clock()
-            log.info("deferred chat %s topic %s: %s", chat_id, topic_id, budget)
+            self._batch_started[(chat_id, topic_id)] = self._monotonic()
+            log.info("activation deferred chat_id=%s topic_id=%s reason=activation_budget observations=%s budget=%s first_sequence=%s last_sequence=%s retry_seconds=%s", chat_id, topic_id, len(rows), budget, rows[0]["sequence"], rows[-1]["sequence"], self._budget_retry_delay())
             return WorkflowResult(
                 workflow_id="", state="deferred", outcome=budget,
                 detail={"reason": budget, "pending": len(rows)},
@@ -323,6 +393,7 @@ class AutonomousLoop:
         self._last_activity.pop((chat_id, topic_id), None)
         self._retry_after.pop((chat_id, topic_id), None)
         self.workflows += 1
+        log.info("batch activated chat_id=%s topic_id=%s workflow_id=%s observations=%s first_sequence=%s last_sequence=%s", chat_id, topic_id, workflow_id, len(observations), observations[0].sequence, observations[-1].sequence)
 
         # Mark any wait that this batch structurally satisfies. The agent is
         # woken by the events themselves; the wait is not a decision.
@@ -333,7 +404,9 @@ class AutonomousLoop:
 
         agent = await self._agent_for(chat_id, topic_id)
         if agent is None:
+            log.info("activation ended chat_id=%s topic_id=%s workflow_id=%s outcome=no_agent", chat_id, topic_id, workflow_id)
             self.store.close_workflow(workflow_id, "failed", outcome="no_agent")
+            self._requeue_after_failure(chat_id, topic_id)
             return WorkflowResult(workflow_id, "failed", "no_agent")
 
         handler = _ActionHandler(self, chat_id=chat_id, topic_id=topic_id,
@@ -341,6 +414,8 @@ class AutonomousLoop:
                                 observed_through=observations[-1].sequence)
         observation_payload = self._render(observations, chat_id, topic_id)
 
+        started = time.monotonic()
+        log.info("agent call started chat_id=%s topic_id=%s workflow_id=%s", chat_id, topic_id, workflow_id)
         try:
             if hasattr(agent, "observe"):
                 result = await agent.observe(observation_payload, tag=workflow_id,
@@ -350,23 +425,39 @@ class AutonomousLoop:
                                          prompt=json.dumps(observation_payload, ensure_ascii=False),
                                          tag=workflow_id)
         except Exception as exc:
-            log.exception("agent failed for chat %s topic %s", chat_id, topic_id)
+            log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=agent_error error_type=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, type(exc).__name__, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
             self.store.close_workflow(workflow_id, "failed",
                                       outcome="agent_error", detail={"error": str(exc)[:500]})
+            self._requeue_after_failure(chat_id, topic_id)
             return WorkflowResult(workflow_id, "failed", "agent_error")
 
         self.model_calls += 1
         status = getattr(result, "status", "error")
         if status in {"error", "timeout", "rejected", "paused"}:
+            log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=model_activation_failed activation_status=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, status, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
             # A provider failure is not the agent choosing silence.
             self.store.close_workflow(
                 workflow_id, "failed", outcome="model_activation_failed",
                 detail={"activation_status": status,
                         "detail": getattr(result, "detail", {})},
             )
+            # `status="error"` carries the pause in `detail.error_kind`; only
+            # `status="paused"` is the actor-refused case the agent reports
+            # separately. Both mean Core may be holding a request whose result
+            # is unknown, so neither should be retried on the fast path.
+            detail = getattr(result, "detail", {}) or {}
+            error_kind = detail.get("error_kind") if isinstance(detail, dict) else None
+            paused = status == "paused" or error_kind in {
+                "response_unknown", "commit_interrupted", "response_commit_failed",
+            }
+            self._requeue_after_failure(
+                chat_id, topic_id, activation_status="paused" if paused else status
+            )
             return WorkflowResult(workflow_id, "failed", "model_activation_failed")
 
         outcome = getattr(result, "outcome", None) or handler.outcome or "no_action"
+        logged_outcome = outcome if isinstance(outcome, str) and outcome in {"silent", "no_action", "speak", "waiting"} else "other"
+        log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, logged_outcome, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
         if handler.actions:
             self.actions_staged += len(handler.actions)
         if outcome in {"silent", "no_action"} and not handler.actions:
@@ -388,7 +479,7 @@ class AutonomousLoop:
         # If more observations arrived while we were thinking, keep going:
         # same topic stays ordered through the lock, other topics are free.
         if self.store.pending_observations(chat_id, topic_id, limit=1):
-            self._batch_started[(chat_id, topic_id)] = self._clock()
+            self._batch_started[(chat_id, topic_id)] = self._monotonic()
 
         return WorkflowResult(
             workflow_id=workflow_id, state="completed", outcome=outcome,
@@ -440,10 +531,49 @@ class AutonomousLoop:
         async with self._flush_lock:
             await self._flush_actions_locked()
 
+    def _pending_actions_fair(self) -> list[Any]:
+        """Pending intents, interleaved across chats, oldest first within a chat.
+
+        Ordering purely by `created_at` lets one chat's throttled backlog occupy
+        every slot of a bounded pass, so another chat's single sendable message
+        is never even examined. Taking the oldest intent per chat first, then
+        the second, and so on, gives each chat a turn.
+        """
+        return self.store._query(
+            "SELECT * FROM ("
+            "  SELECT a.*, ROW_NUMBER() OVER ("
+            "    PARTITION BY a.chat_id ORDER BY a.created_at, a.action_id"
+            "  ) AS turn FROM actions a WHERE a.status = 'pending'"
+            ") WHERE turn <= ? ORDER BY turn, created_at LIMIT ?",
+            (self.max_actions_per_flush, self.max_actions_per_flush),
+        )
+
     async def _flush_actions_locked(self) -> None:
-        for row in self.store.pending_actions():
+        # Every budget and freshness decision lives inside `claim_action`'s
+        # write transaction. The list only bounds *work per pass*: without a
+        # cap, a chat with a large throttled backlog would fill every pass and
+        # the one sendable action from another chat would never be reached.
+        pending = self._pending_actions_fair()
+        for row in pending:
             action_id = str(row["action_id"])
-            verdict = self.store.claim_action(action_id)
+            # The store re-checks freshness AND the delivery budget inside the
+            # same write transaction that flips pending -> sending. Checking
+            # here first would only be an optimisation; two processes sharing
+            # the database would still both pass a check made outside it.
+            verdict = self.store.claim_action(
+                action_id,
+                max_actions_per_hour=self.max_actions_per_hour,
+                min_action_interval_seconds=self.min_action_interval_seconds,
+            )
+            if verdict == "throttled":
+                if action_id not in self._throttled_actions:
+                    log.info("action throttled chat_id=%s topic_id=%s action_id=%s",
+                             row["chat_id"], row["topic_id"], action_id)
+                    self._throttled_actions.add(action_id)
+                continue
+            self._throttled_actions.discard(action_id)
+            logged_verdict = verdict if verdict in {"claimed", "stale", "expired"} else "other"
+            log.info("action claim chat_id=%s topic_id=%s action_id=%s outcome=%s", row["chat_id"], row["topic_id"], action_id, logged_verdict)
             if verdict == "stale":
                 # Same-topic information arrived that this intent never saw.
                 # Give the agent another look instead of sending stale text.
@@ -452,7 +582,6 @@ class AutonomousLoop:
                 self.note_activity(int(row["chat_id"]), row["topic_id"])
                 continue
             if verdict == "expired":
-                log.info("action %s expired before execution", action_id)
                 continue
             if verdict != "claimed":
                 continue
@@ -469,6 +598,7 @@ class AutonomousLoop:
                 )
             except Exception as exc:
                 # Unknown, not failed: the request may have reached Telegram.
+                log.info("action delivery chat_id=%s topic_id=%s action_id=%s outcome=unknown error_type=%s", row["chat_id"], row["topic_id"], action_id, type(exc).__name__)
                 detail = str(exc)[:500]
                 self.store.finish_action(action_id, "unknown", error=detail)
                 self._report_result(row, action_id, "unknown", detail)
@@ -476,25 +606,23 @@ class AutonomousLoop:
             status = getattr(outcome, "status", None)
             name = getattr(status, "value", status)
             error = getattr(outcome, "error", None)
+            log.info("action delivery chat_id=%s topic_id=%s action_id=%s outcome=%s", row["chat_id"], row["topic_id"], action_id, name if name in ("sent", "unknown") else "failed")
             if name == "sent":
                 self.actions_sent += 1
                 telegram_id = getattr(outcome, "telegram_message_id", None)
                 self.store.finish_action(action_id, "sent",
-                                         telegram_message_id=telegram_id)
-                if telegram_id:
-                    self.store.record_bot_message(
-                        chat_id=int(row["chat_id"]), topic_id=row["topic_id"],
-                        message_id=int(telegram_id), text=str(row["text"]),
-                        sender_label=self.bot_name, sender_id=self.bot_user_id,
-                        created_at=self._clock(),
-                    )
+                                         telegram_message_id=telegram_id,
+                                         sender_label=self.bot_name, sender_id=self.bot_user_id)
                 self._report_result(row, action_id, "sent", None)
             elif name == "unknown":
                 self.store.finish_action(action_id, "unknown", error=error)
                 self._report_result(row, action_id, "unknown", error)
-            else:
+            elif name == "failed":
                 self.store.finish_action(action_id, "failed", error=error)
                 self._report_result(row, action_id, "failed", error)
+            else:
+                self.store.finish_action(action_id, "unknown", error=error or "unrecognized transport outcome")
+                self._report_result(row, action_id, "unknown", error or "unrecognized transport outcome")
 
     def _report_result(self, row: Any, action_id: str, status: str,
                        error: str | None) -> None:
@@ -516,17 +644,7 @@ class AutonomousLoop:
             return
         chat_id = int(row["chat_id"])
         topic_id = row["topic_id"]
-        try:
-            self.store.record_action_result(
-                action_id=action_id, chat_id=chat_id, topic_id=topic_id,
-                status=status, text=str(row["text"]), error=error,
-            )
-        except Exception:
-            # Recording the outcome must never take down the sender.
-            log.exception("could not record the result of action %s", action_id)
-            return
-        log.warning("action %s ended %s for chat %s: %s",
-                    action_id, status, chat_id, error or "(no detail)")
+        log.warning("action result action_id=%s chat_id=%s status=%s", action_id, chat_id, status)
         self.note_activity(chat_id, topic_id)
 
 

@@ -83,6 +83,8 @@ def build_agent_factory(config: AppConfig, system_prompt: str, *, offline: bool 
             response_commit_hook=getattr(spec, "response_commit_hook", None),
             session_id=getattr(spec, "session_id", None),
             restore=getattr(spec, "restore", False),
+            vision_resolver=getattr(spec, "vision_resolver", None),
+            vision_observation_check=getattr(spec, "vision_observation_check", None),
         )
 
     return factory
@@ -211,6 +213,16 @@ class _RecordingTransport:
         return {"ok": True, "result": []}
 
 
+def log_poll_ingress(tick, *, paused: bool) -> None:
+    if tick.updates or tick.messages_stored:
+        logging.getLogger(__name__).info(
+            "poll ingress: updates=%d stored=%d duplicates=%d unauthorized=%d "
+            "ignored=%d feedback=%d%s; sends run in background",
+            tick.updates, tick.messages_stored, tick.duplicates, tick.unauthorized,
+            tick.ignored, tick.feedback_updates, " (paused)" if paused else "",
+        )
+
+
 async def run_live(config: AppConfig, system_prompt: str) -> int:
     if not config.telegram_token:
         print("TELEGRAM_BOT_TOKEN is required for live mode", file=sys.stderr)
@@ -229,7 +241,8 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         await client.start()
         me = await client.get_me()
     except TransportError as exc:
-        print(f"cannot reach Telegram: {exc.detail}", file=sys.stderr)
+        print(f"cannot reach Telegram (stage=telegram_start error_type={type(exc).__name__} "
+              f"error_kind={exc.kind} error_category={exc.category})", file=sys.stderr)
         await client.close()
         store.close()
         return 2
@@ -283,7 +296,14 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         pass  # not on the main thread (tests) — signals are optional
 
     print(f"{config.bot_name} is listening on chat(s) {list(config.allowed_chat_ids)}; "
-          f"proactive={'on' if config.proactive_enabled else 'off'}")
+          "mode=autonomous")
+    logging.getLogger(__name__).info(
+        "limits: activations_per_hour=%s actions_per_hour=%s min_action_interval_seconds=%s "
+        "idle_seconds=%s max_batch_seconds=%s max_batch_observations=%s",
+        config.max_activations_per_hour, config.max_actions_per_hour,
+        config.min_action_interval_seconds, config.idle_seconds,
+        config.max_batch_seconds, config.max_batch_observations,
+    )
 
     # Pausing must not stop polling. `getUpdates` only returns updates newer than
     # the offset, and Telegram drops unacknowledged batches after ~24h; skipping
@@ -322,25 +342,20 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
             consecutive_failures = 0
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             # A polling loop that exits on one bad cycle is a bot that dies
             # quietly. Back off and keep going; the durable inbox means nothing
             # is lost by the delay.
             consecutive_failures += 1
-            log.exception("poll cycle failed (%d in a row)", consecutive_failures)
+            log.error("poll cycle failed (%d in a row; stage=poll error_type=%s)",
+                      consecutive_failures, type(exc).__name__)
             delay = min(30.0, 2.0 ** min(consecutive_failures, 4))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
             continue
-        if tick.updates or tick.messages_stored:
-            log.info(
-                "tick: %d updates, %d stored, %d dup, %d unauth, %d sends%s",
-                tick.updates, tick.messages_stored, tick.duplicates,
-                tick.unauthorized, tick.sends_ok,
-                " (paused)" if bot.stats.paused else "",
-            )
+        log_poll_ingress(tick, paused=bot.stats.paused)
 
     timer.cancel()
     await asyncio.gather(timer, return_exceptions=True)
@@ -352,7 +367,7 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         try:
             await asyncio.wait_for(bot.run_turns(), timeout=10)
         except Exception as exc:  # never let shutdown raising hide the exit
-            log.warning("final turn pass failed: %s", exc)
+            log.warning("final turn pass failed (error_type=%s)", type(exc).__name__)
     await bot.stop()
     # Close PTB's HTTP session explicitly: an unclosed client keeps its
     # connection pool (and the process) alive after the loop ends.

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -57,6 +58,7 @@ from .telegram import (
     SendStatus,
     TelegramClient,
     parse_reaction_update,
+    safe_error_category,
 )
 from .turns import Turn, TurnManager
 
@@ -134,6 +136,8 @@ class AgentSpec:
     response_commit_hook: Any = None
     session_id: str | None = None
     restore: bool = False
+    vision_resolver: Any = None
+    vision_observation_check: Any = None
 
 
 class GroupAgent:
@@ -197,6 +201,9 @@ class GroupAgent:
         self._topic_locks: dict[tuple[int, int | None], asyncio.Lock] = {}
         self._workers: set[asyncio.Task] = set()
         self._worker_limit = asyncio.Semaphore(4)
+        # Guarded in `_autonomous_pass`: the wake loop must not start a second
+        # pass while one is still waiting on the model.
+        self._pass_running = False
         # The default participation model: observations wake the agent, and
         # the agent decides what to do with the opportunity. The legacy
         # policy path is retained only for explicitly constructed callers and
@@ -219,6 +226,11 @@ class GroupAgent:
                 max_actions_per_hour=getattr(config, "max_actions_per_hour", 20),
                 min_action_interval_seconds=getattr(
                     config, "min_action_interval_seconds", 20.0),
+                # Debounce lives on the monotonic clock; persistence, budgets
+                # and wait deadlines stay on the wall clock.
+                monotonic_clock=(
+                    self._clock if self._clock is not time.time else time.monotonic
+                ),
             )
         else:
             self.autonomy = autonomy
@@ -307,6 +319,11 @@ class GroupAgent:
             )
 
     async def stop(self) -> None:
+        if self.autonomy is not None:
+            # A pass returns before its activations do. Closing the store or
+            # the agents underneath them turns a normal shutdown into a stream
+            # of "Cannot operate on a closed database" errors.
+            await self.autonomy.drain()
         for task in list(self._workers):
             task.cancel()
         if self._workers:
@@ -315,8 +332,8 @@ class GroupAgent:
             try:
                 await agent.stop()
             except Exception as exc:
-                log.warning("agent for chat %s topic %s failed to stop: %s",
-                            chat_id, topic_id, exc)
+                log.warning("agent for chat %s topic %s failed to stop (error_type=%s)",
+                            chat_id, topic_id, type(exc).__name__)
         self._agents.clear()
         self._started = False
 
@@ -331,7 +348,7 @@ class GroupAgent:
                 timeout=self.config.poll_timeout,
             )
         except Exception as exc:
-            log.warning("getUpdates failed: %s", exc)
+            log.warning("getUpdates failed (error_type=%s)", type(exc).__name__)
             tick.errors += 1
             self.stats.absorb(tick)
             return offset, tick
@@ -344,7 +361,7 @@ class GroupAgent:
                 highest = update_id if highest is None else max(highest, update_id)
             reaction = parse_reaction_update(update)
             if reaction is not None:
-                self._ingest_reaction(reaction, tick)
+                self._ingest_reaction(reaction, tick, update)
                 continue
             self._ingest(update, tick)
 
@@ -381,7 +398,7 @@ class GroupAgent:
         for update in updates:
             reaction = parse_reaction_update(update)
             if reaction is not None:
-                self._ingest_reaction(reaction, tick)
+                self._ingest_reaction(reaction, tick, update)
                 continue
             self._ingest(update, tick)
         # In the legacy path a turn is decided synchronously, so running is
@@ -402,9 +419,13 @@ class GroupAgent:
 
     # -- ingest ------------------------------------------------------------
 
-    def _ingest_reaction(self, reaction: InboundReaction, tick: TickStats) -> None:
+    def _ingest_reaction(self, reaction: InboundReaction, tick: TickStats,
+                         update: dict[str, Any]) -> None:
         if not self.config.allows_chat(reaction.chat_id):
             tick.unauthorized += 1
+            chat = update.get("message_reaction", {}).get("chat", {})
+            log.warning("unauthorized update chat_id=%s chat_type=%s update_type=message_reaction",
+                        reaction.chat_id, _safe_chat_type(chat.get("type")))
             return
         result = self.store.record_reaction_feedback(
             update_id=reaction.update_id,
@@ -427,10 +448,10 @@ class GroupAgent:
             return
 
         if not self.config.allows_chat(inbound.chat_id):
-            # Drop without touching the store: an unauthorized chat must not
-            # create a row, a log entry, or a turn.
+            # Reject before persistence or scheduling.
             tick.unauthorized += 1
-            log.debug("ignored update from unauthorized chat %s", inbound.chat_id)
+            log.warning("unauthorized update chat_id=%s chat_type=%s update_type=message",
+                        inbound.chat_id, _safe_chat_type(inbound.chat_type))
             return
 
         message = StoredMessage(
@@ -448,12 +469,29 @@ class GroupAgent:
             ),
             media_kind=inbound.media_kind,
             media_hint=inbound.media_hint,
+            media_file_id=inbound.media_file_id,
+            media_preview=inbound.media_preview,
         )
+        # Read before writing: `record_inbound_message` returns False both for
+        # an update id it has already seen and for a *new* update carrying an
+        # existing (chat, message) pair - an edit. Only the latter left a fresh
+        # observation behind that nothing would schedule.
+        known_update = self.store.has_update(inbound.update_id)
         if not self.store.record_inbound_message(
             message, update_id=inbound.update_id, payload=_minimal_payload(inbound)
         ):
-            # Same (chat, message) under a new update id: an edit, most likely.
-            tick.duplicates += 1
+            if known_update:
+                tick.duplicates += 1
+                return
+            # A new update for a message we already have: the new text is
+            # durable in `observation_events` as `message_edit`, so the topic
+            # must be re-armed or it would never be looked at.
+            log.info("edited message chat_id=%s message_id=%s queued for review",
+                     inbound.chat_id, inbound.message_id)
+            if self.autonomy is not None:
+                self.autonomy.note_activity(inbound.chat_id, inbound.topic_id)
+            else:
+                tick.duplicates += 1
             return
 
         tick.messages_stored += 1
@@ -514,7 +552,7 @@ class GroupAgent:
                 tick.silences_decided += 1
         except Exception:
             tick.errors += 1
-            log.exception("turn %s failed", turn.turn_id)
+            log.error("turn %s failed", turn.turn_id)
             self._record_failed_turn(turn, tick)
         finally:
             self.stats.absorb(tick)
@@ -610,9 +648,13 @@ class GroupAgent:
     async def _send_action(self, *, chat_id: int, topic_id: int | None, text: str,
                            reply_to: int | None) -> Any:
         """Transport boundary for an already-claimed action intent."""
-        return await self.client.send_message(
+        outcome = await self.client.send_message(
             chat_id=chat_id, text=text, reply_to_message_id=reply_to, topic_id=topic_id,
         )
+        log.info("autonomous send chat_id=%s topic_id=%s status=%s dry_run=%s error_category=%s",
+                 chat_id, topic_id, outcome.status.value, self.client.dry_run,
+                 safe_error_category(getattr(outcome, "error_category", None)))
+        return outcome
 
     def _count_pending_observations(self) -> int:
         """Unprocessed observations across all known scopes, for diagnostics."""
@@ -629,16 +671,41 @@ class GroupAgent:
         return sorted(self.autonomy._batch_started) if self.autonomy else []
 
     async def _autonomous_pass(self) -> None:
+        """One scheduler pass, with at most one in flight.
+
+        The wake loop calls this every 100ms. Without the guard, a slow model
+        call would let passes pile up: each new one creates tasks that can only
+        wait for a slot, and nothing bounds how many of those accumulate. A
+        pass that is already running is itself the wake-up for whatever is
+        still pending, so skipping the duplicate loses nothing.
+        """
         assert self.autonomy is not None
-        async with self._worker_limit:
-            try:
-                await self.autonomy.tick()
-            except Exception:
-                log.exception("autonomous pass failed")
+        if self._pass_running:
+            return
+        self._pass_running = True
+        try:
+            # Dispatch only: a model call can take a minute, and a pass that
+            # waited for it would also be the pass responsible for starting the
+            # scopes queued behind the concurrency cap.
+            await self.autonomy.tick(await_tasks=False)
+        except Exception as exc:
+            # A bare type name is not actionable for a database fault: it names
+            # neither the statement nor the constraint. SQLite errors carry only
+            # our own schema and identifiers, so those get a traceback. Every
+            # other exception stays type-only, because its message can quote
+            # user text or a remote response.
+            internal = isinstance(exc, (sqlite3.Error, OSError))
+            log.error("autonomous pass failed (stage=autonomous_pass error_type=%s)",
+                      type(exc).__name__, exc_info=exc if internal else None)
+        finally:
+            self._pass_running = False
 
     async def run_turns(self, tick: TickStats | None = None) -> list[Decision]:
         if self.autonomy is not None:
             await self._autonomous_pass()
+            # Live mode wants the non-blocking dispatch; an explicit
+            # `run_turns()` call means "do the work now", so wait for it.
+            await self.autonomy.drain()
             return []
         """Process every closed turn.
 
@@ -663,11 +730,11 @@ class GroupAgent:
                 # caller never sees an exception that would stop the poll loop.
                 try:
                     decision = await self._run_one(turn, tick)
-                except Exception:
+                except Exception as exc:
                     tick.errors += 1
-                    log.exception(
-                        "turn %s failed (chat=%s topic=%s); continuing with the rest",
-                        turn.turn_id, turn.chat_id, turn.topic_id,
+                    log.error(
+                        "turn %s failed (chat=%s topic=%s stage=run_turn error_type=%s); continuing with the rest",
+                        turn.turn_id, turn.chat_id, turn.topic_id, type(exc).__name__,
                     )
                     self._record_failed_turn(turn, tick)
                     continue
@@ -704,8 +771,9 @@ class GroupAgent:
                 trigger=TRIGGER_PROACTIVE,
             )
             self.store.close_turn(turn.turn_id, "error")
-        except Exception:
-            log.exception("could not record the failed turn %s", turn.turn_id)
+        except Exception as exc:
+            log.error("could not record the failed turn %s (stage=record_failed_turn error_type=%s)",
+                      turn.turn_id, type(exc).__name__)
 
     async def _process_turn(self, turn: Turn, tick: TickStats) -> Decision:
         decision_id = f"dec_{uuid.uuid4().hex[:12]}"
@@ -763,8 +831,8 @@ class GroupAgent:
         if decision.is_silent:
             self.store.close_turn(turn.turn_id, "silent")
             log.info(
-                "silent chat=%s turn=%s reason=%s detail=%s",
-                turn.chat_id, turn.turn_id, decision.reason, decision.detail,
+                "silent chat=%s turn=%s reason=%s",
+                turn.chat_id, turn.turn_id, decision.reason,
             )
             return decision
 
@@ -814,7 +882,8 @@ class GroupAgent:
             result = await agent.ask(chat_id=turn.chat_id, prompt=prompt.text, tag=decision_id)
         except Exception as exc:
             tick.errors += 1
-            log.exception("agent call failed for chat %s", turn.chat_id)
+            log.error("agent call failed for chat %s (stage=agent_call error_type=%s)",
+                      turn.chat_id, type(exc).__name__)
             self.store.close_turn(turn.turn_id, "error")
             return
         latency_ms = int((self._clock() - started) * 1000)
@@ -844,7 +913,7 @@ class GroupAgent:
                 detail=detail, trigger=decision.trigger,
             )
             self.store.close_turn(turn.turn_id, "error")
-            log.warning("agent activation failed: %s", result.detail)
+            log.warning("agent activation failed: status=%s chat_id=%s", result.status, turn.chat_id)
             return
 
         if reply is None:
@@ -857,7 +926,7 @@ class GroupAgent:
                 detail=detail, trigger=decision.trigger,
             )
             self.store.close_turn(turn.turn_id, "empty")
-            log.warning("activation produced nothing sendable: %s", result.detail)
+            log.warning("activation produced nothing sendable chat_id=%s", turn.chat_id)
             return
 
         # Superseded while we were waiting for the model?
@@ -930,6 +999,8 @@ class GroupAgent:
             reply_to_message_id=reply_to,
             topic_id=topic_id,
         )
+        log.info("legacy send chat_id=%s topic_id=%s status=%s dry_run=%s",
+                 chat_id, topic_id, outcome.status.value, self.client.dry_run)
         if outcome.status is SendStatus.SENT:
             tick.sends_ok += 1
             message = None
@@ -943,15 +1014,12 @@ class GroupAgent:
             tick.sends_unknown += 1
             self.store.mark_send_unknown(decision_id, outcome.error or "unknown")
             self.store.close_turn(turn.turn_id, "unknown")
-            log.warning(
-                "send %s has unknown delivery for chat %s: %s",
-                decision_id, chat_id, outcome.error,
-            )
+            log.warning("send %s has unknown delivery for chat %s", decision_id, chat_id)
         else:
             tick.sends_failed += 1
             self.store.mark_send_failed(decision_id, outcome.error or "rejected")
             self.store.close_turn(turn.turn_id, "failed")
-            log.warning("send %s rejected for chat %s: %s", decision_id, chat_id, outcome.error)
+            log.warning("send %s rejected for chat %s", decision_id, chat_id)
 
     # -- context and agents ------------------------------------------------
 
@@ -991,6 +1059,22 @@ class GroupAgent:
             now=now,
         )
 
+    def _trusted_observations(self, chat_id: int, topic_id: int | None, envelope: dict) -> bool:
+        import json
+        payload = envelope.get("payload", {})
+        if not self.config.allows_chat(chat_id) or payload.get("chat_id") != chat_id or payload.get("topic_id") != topic_id:
+            return False
+        for observation in payload.get("observations", []):
+            if not isinstance(observation, dict) or not isinstance(observation.get("sequence"), int):
+                return False
+            rows = self.store._query(
+                "SELECT kind, payload_json FROM observation_events WHERE sequence = ? AND chat_id = ? AND topic_id IS ?",
+                (observation["sequence"], chat_id, topic_id),
+            )
+            if not rows or rows[0]["kind"] != observation.get("type") or json.loads(rows[0]["payload_json"]) != observation.get("payload"):
+                return False
+        return True
+
     async def _agent_for(self, chat_id: int, topic_id: int | None) -> AgentAdapter | None:
         """One agent per (chat, topic).
 
@@ -1013,14 +1097,16 @@ class GroupAgent:
             response_commit_hook=self._response_hook_for(chat_id, topic_id),
             session_id=self._session_id_for(chat_id, topic_id),
             restore=self.autonomy is not None,
+            vision_resolver=self.client.download_image,
+            vision_observation_check=lambda envelope: self._trusted_observations(chat_id, topic_id, envelope),
         )
         try:
             agent = self._agent_factory(spec)
             await agent.start()
         except Exception as exc:
             self._agent_failures[key] = str(exc)
-            log.exception("could not start an agent for chat %s topic %s",
-                          chat_id, topic_id)
+            log.error("could not start an agent for chat %s topic %s (stage=agent_start error_type=%s)",
+                      chat_id, topic_id, type(exc).__name__)
             return None
         self._agents[key] = agent
         return agent
@@ -1113,6 +1199,10 @@ class GroupAgent:
         data["last_admin_action"] = self._admin_note
         data["recovered_inbound"] = self.recovered_inbound
         return data
+
+
+def _safe_chat_type(value: Any) -> str:
+    return value if value in ("private", "group", "supergroup", "channel") else "unknown"
 
 
 def _parse(update: dict[str, Any]) -> InboundMessage | None:

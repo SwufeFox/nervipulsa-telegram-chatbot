@@ -121,6 +121,8 @@ class NervipulsaAgent:
         response_commit_hook: Any | None = None,
         session_id: str | None = None,
         restore: bool = False,
+        vision_resolver: Any | None = None,
+        vision_observation_check: Any | None = None,
     ) -> None:
         if not system_prompt.strip():
             raise ValueError("a non-empty system prompt is required")
@@ -146,6 +148,23 @@ class NervipulsaAgent:
         self._restore = restore
         self.restore_report: dict[str, Any] | None = None
         self._runtime: Runtime | None = None
+        if vision_resolver is not None and vision_observation_check is not None:
+            from .vision import VisionBackend
+
+            def trusted(index: int, message: dict, envelope: dict) -> bool:
+                if self._runtime is None or index < 1:
+                    return False
+                transcript = self._runtime.actor.transcript
+                i = index - 1 - (self._runtime.actor.projector.status_message() is not None)
+                return (0 <= i < len(transcript.messages) and i < len(transcript.event_ids)
+                        and i < len(transcript.event_types)
+                        and transcript.messages[i] == message
+                        and transcript.event_types[i] == "runtime.observation"
+                        and transcript.event_ids[i] is not None
+                        and transcript.event_ids[i] == envelope.get("event_id")
+                        and vision_observation_check(envelope))
+
+            self._backend = VisionBackend(self._backend, vision_resolver, trusted)
         self._lock = asyncio.Lock()
 
     @property
@@ -174,9 +193,9 @@ class NervipulsaAgent:
         self._runtime = runtime
         if self._restore:
             # Restore only the model view. Mailbox frames, the activation
-            # ledger and any pending effect stay untouched: replaying those
-            # would re-run side effects. Observations the app still has not
-            # consumed are absorbed by the restored `seen` set.
+            # ledger and pending effects stay untouched. An application
+            # observation submitted again receives a new event id, so this
+            # alone does not deduplicate cross-process re-delivery.
             try:
                 self.restore_report = runtime.restore_transcript()
             except Exception:

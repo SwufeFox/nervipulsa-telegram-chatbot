@@ -187,7 +187,7 @@ def test_hourly_activation_budget_defers_instead_of_silencing(tmp_path):
     run(scenario())
 
 
-def test_speak_interval_defers_without_dropping_observations(tmp_path):
+def test_speak_interval_defers_send_without_blocking_decision(tmp_path):
     async def scenario():
         bot, store, clock, transport, handle = build(
             tmp_path, lambda request: ModelResponse(
@@ -206,16 +206,140 @@ def test_speak_interval_defers_without_dropping_observations(tmp_path):
             await bot.step([msg(702, "say hi again")])
             clock.advance(5)
             second = await bot.autonomous_step()
-            assert second and second[0].state == "deferred", second
-            assert second[0].outcome.startswith("min_interval"), second
+            assert second and second[0].state == "completed", second
             assert [s["text"] for s in transport.sends] == ["hello"]
-            assert store.pending_observations(
-                fixtures.TEST_CHAT, fixtures.TOPIC_A), "input was dropped"
+            assert not store.pending_observations(fixtures.TEST_CHAT, fixtures.TOPIC_A)
+            assert len(store.pending_actions()) == 1
 
-            # Once the interval passes the queued observation is served.
+            # The durable intent sends once after the interval, without a new model call.
             clock.advance(400)
-            third = await bot.autonomous_step(force=True)
-            assert third and third[0].state == "completed", third
+            assert await bot.autonomous_step() == []
+            assert [s["text"] for s in transport.sends] == ["hello", "hello"]
+            assert not store.pending_actions()
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_hourly_send_limit_preserves_decisions_and_delivery_time(tmp_path):
+    async def scenario():
+        calls = []
+
+        def responder(request):
+            calls.append(1)
+            return ModelResponse(content="", model="scripted", tool_calls=[
+                ToolCall(id="c", name="send_message", arguments={"text": str(len(calls))})])
+
+        bot, store, clock, transport, _ = build(
+            tmp_path, responder, max_actions_per_hour=1, min_action_interval_seconds=0)
+        await bot.start()
+        try:
+            await bot.step([msg(801, "one")])
+            await bot.autonomous_step(force=True)
+            await bot.step([msg(802, "two")])
+            await bot.autonomous_step(force=True)
+            assert len(calls) == 2
+            assert [s["text"] for s in transport.sends] == ["1"]
+            assert len(store.pending_actions()) == 1
+            for _ in range(5):
+                assert await bot.autonomous_step() == []
+            assert len(calls) == 2
+            clock.advance(3601)
+            await bot.autonomous_step()
+            assert [s["text"] for s in transport.sends] == ["1", "2"]
+            await bot.step([msg(803, "three")])
+            await bot.autonomous_step(force=True)
+            assert len(calls) == 3
+            assert [s["text"] for s in transport.sends] == ["1", "2"]
+            assert len(store.pending_actions()) == 1
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_pending_strict_action_is_refreshed_after_new_input(tmp_path):
+    async def scenario():
+        bot, store, clock, transport, _ = build(
+            tmp_path, lambda request: ModelResponse(content="", model="scripted",
+                tool_calls=[ToolCall(id="c", name="send_message", arguments={"text": "hello"})]),
+            min_action_interval_seconds=300, max_actions_per_hour=100)
+        await bot.start()
+        try:
+            await bot.step([msg(811, "one")])
+            await bot.autonomous_step(force=True)
+            await bot.step([msg(812, "two")])
+            await bot.autonomous_step(force=True)
+            old_id = store.pending_actions()[0]["action_id"]
+            await bot.step([msg(813, "new information")])
+            await bot.autonomous_step(force=True)
+            clock.advance(301)
+            await bot.autonomous_step()
+            assert store.get_action(old_id)["status"] == "cancelled"
+            assert len(transport.sends) == 2
+            assert not store.pending_observations(fixtures.TEST_CHAT, fixtures.TOPIC_A)
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_throttled_backlog_does_not_starve_another_chat(tmp_path):
+    async def scenario():
+        bot, store, clock, transport, _ = build(
+            tmp_path, min_action_interval_seconds=300, max_actions_per_hour=100)
+        await bot.start()
+        try:
+            store.prepare_action(action_id="sent", workflow_id=None, chat_id=1,
+                                 topic_id=None, text="first", observed_through=0)
+            await bot.autonomy.flush_actions()
+            for i in range(55):
+                store.prepare_action(action_id=f"blocked{i}", workflow_id=None, chat_id=1,
+                                     topic_id=None, text="blocked", observed_through=0)
+            store.prepare_action(action_id="other", workflow_id=None, chat_id=2,
+                                 topic_id=None, text="other", observed_through=0)
+            await bot.autonomy.flush_actions()
+            assert [s["text"] for s in transport.sends] == ["first", "other"]
+            assert len(store.pending_actions(limit=100)) == 55
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_unknown_send_consumes_budget_and_is_never_retried(tmp_path):
+    async def scenario():
+        from types import SimpleNamespace
+
+        bot, store, clock, _, _ = build(
+            tmp_path, min_action_interval_seconds=300, max_actions_per_hour=100)
+        attempts = []
+
+        async def unknown(**kwargs):
+            attempts.append(kwargs["text"])
+            return SimpleNamespace(status="unknown", error="timeout")
+
+        await bot.start()
+        bot.autonomy._send = unknown
+        try:
+            for action_id in ("a", "b"):
+                store.prepare_action(action_id=action_id, workflow_id=None, chat_id=1,
+                                     topic_id=None, text=action_id, observed_through=0,
+                                     freshness="bounded", max_unobserved=10)
+            await bot.autonomy.flush_actions()
+            assert attempts == ["a"]
+            assert store.get_action("a")["status"] == "unknown"
+            assert store.get_action("b")["status"] == "pending"
+            clock.advance(301)
+            await bot.autonomy.flush_actions()
+            await bot.autonomy.flush_actions()
+            assert attempts == ["a", "b"]
+            assert store.get_action("a")["attempts"] == 1
         finally:
             await bot.stop()
             store.close()

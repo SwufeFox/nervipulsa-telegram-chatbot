@@ -59,6 +59,7 @@ class SendOutcome:
     status: SendStatus
     telegram_message_id: int | None = None
     error: str | None = None
+    error_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ class InboundMessage:
     # floor, so a bare sticker is no longer indistinguishable from silence.
     media_kind: str = ""
     media_hint: str = ""
+    media_file_id: str = ""
+    media_preview: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,12 +109,33 @@ class Transport(Protocol):
     ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
 
 
+_ERROR_CATEGORIES = frozenset({"timeout", "network", "api_rejected", "unknown"})
+
+
+def safe_error_category(category: str | None) -> str:
+    """Never expose untrusted transport-provided text in diagnostic logs."""
+    return category if category in _ERROR_CATEGORIES else "unknown"
+
+
 class TransportError(Exception):
-    def __init__(self, *, kind: str, detail: str, status: int | None = None) -> None:
+    def __init__(self, *, kind: str, detail: str, status: int | None = None,
+                 category: str | None = None) -> None:
         super().__init__(detail)
         self.kind = kind            # "rejected" | "indeterminate"
         self.detail = detail
         self.status = status
+        self.category = safe_error_category(category)
+
+
+def _telegram_error_category(exc: TelegramError) -> str:
+    # BadRequest and TimedOut both inherit from NetworkError in PTB.
+    if isinstance(exc, BadRequest):
+        return "api_rejected"
+    if isinstance(exc, TelegramTimedOut):
+        return "timeout"
+    if isinstance(exc, TelegramNetworkError):
+        return "network"
+    return "api_rejected"
 
 
 def _short(exc: BaseException) -> str:
@@ -139,6 +163,46 @@ class PythonTelegramBotTransport:
 
     def __init__(self, bot: Bot) -> None:
         self._bot = bot
+        self._download_limit = asyncio.Semaphore(2)
+        self._download_rate_lock = asyncio.Lock()
+        self._next_download_at = 0.0
+
+    async def download_image(self, file_id: str, max_bytes: int) -> bytes:
+        """Download through Telegram's authenticated API with a hard streaming cap."""
+        import httpx
+        from urllib.parse import urlsplit
+
+        if max_bytes <= 0:
+            raise ValueError("empty download budget")
+        async with self._download_limit:
+            async with asyncio.timeout(30):
+                async with self._download_rate_lock:
+                    loop = asyncio.get_running_loop()
+                    delay = self._next_download_at - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    self._next_download_at = loop.time() + 0.2
+                file = await self._bot.get_file(file_id, read_timeout=10, write_timeout=10, connect_timeout=10, pool_timeout=10)
+                if file.file_size is not None and file.file_size > max_bytes:
+                    raise ValueError("file too large")
+                url = file.file_path or ""
+                parsed = urlsplit(url)
+                if parsed.scheme != "https" or parsed.hostname != "api.telegram.org" or parsed.port not in (None, 443) or parsed.username or parsed.password:
+                    raise ValueError("unexpected file host")
+                async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as client:
+                    async with client.stream("GET", url) as response:
+                        response.raise_for_status()
+                        if response.status_code != 200:
+                            raise ValueError("unexpected status")
+                        size = response.headers.get("content-length")
+                        if size and int(size) > max_bytes:
+                            raise ValueError("file too large")
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            if len(data) + len(chunk) > max_bytes:
+                                raise ValueError("file too large")
+                            data.extend(chunk)
+                        return bytes(data)
 
     async def start(self) -> None:
         """Open the session.
@@ -151,12 +215,10 @@ class PythonTelegramBotTransport:
         try:
             await self._bot.initialize()
         except TelegramError as exc:
-            unreachable = isinstance(
-                exc, (TelegramTimedOut, TelegramNetworkError)
-            ) and not isinstance(exc, BadRequest)
+            category = _telegram_error_category(exc)
             raise TransportError(
-                kind="indeterminate" if unreachable else "rejected",
-                detail=_short(exc),
+                kind="indeterminate" if category in {"timeout", "network"} else "rejected",
+                detail=_short(exc), category=category,
             ) from exc
 
     async def close(self) -> None:
@@ -168,17 +230,11 @@ class PythonTelegramBotTransport:
         except TransportError:
             raise
         except TelegramError as exc:
-            # `BadRequest` subclasses `NetworkError`, so the specific sentence
-            # ("Telegram answered and said no") has to be tested first. Getting
-            # this order wrong marks a real rejection as undelivered-unknown,
-            # which then never gets retried and hides a fixable error.
-            if isinstance(exc, BadRequest):
-                raise TransportError(kind="rejected", detail=_short(exc)) from exc
-            if isinstance(exc, (TelegramTimedOut, TelegramNetworkError)):
-                # The request may or may not have reached Telegram.
-                raise TransportError(kind="indeterminate", detail=_short(exc)) from exc
-            # Any other API error is a refusal carrying a description.
-            raise TransportError(kind="rejected", detail=_short(exc)) from exc
+            category = _telegram_error_category(exc)
+            raise TransportError(
+                kind="indeterminate" if category in {"timeout", "network"} else "rejected",
+                detail=_short(exc), category=category,
+            ) from exc
 
     async def _dispatch(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         if method == "getUpdates":
@@ -266,6 +322,12 @@ class TelegramClient:
             return await self._transport.call(method, payload)
         return await asyncio.to_thread(self._transport.call, method, payload)
 
+    async def download_image(self, file_id: str, max_bytes: int) -> bytes:
+        downloader = getattr(self._transport, "download_image", None)
+        if downloader is None:
+            raise RuntimeError("image downloads unavailable")
+        return await downloader(file_id, max_bytes)
+
     # -- inbound -----------------------------------------------------------
 
     async def get_updates(
@@ -309,9 +371,11 @@ class TelegramClient:
             response = await self._call("sendMessage", payload)
         except TransportError as exc:
             if exc.kind == "rejected":
-                return SendOutcome(SendStatus.FAILED, error=exc.detail)
+                return SendOutcome(SendStatus.FAILED, error=exc.detail,
+                                   error_category=safe_error_category(exc.category))
             # Timeout / reset / 5xx / unparseable: the message may be visible.
-            return SendOutcome(SendStatus.UNKNOWN, error=exc.detail)
+            return SendOutcome(SendStatus.UNKNOWN, error=exc.detail,
+                               error_category=safe_error_category(exc.category))
         result = response.get("result")
         message_id = result.get("message_id") if isinstance(result, dict) else None
         if isinstance(message_id, int):
@@ -382,6 +446,7 @@ def parse_update(update: Mapping[str, Any]) -> InboundMessage | None:
 
     date = message.get("date")
     media_kind, media_hint = _media_of(message)
+    media_file_id, media_preview = _image_reference(message, media_kind)
 
     return InboundMessage(
         update_id=update_id,
@@ -400,7 +465,26 @@ def parse_update(update: Mapping[str, Any]) -> InboundMessage | None:
         raw=update,
         media_kind=media_kind,
         media_hint=media_hint,
+        media_file_id=media_file_id,
+        media_preview=media_preview,
     )
+
+
+def _image_reference(message: Mapping[str, Any], kind: str) -> tuple[str, str]:
+    if kind == "photo":
+        photos = message.get("photo") or []
+        item = photos[-1] if photos else None
+        preview = ""
+    elif kind == "sticker":
+        item = message.get("sticker")
+        preview = ""
+        if isinstance(item, Mapping) and (item.get("is_animated") or item.get("is_video")):
+            item = item.get("thumbnail")
+            preview = "animated sticker static preview"
+    else:
+        return "", ""
+    file_id = item.get("file_id") if isinstance(item, Mapping) else None
+    return (file_id if isinstance(file_id, str) else "", preview)
 
 
 def _media_of(message: Mapping[str, Any]) -> tuple[str, str]:

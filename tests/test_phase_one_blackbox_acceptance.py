@@ -336,7 +336,8 @@ def test_live_same_batch_topics_send_independently(tmp_path, monkeypatch):
         config = AppConfig(telegram_token="fake", allowed_chat_ids=(fixtures.TEST_CHAT,),
                            bot_username="alma_bot", debounce_seconds=0,
                            db_path=str(tmp_path / "topics.sqlite3"), workspace=str(tmp_path),
-                           model="scripted", proactive_enabled=False)
+                           model="scripted", proactive_enabled=False,
+                           min_action_interval_seconds=0)
         task = asyncio.create_task(main.run_live(config, load_default_profile()))
         try:
             await asyncio.wait_for(entered_a.wait(), 3)

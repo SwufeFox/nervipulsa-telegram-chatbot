@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -123,6 +124,11 @@ CREATE TABLE IF NOT EXISTS observation_events (
 );
 CREATE INDEX IF NOT EXISTS observation_events_scope
     ON observation_events (chat_id, topic_id, sequence);
+
+CREATE TABLE IF NOT EXISTS action_result_events (
+    action_id TEXT PRIMARY KEY,
+    sequence INTEGER NOT NULL UNIQUE
+);
 
 CREATE TABLE IF NOT EXISTS autonomous_responses (
     activation_id TEXT PRIMARY KEY,
@@ -287,6 +293,8 @@ class StoredMessage:
     # from a silent pause.
     media_kind: str = ""
     media_hint: str = ""
+    media_file_id: str = ""
+    media_preview: str = ""
 
 
 @dataclass(frozen=True)
@@ -317,6 +325,14 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), timeout=15.0)
         self._conn.row_factory = sqlite3.Row
+        # One connection, many coroutines. `sqlite3` connections are not safe
+        # to interleave: two topics finishing a turn at the same moment would
+        # each open a transaction on the same handle, and the second would fail
+        # with "cannot start a transaction within a transaction" - a
+        # ProgrammingError that used to be swallowed as a failed pass. The lock
+        # is reentrant because helpers like `_record_action_result` are called
+        # from inside an existing write.
+        self._lock = threading.RLock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -332,58 +348,84 @@ class Store:
     # -- lifecycle ---------------------------------------------------------
 
     def _migrate_observation_cursors(self) -> None:
-        """Replace a pre-scope_key cursors table with the keyed one.
-
-        `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a
-        database created before this fix keeps the broken shape: several rows
-        per scope and no usable constraint. Rebuild it once, keeping the
-        greatest watermark per scope (the newest progress, never a regression).
-        """
-        columns = {
-            str(row["name"])
-            for row in self._conn.execute("PRAGMA table_info(observation_cursors)")
-        }
-        if not columns or "scope_key" in columns:
-            return
-        with self._conn:
-            self._conn.execute("ALTER TABLE observation_cursors RENAME TO observation_cursors_old")
-            self._conn.executescript("""
-CREATE TABLE observation_cursors (
+        """Atomically rebuild legacy cursors and recover interrupted rebuilds."""
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            tables = {
+                row["name"] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name IN ('observation_cursors', 'observation_cursors_old')"
+                )
+            }
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_xinfo(observation_cursors)")
+            }
+            sources = []
+            if "observation_cursors" in tables and "scope_key" not in columns:
+                # Preserve both legacy tables if an earlier migration stopped
+                # after renaming its source and another legacy table appeared.
+                conn.execute(
+                    "CREATE TEMP TABLE cursor_migration_source AS "
+                    "SELECT chat_id, topic_id, last_processed, updated_at FROM observation_cursors"
+                )
+                conn.execute("DROP TABLE observation_cursors")
+                tables.remove("observation_cursors")
+                sources.append("temp.cursor_migration_source")
+            if "observation_cursors" not in tables:
+                conn.execute("""CREATE TABLE observation_cursors (
     chat_id        INTEGER NOT NULL,
     topic_id       INTEGER,
-    scope_key      TEXT    GENERATED ALWAYS AS (
+    scope_key      TEXT GENERATED ALWAYS AS (
                        CAST(chat_id AS TEXT) || ':' || COALESCE(CAST(topic_id AS TEXT), '-')
                    ) STORED,
     last_processed INTEGER NOT NULL,
-    updated_at     REAL    NOT NULL,
+    updated_at     REAL NOT NULL,
     UNIQUE (scope_key)
-);
-""")
-            self._conn.execute(
-                "INSERT INTO observation_cursors (chat_id, topic_id, last_processed, updated_at)"
-                " SELECT chat_id, topic_id, MAX(last_processed), MAX(updated_at)"
-                " FROM observation_cursors_old GROUP BY chat_id, topic_id"
-            )
-            self._conn.execute("DROP TABLE observation_cursors_old")
+)""")
+            if "observation_cursors_old" in tables:
+                sources.append("observation_cursors_old")
+            for source in sources:
+                conn.execute(
+                    "INSERT INTO observation_cursors (chat_id, topic_id, last_processed, updated_at)"
+                    " SELECT chat_id, topic_id, MAX(last_processed), MAX(updated_at)"
+                    f" FROM {source} WHERE 1 GROUP BY chat_id, topic_id"
+                    " ON CONFLICT(scope_key) DO UPDATE SET"
+                    " last_processed = MAX(observation_cursors.last_processed, excluded.last_processed),"
+                    " updated_at = MAX(observation_cursors.updated_at, excluded.updated_at)"
+                )
+            if "observation_cursors_old" in tables:
+                conn.execute("DROP TABLE observation_cursors_old")
+            if "temp.cursor_migration_source" in sources:
+                conn.execute("DROP TABLE temp.cursor_migration_source")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     def _now(self) -> float:
         """Current time on this store's injected clock."""
         return float(self._clock())
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+    def _write(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
+        with self._lock:
+            try:
+                if immediate:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
-        return list(self._conn.execute(sql, params))
+        with self._lock:
+            return list(self._conn.execute(sql, params))
 
     def commit_autonomous_response(self, chat_id: int, topic_id: int | None,
                                    activation: Any, response: Any) -> None:
@@ -519,6 +561,11 @@ CREATE TABLE observation_cursors (
                 (state, outcome, json.dumps(detail or {}, ensure_ascii=False), self._now(),
                  workflow_id),
             )
+            if state != "completed":
+                conn.execute(
+                    "UPDATE actions SET status = 'cancelled', error = 'workflow_not_completed', updated_at = ?"
+                    " WHERE workflow_id = ? AND status = 'pending'", (self._now(), workflow_id),
+                )
             if state == "completed":
                 cursor = conn.execute(
                     "SELECT MAX(last_processed) AS latest FROM observation_cursors"
@@ -555,30 +602,45 @@ CREATE TABLE observation_cursors (
         a negative monotonic value keeps the UNIQUE constraint satisfied
         without ever colliding with a real (always positive) update id.
         """
-        with self._write() as conn:
-            next_sequence = conn.execute(
-                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM observation_events"
-            ).fetchone()[0]
-            payload: dict[str, Any] = {
-                "action_id": action_id,
-                "status": status,
-                "text": text[:500],
-            }
+        with self._write(immediate=True) as conn:
+            return self._record_action_result(conn, action_id=action_id, chat_id=chat_id,
+                                              topic_id=topic_id, status=status, text=text, error=error)
+
+    def _record_action_result(self, conn: sqlite3.Connection, *, action_id: str,
+                              chat_id: int, topic_id: int | None, status: str,
+                              text: str, error: str | None) -> int:
+        existing = conn.execute(
+            "SELECT sequence FROM action_result_events WHERE action_id = ?", (action_id,)
+        ).fetchone()
+        if existing:
+            return int(existing[0])
+        # Adopt a pre-migration event, if present, without emitting it again.
+        existing = conn.execute(
+            "SELECT sequence FROM observation_events WHERE kind = 'action_result'"
+            " AND json_valid(payload_json) AND json_extract(payload_json, '$.action_id') = ?"
+            " ORDER BY sequence LIMIT 1", (action_id,)
+        ).fetchone()
+        if existing:
+            sequence = int(existing[0])
+        else:
+            payload: dict[str, Any] = {"action_id": action_id, "status": status, "text": text[:500]}
             if status == "unknown":
-                payload["note"] = (
-                    "delivery unconfirmed: the message may already be visible "
-                    "in the group. It is not retried."
-                )
+                payload["note"] = "delivery unconfirmed: the message may already be visible in the group. It is not retried."
             if error:
                 payload["error"] = error[:300]
-            conn.execute(
-                "INSERT INTO observation_events"
-                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+            # Synthetic IDs must avoid collisions even if old events were deleted.
+            update_id = conn.execute(
+                "SELECT MIN(COALESCE(MIN(update_id), 0), 0) - 1 FROM observation_events"
+            ).fetchone()[0]
+            cursor = conn.execute(
+                "INSERT INTO observation_events (update_id, chat_id, topic_id, kind, received_at, payload_json)"
                 " VALUES (?, ?, ?, 'action_result', ?, ?)",
-                (-int(next_sequence), chat_id, topic_id, self._now(),
-                 json.dumps(payload, ensure_ascii=False)),
+                (update_id, chat_id, topic_id, self._now(), json.dumps(payload, ensure_ascii=False)),
             )
-            return int(next_sequence)
+            sequence = int(cursor.lastrowid)
+        conn.execute("INSERT INTO action_result_events (action_id, sequence) VALUES (?, ?)",
+                     (action_id, sequence))
+        return sequence
 
     def record_observation_skip(
         self, *, sequence: int, chat_id: int, topic_id: int | None, reason: str,
@@ -711,21 +773,30 @@ CREATE TABLE observation_cursors (
             )
             return cursor.rowcount == 1
 
-    def claim_action(self, action_id: str, *, now: float | None = None) -> str:
-        """Atomically claim pending → sending, or report why it must not send.
+    def claim_action(
+        self, action_id: str, *, now: float | None = None,
+        max_actions_per_hour: int | None = None,
+        min_action_interval_seconds: float = 0,
+    ) -> str:
+        """Atomically check freshness and chat delivery limits, then claim.
 
-        Returns "claimed", "stale" (new observations arrived), "expired",
-        "unknown-topic" or "not-claimable". Every check runs inside the same
-        write transaction that flips the status, so two workers cannot both win
-        and a new observation cannot slip in between the check and the claim.
+        Returns "claimed", "stale", "expired", "throttled", or
+        "not-claimable". A throttled action remains pending. Delivery limits
+        count sent, unknown and in-flight actions by their updated time.
+        Checks and the status transition share one write transaction.
         """
         moment = self._now() if now is None else now
-        with self._write() as conn:
+        with self._write(immediate=True) as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE action_id = ?", (action_id,),
             ).fetchone()
             if row is None or row["status"] != "pending":
                 return "not-claimable"
+            if row["workflow_id"] is not None:
+                workflow = conn.execute("SELECT state FROM workflows WHERE workflow_id = ?",
+                                        (row["workflow_id"],)).fetchone()
+                if workflow is None or workflow["state"] != "completed":
+                    return "not-claimable"
             if row["expires_at"] is not None and float(row["expires_at"]) <= moment:
                 conn.execute(
                     "UPDATE actions SET status = 'cancelled',"
@@ -733,20 +804,29 @@ CREATE TABLE observation_cursors (
                     (moment, action_id),
                 )
                 return "expired"
-            # Compare against the actual newest observation in this scope, not
-            # the cursor: the cursor only moves when a workflow completes, so
-            # two concurrent batches would both look "current" against it.
-            newest = conn.execute(
-                "SELECT MAX(sequence) AS latest FROM observation_events"
-                " WHERE chat_id = ? AND topic_id IS ?",
-                (row["chat_id"], row["topic_id"]),
-            ).fetchone()
-            latest = int(newest["latest"]) if newest and newest["latest"] is not None else 0
-            unobserved = max(0, latest - int(row["observed_through"]))
+            # Sequence numbers are global, so gaps can belong to other scopes.
+            # Count actual events after the watermark while holding the write lock.
+            unobserved = conn.execute(
+                "SELECT COUNT(*) FROM observation_events"
+                " WHERE chat_id = ? AND topic_id IS ? AND sequence > ?",
+                (row["chat_id"], row["topic_id"], row["observed_through"]),
+            ).fetchone()[0]
             if row["freshness"] == "strict" and unobserved:
                 return "stale"
             if row["freshness"] == "bounded" and unobserved > int(row["max_unobserved"]):
                 return "stale"
+            if min_action_interval_seconds > 0 or max_actions_per_hour is not None:
+                usage = conn.execute(
+                    "SELECT MAX(updated_at) AS last,"
+                    " SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END) AS used"
+                    " FROM actions WHERE chat_id = ? AND status IN ('sent', 'unknown', 'sending')",
+                    (moment - 3600, row["chat_id"]),
+                ).fetchone()
+                if (min_action_interval_seconds > 0 and usage["last"] is not None
+                        and moment - float(usage["last"]) < min_action_interval_seconds):
+                    return "throttled"
+                if max_actions_per_hour is not None and int(usage["used"] or 0) >= max_actions_per_hour:
+                    return "throttled"
             changed = conn.execute(
                 "UPDATE actions SET status = 'sending', attempts = attempts + 1,"
                 " updated_at = ? WHERE action_id = ? AND status = 'pending'",
@@ -755,27 +835,42 @@ CREATE TABLE observation_cursors (
             return "claimed" if changed.rowcount == 1 else "not-claimable"
 
     def finish_action(self, action_id: str, status: str, *,
-                      telegram_message_id: int | None = None, error: str | None = None) -> None:
-        # "cancelled" is a real terminal state: the intent was never executed
-        # because it expired or saw newer observations. It is not a failure.
+                      telegram_message_id: int | None = None, error: str | None = None,
+                      sender_label: str = "Alma", sender_id: int | None = None) -> bool:
+        """Commit a terminal status and its durable consequences together."""
         if status not in {"sent", "failed", "unknown", "cancelled"}:
             raise ValueError(f"bad action status: {status}")
-        with self._write() as conn:
+        with self._write(immediate=True) as conn:
+            row = conn.execute("SELECT * FROM actions WHERE action_id = ?", (action_id,)).fetchone()
+            if row is None or row["status"] not in ({"pending", "sending"} if status == "cancelled" else {"sending"}):
+                return False
             conn.execute(
-                "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?,"
-                " updated_at = ? WHERE action_id = ?",
+                "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?, updated_at = ? WHERE action_id = ?",
                 (status, telegram_message_id, (error or "")[:500] or None, self._now(), action_id),
             )
+            if status in {"failed", "unknown"}:
+                self._record_action_result(conn, action_id=action_id, chat_id=row["chat_id"],
+                                           topic_id=row["topic_id"], status=status, text=row["text"], error=error)
+            elif status == "sent" and telegram_message_id is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id, sender_label,"
+                    " is_bot, text, created_at, update_id, reply_to_bot) VALUES (?, ?, ?, ?, ?, 1, ?, ?, -1, 0)",
+                    (row["chat_id"], telegram_message_id, row["topic_id"], sender_id, sender_label, row["text"], self._now()),
+                )
+            return True
 
     def recover_orphaned_actions(self) -> list[str]:
-        """A 'sending' action may already be visible in Telegram: never retry."""
-        with self._write() as conn:
-            rows = list(conn.execute("SELECT action_id FROM actions WHERE status = 'sending'"))
-            conn.execute(
-                "UPDATE actions SET status = 'unknown',"
-                " error = 'process exited during send; delivery unconfirmed',"
-                " updated_at = ? WHERE status = 'sending'", (self._now(),),
-            )
+        """Atomically report interrupted sends and repair older missing receipts."""
+        with self._write(immediate=True) as conn:
+            rows = list(conn.execute("SELECT * FROM actions WHERE status = 'sending'"))
+            for row in rows:
+                error = "process exited during send; delivery unconfirmed"
+                conn.execute("UPDATE actions SET status = 'unknown', error = ?, updated_at = ? WHERE action_id = ? AND status = 'sending'",
+                             (error, self._now(), row["action_id"]))
+            # Older versions could commit a terminal state without its event.
+            for row in conn.execute("SELECT * FROM actions WHERE status IN ('failed', 'unknown')"):
+                self._record_action_result(conn, action_id=row["action_id"], chat_id=row["chat_id"],
+                                           topic_id=row["topic_id"], status=row["status"], text=row["text"], error=row["error"])
             return [str(row["action_id"]) for row in rows]
 
     def pending_actions(self, *, limit: int = 50) -> list[sqlite3.Row]:
@@ -977,7 +1072,9 @@ CREATE TABLE observation_cursors (
                     # Only present when there was an attachment, so a plain
                     # text message keeps its old payload shape.
                     **({"media": {"kind": message.media_kind,
-                                  "hint": message.media_hint}}
+                                  "hint": message.media_hint,
+                                  **({"file_id": message.media_file_id} if message.media_file_id else {}),
+                                  **({"preview": message.media_preview} if message.media_preview else {})}}
                        if message.media_kind else {}),
                 }, ensure_ascii=False)),
             )
