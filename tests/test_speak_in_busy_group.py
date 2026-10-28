@@ -185,7 +185,8 @@ def test_dropped_reply_is_reported_back_to_the_agent(tmp_path):
             assert rows, "a dropped reply left no trace the agent could see"
             payload = json.loads(rows[-1]["payload_json"])
             assert payload["status"] == "cancelled"
-            assert "conversation moved on" in payload["note"]
+            assert "needs_refresh" in payload["error"]
+            assert "nobody saw this" in payload["note"]
             assert payload["text"] == "被丢掉的话"
         finally:
             await bot.stop()
@@ -194,32 +195,31 @@ def test_dropped_reply_is_reported_back_to_the_agent(tmp_path):
     run(scenario())
 
 
-def test_default_tolerance_scales_with_how_fast_the_room_moves(tmp_path):
-    """A quiet topic keeps a tight bound; a busy one is not held to impossible."""
+def test_default_reply_is_guarded_by_time_not_by_message_count(tmp_path):
+    """The default must not encode a guess about how chatty a room is.
+
+    A previous version derived a message-count tolerance from the trailing
+    arrival rate. Live data broke it: 13 messages arrived during one turn where
+    the average predicted 4, so a current reply was still dropped. The guard is
+    now a deadline, which is what "too late" actually means.
+    """
     async def scenario():
         bot, store, clock, transport = build(tmp_path, lambda request: ModelResponse(
             content="", model="scripted",
             tool_calls=[ToolCall(id="c", name="finish_silently", arguments={})]))
-        loop = bot.autonomy
         await bot.start()
         try:
-            quiet = loop.recent_scope_rate(fixtures.TEST_CHAT, fixtures.TOPIC_A)
-            assert quiet == 0, quiet
+            assert bot.autonomy.default_reply_ttl == 180.0
 
-            # Roughly one message every 2.5s across the rate window.
-            for i in range(60):
-                bot._ingest(msg(900 + i, f"消息 {i}"), TickStats())
-                clock.advance(2.5)
+            await bot.step([msg(900, "在吗")])
+            clock.advance(5)
+            await bot.autonomous_step(force=True)
 
-            busy = loop.recent_scope_rate(fixtures.TEST_CHAT, fixtures.TOPIC_A)
-            assert busy > quiet, "a busy scope must get more tolerance than a quiet one"
-            assert busies_are_bounded(busy), busy
+            rows = store._query("SELECT 1 FROM actions")
+            assert rows == [], "finish_silently must not create a send intent"
         finally:
             await bot.stop()
             store.close()
-
-    def busies_are_bounded(value):
-        return 0 <= value <= 100
 
     run(scenario())
 
@@ -238,3 +238,77 @@ def test_schema_explains_freshness_instead_of_hiding_the_default():
     assert "strict" in description
     assert "discard" in description
     assert "bounded" in properties["max_unobserved_events"]["description"].lower()
+
+
+def test_a_burst_does_not_kill_the_reply_but_old_age_does(tmp_path):
+    """Measured live: 13 messages arrived where the trailing average said 4.
+
+    Counting alone cannot tell a burst from a topic change, so the default is
+    bounded by time: a burst is survivable, a three-minute-old reply is not.
+    """
+    async def scenario():
+        holder = {}
+
+        def responder(request):
+            for offset in range(12):  # a real burst, bigger than any estimate
+                holder["bot"]._ingest(msg(860 + offset, f"刷屏 {offset}"), TickStats())
+            return ModelResponse(
+                content="", model="scripted",
+                tool_calls=[ToolCall(id="c", name="send_message",
+                                     arguments={"text": "还得看我"})],
+            )
+
+        bot, store, clock, transport = build(tmp_path, responder)
+        holder["bot"] = bot
+        await bot.start()
+        try:
+            await bot.step([msg(850, "有人懂这个吗")])
+            clock.advance(5)
+            await bot.autonomous_step(force=True)
+            assert [s["text"] for s in transport.sends] == ["还得看我"], (
+                "a burst cancelled an otherwise current reply"
+            )
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_a_reply_that_grew_too_old_is_dropped_and_reported(tmp_path):
+    """The deadline is what protects against a stale reply, so it must report."""
+    async def scenario():
+        bot, store, clock, transport = build(tmp_path, lambda request: ModelResponse(
+            content="", model="scripted",
+            tool_calls=[ToolCall(id="c", name="finish_silently", arguments={})]))
+        await bot.start()
+        try:
+            # An intent that has already missed its deadline (store clock, not
+            # wall clock: the test store runs on a fake clock), as happens when
+            # the send budget or a slow turn holds it too long.
+            store.prepare_action(
+                action_id="late", workflow_id=None, chat_id=fixtures.TEST_CHAT,
+                topic_id=fixtures.TOPIC_A, text="迟到的回答", observed_through=0,
+                freshness="bounded", max_unobserved=100,
+                expires_at=clock() - 1,
+            )
+            await bot.autonomy.flush_actions()
+
+            assert transport.sends == [], "an expired reply must not be sent"
+            row = store.get_action("late")
+            assert row["status"] == "cancelled"
+            assert "expired_unexecuted" in (row["error"] or "")
+
+            events = store._query(
+                "SELECT payload_json FROM observation_events WHERE kind='action_result'"
+                " AND json_extract(payload_json, '$.action_id') = 'late'")
+            assert events, "an expired reply left no trace the agent could see"
+            payload = json.loads(events[-1]["payload_json"])
+            assert payload["status"] == "cancelled"
+            assert "waited too long" in payload["error"]
+            assert "nobody saw this" in payload["note"]
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())

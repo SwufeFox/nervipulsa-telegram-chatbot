@@ -64,3 +64,10 @@ introduction_path = "app/prompts/fox-introduction.md"
 
 [logging]
 level = "INFO"
+# 交互式控制台：在真终端里运行时默认开启，可输入 status / watch / queue 等命令。
+# 重定向输出或跑测试时不会读 stdin；也可以启动时用 --no-console 关掉。
+console_enabled = true
+# 每分钟打印一次全局状态块（0 关闭）。
+log_status_seconds = 60
+# 每行消息在日志里显示多少字（0 = 不显示内容）。
+log_summary_chars = 0

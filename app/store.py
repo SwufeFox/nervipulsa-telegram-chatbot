@@ -632,9 +632,9 @@ class Store:
             if status == "unknown":
                 payload["note"] = "delivery unconfirmed: the message may already be visible in the group. It is not retried."
             elif status == "cancelled":
+                # `error` carries why; the note says what it means for her.
                 payload["note"] = (
-                    "not sent: the conversation moved on before it could be "
-                    "delivered. Nobody saw this; say it again if it still matters."
+                    "not sent: nobody saw this. Say it again if it still matters."
                 )
             if error:
                 payload["error"] = error[:300]

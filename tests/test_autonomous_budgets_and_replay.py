@@ -193,7 +193,9 @@ def test_speak_interval_defers_send_without_blocking_decision(tmp_path):
             tmp_path, lambda request: ModelResponse(
                 content="", model="scripted",
                 tool_calls=[ToolCall(id="c", name="send_message",
-                                     arguments={"text": "hello"})]),
+                                     arguments={"text": "hello",
+                                                "freshness": "bounded",
+                                                "max_unobserved_events": 100})]),
             min_action_interval_seconds=300.0, max_actions_per_hour=100)
         await bot.start()
         await bot.step([msg(701, "say hi")])
@@ -230,7 +232,10 @@ def test_hourly_send_limit_preserves_decisions_and_delivery_time(tmp_path):
         def responder(request):
             calls.append(1)
             return ModelResponse(content="", model="scripted", tool_calls=[
-                ToolCall(id="c", name="send_message", arguments={"text": str(len(calls))})])
+                ToolCall(id="c", name="send_message",
+                         arguments={"text": str(len(calls)),
+                                    "freshness": "bounded",
+                                    "max_unobserved_events": 100})])
 
         bot, store, clock, transport, _ = build(
             tmp_path, responder, max_actions_per_hour=1, min_action_interval_seconds=0)

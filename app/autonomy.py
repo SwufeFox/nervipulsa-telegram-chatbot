@@ -160,14 +160,12 @@ class AutonomousLoop:
         self.chat_kinds: dict[int, str] = {}
         # Characters of message text to preview in logs. 0 means never.
         self.summary_chars = 0
-        # Floor for the adaptive tolerance of a default-freshness reply: an
-        # isolated pair of messages a second apart must not kill it.
-        self.min_unobserved_for_default = 3
-        # How far back the arrival rate is measured, and how long a thinking
-        # turn is assumed to take. Both feed `recent_scope_rate`.
-        self._rate_window_seconds = 300.0
-        self._turn_duration_estimate = 75.0
-        # How long a `bounded` intent may wait before it is dropped unset.
+        # A reply older than this is no longer a reply to anything: in a live
+        # group, minutes-old quips are worse than silence. This - not a message
+        # count - is what makes a default reply stale.
+        self.default_reply_ttl = 180.0
+        # How long an explicitly `bounded` intent may wait before it is dropped
+        # unset.
         # Deliberately longer than the hourly send budget: the budget is the
         # thing that should decide whether a held reply still goes out.
         self.bounded_action_ttl = 2 * 3600.0
@@ -325,28 +323,6 @@ class AutonomousLoop:
             if used >= self.max_activations_per_hour:
                 return f"activations_per_hour({used}/{self.max_activations_per_hour})"
         return None
-
-    def recent_scope_rate(self, chat_id: int, topic_id: int | None) -> int:
-        """Messages per thinking-turn this scope has been producing lately.
-
-        The model takes tens of seconds to answer. If the conversation produces
-        `r` messages per second, then on average `r * duration` messages will
-        arrive before the reply is ready - that is the number a reply has to
-        tolerate without being wrong. Measured over the recent window rather
-        than assumed, so a quiet topic keeps a tight bound and a busy one is
-        not held to an impossible standard.
-        """
-        window = self._rate_window_seconds
-        rows = self.store._query(
-            "SELECT COUNT(*) AS n FROM observation_events"
-            " WHERE chat_id = ? AND topic_id IS ? AND sequence > ?"
-            " AND received_at >= ?",
-            (chat_id, topic_id, 0, self._clock() - window),
-        )
-        count = int(rows[0]["n"]) if rows else 0
-        per_second = count / window if window > 0 else 0.0
-        expected = per_second * max(1.0, self._turn_duration_estimate)
-        return max(0, min(100, int(round(expected))))
 
     def _pending_counts(self, chat_id: int, topic_id: int | None) -> tuple[int, int]:
         actions = self.store._query(
@@ -676,6 +652,13 @@ class AutonomousLoop:
                 self.note_activity(int(row["chat_id"]), row["topic_id"])
                 continue
             if verdict == "expired":
+                # Same family as a stale drop: the reply was never sent, so
+                # the agent must not go on believing she said it.
+                log.info("action expired %s action_id=%s reason=too_late",
+                         _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]),
+                         action_id)
+                self._report_result(row, action_id, "cancelled",
+                                    "waited too long to send; dropped as stale")
                 continue
             if verdict != "claimed":
                 continue
@@ -744,6 +727,21 @@ class AutonomousLoop:
             return
         chat_id = int(row["chat_id"])
         topic_id = row["topic_id"]
+        try:
+            # Idempotent per action_id: `finish_action` already wrote this event
+            # in its own transaction for failed/unknown/cancelled, and a status
+            # set by `claim_action` (expired) has not. Writing it here covers
+            # both without duplicating either.
+            self.store.record_action_result(
+                action_id=action_id, chat_id=chat_id, topic_id=topic_id,
+                status=status, text=str(row["text"]), error=error,
+            )
+        except Exception as exc:
+            # Recording must never take down the sender, but silence about a
+            # failure here is how a dropped reply becomes invisible again.
+            log.error("could not record the result of action %s (error_type=%s)",
+                      action_id, type(exc).__name__)
+            return
         log.warning("action result %s action_id=%s status=%s",
                     _label(self.chat_kinds, chat_id, topic_id), action_id, status)
         self.note_activity(chat_id, topic_id)
@@ -795,19 +793,23 @@ class _ActionHandler:
             # making the default "send anyway" would let a reply land after the
             # question was already answered, which is worse.
             #
-            # So the tolerance is derived from how fast this scope is actually
-            # moving, and floored at a small number so an ordinary burst does
-            # not kill an otherwise fine reply.
+            # So a default reply is bounded by TIME, not by a message count. A
+            # burst of ten messages in a minute does not make a reply wrong -
+            # measured live, 13 arrived where a trailing average predicted 4,
+            # and a count-based guess dropped a perfectly current answer. A
+            # reply three minutes late is answering a conversation that has
+            # moved somewhere else.
             freshness = "bounded"
-            cap = max(self._loop.min_unobserved_for_default,
-                      self._loop.recent_scope_rate(self.chat_id, self.topic_id))
-        expires_at = None
-        if freshness == "bounded":
+            cap = 100  # the schema's maximum; time is the real guard
+            expires_at = self._loop._clock() + self._loop.default_reply_ttl
+        elif freshness == "bounded":
             # A bounded action cannot outlive a sane wall-clock window, but the
             # window must be longer than the longest legitimate wait. The send
             # budget can hold an intent for a full hour; expiring at exactly
             # one hour would drop it just as the budget freed up.
             expires_at = self._loop._clock() + self._loop.bounded_action_ttl
+        else:
+            expires_at = None
         created = self._loop.store.prepare_action(
             action_id=action_id,
             workflow_id=self.workflow_id,

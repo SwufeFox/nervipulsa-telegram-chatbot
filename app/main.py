@@ -30,6 +30,7 @@ from telegram import Bot
 from . import logwatch
 from .agent import NervipulsaAgent, ScriptedAgent
 from .bot import GroupAgent
+from .console import Console
 from .config import AppConfig, load_config, load_profile, load_system_prompt
 from .store import Store
 from .telegram import PythonTelegramBotTransport, TelegramClient, TransportError
@@ -225,6 +226,21 @@ def log_poll_ingress(tick, *, paused: bool) -> None:
         )
 
 
+def _is_tty() -> bool:
+    """True only when stdin is an interactive terminal.
+
+    Checked explicitly rather than trusting `sys.stdin` to exist: under a
+    service wrapper, a pipe, or a test runner it may be None or a closed file.
+    """
+    stream = getattr(sys, "stdin", None)
+    if stream is None:
+        return False
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        return False
+
+
 def log_status(bot, config: AppConfig) -> None:
     """Print the periodic status block.
 
@@ -252,7 +268,8 @@ def log_status(bot, config: AppConfig) -> None:
         log.info("%s", line)
 
 
-async def run_live(config: AppConfig, system_prompt: str) -> int:
+async def run_live(config: AppConfig, system_prompt: str, *,
+                   console_enabled: bool = False) -> int:
     if not config.telegram_token:
         print("TELEGRAM_BOT_TOKEN is required for live mode", file=sys.stderr)
         return 2
@@ -360,6 +377,16 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
                 pass
 
     timer = asyncio.create_task(wake_due_turns())
+
+    # The console is opt-in at the call site (a real terminal), never inferred
+    # inside the poll loop: a test or a redirected run must not end up waiting
+    # on stdin.
+    console = None
+    if console_enabled:
+        console = Console(bot=bot, config=config,
+                          level=getattr(logging, config.log_level.upper(), logging.INFO))
+        asyncio.create_task(console.run(stop), name="console")
+
     while not stop.is_set():
         if bot.stats.paused and not pause_logged:
             print("paused: still recording messages, will not reply")
@@ -422,6 +449,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay", action="store_true", help="offline replay, no network")
     parser.add_argument("--dry-run", action="store_true", help="never call the send API")
     parser.add_argument("--proactive", action="store_true", help="enable proactive participation")
+    parser.add_argument("--console", dest="console", action="store_true", default=None,
+                        help="force the interactive console on")
+    parser.add_argument("--no-console", dest="console", action="store_false",
+                        help="never read stdin; logs only")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -443,7 +474,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.replay:
         return asyncio.run(replay(config, system_prompt))
 
-    return asyncio.run(run_live(config, system_prompt))
+    # Interactive by default only when a human is actually at the terminal.
+    # A redirected run (`... | tee log`) must not block on a stdin nobody types
+    # into, and `--console`/`--no-console` always wins.
+    if args.console is None:
+        console_enabled = bool(getattr(config, "console_enabled", True)) and _is_tty()
+    else:
+        console_enabled = args.console
+
+    return asyncio.run(run_live(config, system_prompt,
+                                console_enabled=console_enabled))
 
 
 if __name__ == "__main__":

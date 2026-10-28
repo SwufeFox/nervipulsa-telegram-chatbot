@@ -150,6 +150,9 @@ class AppConfig:
     log_summary_chars: int = 0
     # How often the periodic status block is printed, in seconds. 0 disables it.
     log_status_seconds: float = 60.0
+    # Offer the interactive console when running in a real terminal. Set false
+    # to keep a live run log-only without passing --no-console every time.
+    console_enabled: bool = True
 
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     # Keys present in the config file that no setting consumes. Surfaced by
@@ -189,6 +192,7 @@ class AppConfig:
             "min_action_interval_seconds": self.min_action_interval_seconds,
             "log_summary_chars": self.log_summary_chars,
             "log_status_seconds": self.log_status_seconds,
+            "console_enabled": self.console_enabled,
             "proactive_min_interval_seconds": self.proactive_min_interval_seconds,
             "proactive_max_per_hour": self.proactive_max_per_hour,
             "provider": self.provider,
@@ -232,7 +236,7 @@ def load_config(
         "max_activations_per_hour", "max_actions_per_hour",
         "min_action_interval_seconds",
     )
-    bool_keys = ("dry_run", "proactive_enabled")
+    bool_keys = ("dry_run", "proactive_enabled", "console_enabled")
     list_keys = ("allowed_chat_ids", "admin_user_ids")
 
     for key in scalar_keys:
