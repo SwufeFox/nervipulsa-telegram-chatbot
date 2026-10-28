@@ -15,9 +15,9 @@ username = "linGotFoxbot"
 
 [telegram]
 # 只处理这些群。留空则拒绝启动——比不小心裸奔好。
-allowed_chat_ids = []
+allowed_chat_ids = [8283457993]
 # 谁能用 /pause /resume /stats /purge。填你自己的 user id。
-admin_user_ids = []
+admin_user_ids = [8283457993]
 poll_timeout = 25
 dry_run = false
 
@@ -46,7 +46,11 @@ provider = "magpie"
 base_url = "http://127.0.0.1:3425/v1"
 model = "opencode-go/muse-spark-1.3-contributor"
 context_limit = 1000000
-max_output_tokens = 1000000
+# 输出上限必须给输入留出空间：provider 会把 input + max_output 一起
+# 和模型窗口（1,048,576）比较。设成 1000000 时，只要历史超过约 4.8 万
+# token 就会被 400 context_length_exceeded 拒绝——而 context_limit 显示
+# 还很宽裕，非常容易误判。狐狸一条消息几十个 token 就够，给 8k 足矣。
+max_output_tokens = 8192
 request_timeout = 900.0
 
 [runtime]
