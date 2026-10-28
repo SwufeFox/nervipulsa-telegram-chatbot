@@ -160,6 +160,17 @@ class AutonomousLoop:
         self.chat_kinds: dict[int, str] = {}
         # Characters of message text to preview in logs. 0 means never.
         self.summary_chars = 0
+        # Floor for the adaptive tolerance of a default-freshness reply: an
+        # isolated pair of messages a second apart must not kill it.
+        self.min_unobserved_for_default = 3
+        # How far back the arrival rate is measured, and how long a thinking
+        # turn is assumed to take. Both feed `recent_scope_rate`.
+        self._rate_window_seconds = 300.0
+        self._turn_duration_estimate = 75.0
+        # How long a `bounded` intent may wait before it is dropped unset.
+        # Deliberately longer than the hourly send budget: the budget is the
+        # thing that should decide whether a held reply still goes out.
+        self.bounded_action_ttl = 2 * 3600.0
 
         self._wake = asyncio.Event()
         # Opened/last-activity per scope, both on the injected clock. Using
@@ -314,6 +325,28 @@ class AutonomousLoop:
             if used >= self.max_activations_per_hour:
                 return f"activations_per_hour({used}/{self.max_activations_per_hour})"
         return None
+
+    def recent_scope_rate(self, chat_id: int, topic_id: int | None) -> int:
+        """Messages per thinking-turn this scope has been producing lately.
+
+        The model takes tens of seconds to answer. If the conversation produces
+        `r` messages per second, then on average `r * duration` messages will
+        arrive before the reply is ready - that is the number a reply has to
+        tolerate without being wrong. Measured over the recent window rather
+        than assumed, so a quiet topic keeps a tight bound and a busy one is
+        not held to an impossible standard.
+        """
+        window = self._rate_window_seconds
+        rows = self.store._query(
+            "SELECT COUNT(*) AS n FROM observation_events"
+            " WHERE chat_id = ? AND topic_id IS ? AND sequence > ?"
+            " AND received_at >= ?",
+            (chat_id, topic_id, 0, self._clock() - window),
+        )
+        count = int(rows[0]["n"]) if rows else 0
+        per_second = count / window if window > 0 else 0.0
+        expected = per_second * max(1.0, self._turn_duration_estimate)
+        return max(0, min(100, int(round(expected))))
 
     def _pending_counts(self, chat_id: int, topic_id: int | None) -> tuple[int, int]:
         actions = self.store._query(
@@ -635,6 +668,11 @@ class AutonomousLoop:
                 # Give the agent another look instead of sending stale text.
                 self.store.finish_action(action_id, "cancelled",
                                          error="needs_refresh: unobserved events")
+                log.info("action dropped %s action_id=%s reason=conversation_moved_on",
+                         _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]),
+                         action_id)
+                self._report_result(row, action_id, "cancelled",
+                                    "the conversation moved on before this was sent")
                 self.note_activity(int(row["chat_id"]), row["topic_id"])
                 continue
             if verdict == "expired":
@@ -695,10 +733,12 @@ class AutonomousLoop:
         starts answering itself. The sent message still enters the chat log,
         so later turns see it as history.
 
-        The two cases that do get reported are exactly the ones that change
-        what she believes about the conversation: a message that failed to
-        send, and one whose delivery is unknown, where the group may be
-        looking at a sentence she thinks never arrived.
+        The cases that do get reported are exactly the ones that change what she
+        believes about the conversation: a message that failed to send, one
+        whose delivery is unknown (the group may be looking at a sentence she
+        thinks never arrived), and one that was dropped because the
+        conversation moved on. That last one matters most: without it she
+        believes she answered, stays quiet, and nobody ever hears from her.
         """
         if status == "sent":
             return
@@ -743,12 +783,31 @@ class _ActionHandler:
 
     def _send_message(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
         action_id = _new_id("act")
-        freshness = str(arguments.get("freshness") or "strict")
+        freshness = str(arguments.get("freshness") or "default")
         cap = int(arguments.get("max_unobserved_events") or 0)
+        if freshness == "default":
+            # Adapt to the pace of the room instead of demanding a frozen one.
+            #
+            # `strict` means "cancel if anything new arrived". In a group that
+            # produces a message every few seconds while the model is thinking
+            # for a minute, that cancels essentially every reply - measured
+            # live: two speak decisions, both cancelled, zero delivered. But
+            # making the default "send anyway" would let a reply land after the
+            # question was already answered, which is worse.
+            #
+            # So the tolerance is derived from how fast this scope is actually
+            # moving, and floored at a small number so an ordinary burst does
+            # not kill an otherwise fine reply.
+            freshness = "bounded"
+            cap = max(self._loop.min_unobserved_for_default,
+                      self._loop.recent_scope_rate(self.chat_id, self.topic_id))
         expires_at = None
         if freshness == "bounded":
-            # A bounded action still cannot outlive a sane wall-clock window.
-            expires_at = self._loop._clock() + 3600
+            # A bounded action cannot outlive a sane wall-clock window, but the
+            # window must be longer than the longest legitimate wait. The send
+            # budget can hold an intent for a full hour; expiring at exactly
+            # one hour would drop it just as the budget freed up.
+            expires_at = self._loop._clock() + self._loop.bounded_action_ttl
         created = self._loop.store.prepare_action(
             action_id=action_id,
             workflow_id=self.workflow_id,

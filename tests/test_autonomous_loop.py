@@ -183,7 +183,11 @@ def test_strict_action_is_not_sent_when_new_observations_arrive(tmp_path):
         async def responder(request):
             entered.set()
             await release.wait()
-            return tool_call("send_message", text="stale answer")
+            # This test is about the strict guarantee, which is now an explicit
+            # choice rather than the default; the adaptive default is covered
+            # in test_speak_in_busy_group.py.
+            return tool_call("send_message", text="stale answer",
+                             freshness="strict")
 
         bot, store, clock, transport, agent = build(tmp_path, responder)
         try:

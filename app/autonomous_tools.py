@@ -144,7 +144,17 @@ class _BaseTool:
 
 
 class _SendMessage(_BaseTool):
-    """Send one message to the current chat. This is the only way to speak."""
+    """Send one message to the current chat. This is the only way to speak.
+
+    `freshness` decides what happens when the conversation moves on while the
+    reply is being written - in a busy group that is the normal case, not the
+    exception. It is described here in full because an unexplained default was
+    silently discarding every message she wrote: `strict` cancels the send if
+    anything new arrives, and nothing had told the model that.
+
+    `default` is the one to leave alone for ordinary chat: it adapts to how
+    fast the conversation is moving instead of demanding a frozen room.
+    """
 
     name = "send_message"
 
@@ -154,8 +164,26 @@ class _SendMessage(_BaseTool):
             "properties": {
                 "text": {"type": "string", "minLength": 1, "maxLength": MAX_MESSAGE_CHARS},
                 "reply_to": {"type": "integer", "minimum": 1},
-                "freshness": {"type": "string", "enum": ["strict", "bounded"]},
-                "max_unobserved_events": {"type": "integer", "minimum": 0, "maximum": 100},
+                "freshness": {
+                    "type": "string",
+                    "enum": ["default", "strict", "bounded"],
+                    "description": (
+                        "How much newer conversation may arrive before this reply is "
+                        "discarded instead of sent. 'default' (recommended) tolerates "
+                        "the trickle of chatter that is normal in an active group. "
+                        "'strict' discards the reply if ANY new message arrived - use "
+                        "only when being overtaken by a correction would make the "
+                        "message wrong. 'bounded' sends only if at most "
+                        "max_unobserved_events newer messages arrived."
+                    ),
+                },
+                "max_unobserved_events": {
+                    "type": "integer", "minimum": 0, "maximum": 100,
+                    "description": (
+                        "With freshness='bounded': how many newer messages may arrive "
+                        "before this reply is dropped. Ignored otherwise."
+                    ),
+                },
             },
             "required": ["text"],
             "additionalProperties": False,
@@ -172,7 +200,7 @@ class _SendMessage(_BaseTool):
         ):
             return "invalid_payload"
         freshness = arguments.get("freshness")
-        if freshness is not None and freshness not in {"strict", "bounded"}:
+        if freshness is not None and freshness not in {"default", "strict", "bounded"}:
             return "invalid_payload"
         cap = arguments.get("max_unobserved_events")
         if cap is not None and (

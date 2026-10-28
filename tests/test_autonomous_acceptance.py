@@ -218,7 +218,11 @@ def test_inference_receives_new_input_and_respects_scope(tmp_path, same_topic):
         async def respond(request):
             entered.set()
             await release.wait()
-            return call('send_message', text='Answer from old observation')
+            # The same-topic assertion below is the strict guarantee, so ask
+            # for strict explicitly; the adaptive default would tolerate this
+            # single new message by design.
+            return call('send_message', text='Answer from old observation',
+                        freshness='strict')
         bot, store, clock, transport, agent, backend = build(tmp_path / 'app.db', respond)
         first = None
         try:

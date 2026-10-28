@@ -265,7 +265,8 @@ def test_pending_strict_action_is_refreshed_after_new_input(tmp_path):
     async def scenario():
         bot, store, clock, transport, _ = build(
             tmp_path, lambda request: ModelResponse(content="", model="scripted",
-                tool_calls=[ToolCall(id="c", name="send_message", arguments={"text": "hello"})]),
+                tool_calls=[ToolCall(id="c", name="send_message",
+                                     arguments={"text": "hello", "freshness": "strict"})]),
             min_action_interval_seconds=300, max_actions_per_hour=100)
         await bot.start()
         try:

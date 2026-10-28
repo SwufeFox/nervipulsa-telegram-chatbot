@@ -609,6 +609,11 @@ class Store:
     def _record_action_result(self, conn: sqlite3.Connection, *, action_id: str,
                               chat_id: int, topic_id: int | None, status: str,
                               text: str, error: str | None) -> int:
+        """Write the one result event for this action, or return the existing one.
+
+        Idempotent on `action_id`, so recovery can rerun it after a crash in
+        any of the commit windows without duplicating what the agent sees.
+        """
         existing = conn.execute(
             "SELECT sequence FROM action_result_events WHERE action_id = ?", (action_id,)
         ).fetchone()
@@ -626,6 +631,11 @@ class Store:
             payload: dict[str, Any] = {"action_id": action_id, "status": status, "text": text[:500]}
             if status == "unknown":
                 payload["note"] = "delivery unconfirmed: the message may already be visible in the group. It is not retried."
+            elif status == "cancelled":
+                payload["note"] = (
+                    "not sent: the conversation moved on before it could be "
+                    "delivered. Nobody saw this; say it again if it still matters."
+                )
             if error:
                 payload["error"] = error[:300]
             # Synthetic IDs must avoid collisions even if old events were deleted.
@@ -848,7 +858,10 @@ class Store:
                 "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?, updated_at = ? WHERE action_id = ?",
                 (status, telegram_message_id, (error or "")[:500] or None, self._now(), action_id),
             )
-            if status in {"failed", "unknown"}:
+            if status in {"failed", "unknown", "cancelled"}:
+                # Same transaction as the status change: a crash between them
+                # would leave a message the agent believes was sent, or one
+                # silently dropped with no record that it ever existed.
                 self._record_action_result(conn, action_id=action_id, chat_id=row["chat_id"],
                                            topic_id=row["topic_id"], status=status, text=row["text"], error=error)
             elif status == "sent" and telegram_message_id is not None:
@@ -868,7 +881,12 @@ class Store:
                 conn.execute("UPDATE actions SET status = 'unknown', error = ?, updated_at = ? WHERE action_id = ? AND status = 'sending'",
                              (error, self._now(), row["action_id"]))
             # Older versions could commit a terminal state without its event.
-            for row in conn.execute("SELECT * FROM actions WHERE status IN ('failed', 'unknown')"):
+            # `cancelled` is included: a reply dropped because the conversation
+            # moved on is something the agent must learn about, and before this
+            # the decision was invisible to her.
+            for row in conn.execute(
+                "SELECT * FROM actions WHERE status IN ('failed', 'unknown', 'cancelled')"
+            ):
                 self._record_action_result(conn, action_id=row["action_id"], chat_id=row["chat_id"],
                                            topic_id=row["topic_id"], status=row["status"], text=row["text"], error=row["error"])
             return [str(row["action_id"]) for row in rows]
