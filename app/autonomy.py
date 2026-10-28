@@ -253,15 +253,26 @@ class AutonomousLoop:
         dispatched tasks re-arm the wake event on completion.
         """
         now = self._monotonic()
-        # Timers first. `_wake_due` writes the wake as an observation, so doing
-        # it after the batch list is computed would make every timer cost an
-        # extra tick before the agent could act on its own reminder.
+        # Timers first: `_wake_due` writes the wake as an observation, so a
+        # later pass would have to exist before the agent could act on its own
+        # reminder.
+        fired: list[tuple[int, int | None]] = []
         for wait in self.store.due_waits(self._clock()):
-            self._wake_due(wait)
+            key = self._wake_due(wait)
+            if key is not None:
+                fired.append(key)
         if force:
             ready = list(self._batch_started)
         else:
             ready = self._batches(now)
+        # A fired timer is a scheduled wake, not a burst of chat: there is
+        # nothing to wait for. `_wake_due` necessarily opens a fresh batch
+        # window (idle == 0), which the debounce would reject, costing an extra
+        # pass. Dispatch these scopes now.
+        for key in fired:
+            if key not in ready and self.store.pending_observations(
+                    key[0], key[1], limit=1):
+                ready.append(key)
         results: list[WorkflowResult | None] = []
         tasks: list[asyncio.Task] = []
         for key in ready:
@@ -269,7 +280,20 @@ class AutonomousLoop:
             # queue behind the lock and grow the wait list. Scopes that do not
             # fit the concurrency budget are left in `_batch_started`, so the
             # next pass picks them up instead of spending a task to wait.
-            if key in self._active_topics or len(self._active_topics) >= self.max_concurrent_scopes:
+            # A finished task's cleanup runs as a *callback*, which the event
+            # loop schedules for later - not by the time `gather` returns. So a
+            # just-finished scope still sits in the dict, and trusting the dict
+            # alone made the next pass skip exactly the work that had become
+            # ready. Check the task, and evict a dead entry instead of dropping
+            # the scope.
+            existing = self._active_topics.get(key)
+            if existing is not None:
+                if not existing.done():
+                    continue
+                self._active_topics.pop(key, None)
+            if len(self._active_topics) >= self.max_concurrent_scopes:
+                # No slot free: the scope stays in `_batch_started`, so the next
+                # pass takes it rather than spending a task to queue behind one.
                 continue
             task = asyncio.create_task(self.activate(*key))
             self._active_topics[key] = task
@@ -294,7 +318,7 @@ class AutonomousLoop:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _wake_due(self, wait: Any) -> None:
+    def _wake_due(self, wait: Any) -> tuple[int, int | None] | None:
         """A timer the agent registered has come due: deliver it as input.
 
         Before this, a due timer only re-armed the batch window, and `_batches`
@@ -327,7 +351,7 @@ class AutonomousLoop:
         due = due_at is not None and float(due_at) <= now
         status = "satisfied" if due else "expired"
         if not due and (expires_at is None or float(expires_at) > now):
-            return  # nothing has actually happened yet
+            return None  # nothing has actually happened yet
 
         self.store.append_synthetic_observation(
             dedupe_key=f"wait:{wait_id}",
@@ -356,6 +380,9 @@ class AutonomousLoop:
         log.info("timer fired %s wait_id=%s status=%s purpose=%r",
                  _label(self.chat_kinds, chat_id, topic_id), wait_id, status,
                  str(wait["purpose"])[:60])
+        # Returned so `tick()` can dispatch this scope without a debounce round
+        # trip; the timer *is* the moment it asked for.
+        return chat_id, topic_id
 
     # -- budgets -----------------------------------------------------------
 

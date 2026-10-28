@@ -233,3 +233,46 @@ def test_expired_wait_wakes_with_a_closed_window(tmp_path):
             store.close()
 
     run(scenario())
+
+
+def test_a_fired_timer_is_not_debounced(tmp_path):
+    """The timer fires on this pass, not the one after it.
+
+    `_wake_due` opens a batch window at t=now, so `_batches` sees idle == 0 and
+    rejects it. Debounce exists to collect messages still arriving; a scheduled
+    wake has nothing to collect. Measured on the real config
+    (idle_seconds = 2.0), the wake landed one tick late - which in live mode is
+    a visible delay on every reminder the agent sets for itself.
+    """
+    calls = []
+
+    def responder(request):
+        calls.append(1)
+        return ModelResponse(content="", model="scripted", tool_calls=[
+            ToolCall(id=f"c{len(calls)}", name="finish_silently", arguments={})])
+
+    async def scenario():
+        bot, store, clock, transport, seen = build(tmp_path, responder)
+        # Keep the production debounce rather than zeroing it out.
+        bot.autonomy.idle_seconds = 2.0
+        await bot.start()
+        try:
+            await bot.step([msg(741, "我把日志贴出来了")])
+            clock.advance(5)
+            await bot.autonomous_step(force=True)
+            before = len(calls)
+
+            store.add_wait(wait_id="w", chat_id=fixtures.TEST_CHAT,
+                           topic_id=fixtures.TOPIC_A, kind="until",
+                           purpose="回来看", due_at=clock() - 1)
+
+            # One pass, no time advance: the timer must be dispatched here.
+            await bot.autonomous_step(force=False)
+            assert len(calls) == before + 1, (
+                "a fired timer waited for the debounce window"
+            )
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
