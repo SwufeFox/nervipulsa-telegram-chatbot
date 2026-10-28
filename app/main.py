@@ -237,6 +237,21 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
     if me.get("username"):
         config.bot_username = str(me["username"])
 
+    # Privacy mode decides what this bot can perceive. It defaults to ON for
+    # new bots, which means Telegram delivers only mentions and replies - every
+    # other group message never reaches the process. Autonomous participation
+    # depends on seeing ordinary conversation, so say so loudly instead of
+    # silently behaving like a mention-only bot.
+    if me.get("can_read_all_group_messages") is False:
+        print(
+            "WARNING: privacy mode is ON - Telegram will only deliver mentions and\n"
+            "         replies. Ordinary group messages will never arrive, so the\n"
+            "         agent cannot observe the conversation it is supposed to join.\n"
+            "         Fix: BotFather -> /setprivacy -> Disable, then remove and\n"
+            "         re-add the bot to the group for it to take effect.",
+            file=sys.stderr,
+        )
+
     if config.dry_run:
         print("DRY RUN: replies are logged and recorded, never sent to Telegram")
 

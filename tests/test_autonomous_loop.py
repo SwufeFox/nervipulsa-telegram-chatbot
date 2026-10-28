@@ -55,9 +55,11 @@ def tool_call(name, **arguments):
                          tool_calls=[ToolCall(id="call-1", name=name, arguments=arguments)])
 
 
-def build(tmp_path: Path, responder, *, transport=None, idle_seconds=0.0):
+def build(tmp_path: Path, responder, *, transport=None, idle_seconds=0.0,
+          min_action_interval_seconds=20.0, max_actions_per_hour=20,
+          max_activations_per_hour=60):
     clock = FakeClock()
-    store = Store(tmp_path / "app.db")
+    store = Store(tmp_path / "app.db", clock=clock)
     transport = transport or FakeTransport()
     prompt = load_default_profile()
     config = AppConfig(
@@ -65,6 +67,9 @@ def build(tmp_path: Path, responder, *, transport=None, idle_seconds=0.0):
         allowed_chat_ids=(fixtures.TEST_CHAT,), dry_run=False,
         debounce_seconds=2.0, idle_seconds=idle_seconds, workspace=str(tmp_path),
         model="scripted",
+        min_action_interval_seconds=min_action_interval_seconds,
+        max_actions_per_hour=max_actions_per_hour,
+        max_activations_per_hour=max_activations_per_hour,
     )
     settings = Settings(model="scripted", workspace=str(tmp_path / "runtime"),
                         max_timeout=30, default_timeout=30, context_limit=40000)
@@ -272,7 +277,12 @@ def test_topics_are_independent(tmp_path):
             topic = "A" if len(calls) == 1 else "B"
             return tool_call("send_message", text=f"reply {topic}")
 
-        bot, store, clock, transport, agent = build(tmp_path, responder)
+        # The speak interval is deliberately shared across topics (it guards
+        # the group, not one topic), so it has to be off for this test to be
+        # about isolation rather than about the disturbance budget.
+        bot, store, clock, transport, agent = build(
+            tmp_path, responder, min_action_interval_seconds=0.0,
+            max_actions_per_hour=100)
         try:
             await bot.start()
             await bot.step([

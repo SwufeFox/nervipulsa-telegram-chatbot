@@ -64,7 +64,7 @@ class AgentHandle:
 
 def build(db, responder, *, transport=None, scripted=False):
     clock = FakeClock()
-    store = Store(db)
+    store = Store(db, clock=clock)
     transport = transport or FakeTransport()
     prompt = load_default_profile()
     config = AppConfig(bot_name='Alma', bot_username='alma_bot',

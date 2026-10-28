@@ -550,7 +550,13 @@ def test_hard_exit_send_recovery(tmp_path, monkeypatch, boundary, expired):
     assert sends[0][:4] == (decisions[0][0],
         {"prepared": "pending", "network": "sending", "finished": "sent"}[boundary],
         0 if boundary == "prepared" else 1, 9001 if boundary == "finished" else None)
-    assert sends[0][4:] == ("The answer is forty two.", 1700000000.0)
+    # The send timestamp comes from the same injected clock the harness drives
+    # (it starts at 1700000000 and has advanced by the time the send row is
+    # written), so assert the text and that the timestamp is on that timeline
+    # rather than pinning one instant: the store no longer writes wall-clock
+    # time behind the scheduler's back.
+    assert sends[0][4] == "The answer is forty two."
+    assert 1700000000.0 <= sends[0][5] < 1700000100.0
     assert (turns[0][3] is not None, turns[0][4]) == (
         (True, "sent") if boundary == "finished" else (False, None))
     requests = network_requests(journal)

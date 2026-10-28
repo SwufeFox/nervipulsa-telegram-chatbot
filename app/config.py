@@ -95,6 +95,13 @@ class AppConfig:
     idle_seconds: float = 2.0
     max_batch_seconds: float = 15.0
     max_batch_observations: int = 24
+    # Resource limits, not social judgements: they bound how often the model
+    # may be asked to look and how often the bot may speak. Exhausting one
+    # defers the turn (the observations stay queued); it never becomes a
+    # recorded decision that the agent chose silence.
+    max_activations_per_hour: int = 60
+    max_actions_per_hour: int = 20
+    min_action_interval_seconds: float = 20.0
 
     # -- proactive rate limiting ------------------------------------------
     proactive_min_interval_seconds: float = 240.0
@@ -204,6 +211,12 @@ def load_config(
         "db_path", "provider", "base_url", "model", "context_limit",
         "request_timeout", "soul_path", "introduction_path", "system_prompt_path",
         "log_level", "max_output_tokens",
+        # Autonomous scheduling and its resource limits. These are the knobs
+        # an operator actually needs to tune cost and disturbance, so they
+        # must be readable from the file rather than only from Python.
+        "idle_seconds", "max_batch_seconds", "max_batch_observations",
+        "max_activations_per_hour", "max_actions_per_hour",
+        "min_action_interval_seconds",
     )
     bool_keys = ("dry_run", "proactive_enabled")
     list_keys = ("allowed_chat_ids", "admin_user_ids")

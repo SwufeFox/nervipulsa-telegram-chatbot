@@ -155,6 +155,10 @@ class GroupAgent:
     ) -> None:
         self.config = config
         self.store = store
+        # The store's clock is chosen at construction (`Store(path, clock=...)`)
+        # rather than overwritten here: a caller may deliberately give storage
+        # and scheduling different time sources, and silently swapping it would
+        # break that. Pass the same clock to both when they must agree.
         self.client = client
         self.system_prompt = system_prompt
         self._agent_factory = agent_factory
@@ -209,6 +213,10 @@ class GroupAgent:
                 send=self._send_action,
                 bot_name=config.bot_name,
                 bot_user_id=bot_user_id,
+                max_activations_per_hour=getattr(config, "max_activations_per_hour", 60),
+                max_actions_per_hour=getattr(config, "max_actions_per_hour", 20),
+                min_action_interval_seconds=getattr(
+                    config, "min_action_interval_seconds", 20.0),
             )
         else:
             self.autonomy = autonomy
@@ -251,7 +259,15 @@ class GroupAgent:
                 )
             self.recovered_inbound = self._count_pending_observations()
             if self.recovered_inbound:
-                log.warning("recovered %d observation(s) past the cursor",
+                # Counting is not recovering. Without re-arming the batch for
+                # every scope that still has unprocessed observations, those
+                # messages sit past the cursor forever and only get looked at
+                # if some later message happens to arrive in the same topic.
+                for chat_id, topic_id in self.store.scopes_with_pending_observations():
+                    if not self.config.allows_chat(chat_id):
+                        continue
+                    self.autonomy.note_activity(chat_id, topic_id)
+                log.warning("queued %d observation(s) past the cursor for replay",
                             self.recovered_inbound)
             return
 
@@ -345,11 +361,18 @@ class GroupAgent:
 
     # A shared tick for the whole `step()` call, so ingest and turn counters land
     # in the same record instead of one being discarded.
-    async def step(self, updates: list[dict[str, Any]]) -> tuple[TickStats, list[Decision]]:
+    async def step(self, updates: list[dict[str, Any]], *,
+                   run: bool | None = None) -> tuple[TickStats, list[Decision]]:
         """Ingest a batch, then close and answer turns. The unit tests' entry point.
 
         Same ordering as `poll_once` minus the network fetch, so a test exercises
         the production sequence instead of a parallel one.
+
+        `run=False` ingests only, matching `poll_once(background=True)` in live
+        mode where a separate wake loop drives activations. Tests that want to
+        control when the model is consulted need that separation; without it a
+        call to `step()` silently performs an activation and any later explicit
+        pass has nothing left to do.
         """
         tick = TickStats()
         tick.updates = len(updates)
@@ -359,7 +382,13 @@ class GroupAgent:
                 self._ingest_reaction(reaction, tick)
                 continue
             self._ingest(update, tick)
-        decisions = await self.run_turns(tick)
+        # In the legacy path a turn is decided synchronously, so running is
+        # what callers expect. The autonomous path is driven by a scheduler:
+        # letting step() also activate would hide when the model is consulted
+        # and make an explicit pass afterwards a no-op. Default accordingly,
+        # and let a caller override either way.
+        should_run = (self.autonomy is None) if run is None else run
+        decisions = await self.run_turns(tick) if should_run else []
         self.stats.absorb(tick)
         return tick, decisions
 

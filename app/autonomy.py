@@ -119,6 +119,9 @@ class AutonomousLoop:
         send: Callable[..., Awaitable[Any]] | None = None,
         bot_name: str = "Alma",
         bot_user_id: int | None = None,
+        max_activations_per_hour: int | None = 60,
+        max_actions_per_hour: int | None = 20,
+        min_action_interval_seconds: float = 20.0,
     ) -> None:
         self.store = store
         self._agent_for = agent_for
@@ -131,9 +134,21 @@ class AutonomousLoop:
         self._send = send
         self.bot_name = bot_name
         self.bot_user_id = bot_user_id
+        self.max_activations_per_hour = max_activations_per_hour
+        self.max_actions_per_hour = max_actions_per_hour
+        self.min_action_interval_seconds = min_action_interval_seconds
 
         self._wake = asyncio.Event()
+        # Opened/last-activity per scope, both on the injected clock. Using
+        # SQLite's received_at here would mix two time bases: the store writes
+        # wall-clock `time.time()`, while `_clock` is injectable (and a fake
+        # clock in tests), so a batch could look perpetually fresh.
         self._batch_started: dict[tuple[int, int | None], float] = {}
+        self._last_activity: dict[tuple[int, int | None], float] = {}
+        # Explicit "do not look before" time, set when a budget defers a
+        # scope. Kept separate from the idle window so a retry is not
+        # immediately eligible just because the batch had already gone quiet.
+        self._retry_after: dict[tuple[int, int | None], float] = {}
         self._locks: dict[tuple[int, int | None], asyncio.Lock] = {}
         self._flush_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()
@@ -153,7 +168,9 @@ class AutonomousLoop:
     def note_activity(self, chat_id: int, topic_id: int | None) -> None:
         """An observation landed; start (or continue) a batch window."""
         key = (chat_id, topic_id)
-        self._batch_started.setdefault(key, self._clock())
+        now = self._clock()
+        self._batch_started.setdefault(key, now)
+        self._last_activity[key] = now
         self._wake.set()
 
     def _batches(self, now: float) -> list[tuple[int, int | None]]:
@@ -165,8 +182,11 @@ class AutonomousLoop:
             )
             if not rows:
                 self._batch_started.pop(key, None)
+                self._last_activity.pop(key, None)
                 continue
-            last_at = max(float(row["received_at"]) for row in rows)
+            if now < self._retry_after.get(key, 0.0):
+                continue
+            last_at = self._last_activity.get(key, opened)
             idle = now - last_at
             age = now - opened
             if idle >= self.idle_seconds or age >= self.max_batch_seconds:
@@ -211,6 +231,45 @@ class AutonomousLoop:
         topic_id = wait["topic_id"]
         self.note_activity(int(wait["chat_id"]), topic_id)
 
+    # -- budgets -----------------------------------------------------------
+
+    def _budget_retry_delay(self) -> float:
+        """How long to wait before asking again after a budget refusal."""
+        # The interval limit is usually the shorter one, so use it when set;
+        # otherwise poll the hourly window a few times a minute.
+        if self.min_action_interval_seconds and self.min_action_interval_seconds > 0:
+            return float(self.min_action_interval_seconds)
+        return 30.0
+
+    def _budget_verdict(self, chat_id: int) -> str | None:
+        """Why the model must not run right now, or None if it may.
+
+        Two independent limits, both of them about resources and disturbance
+        rather than about how interesting a message looks:
+
+        * `max_activations_per_hour` bounds model cost.
+        * `min_action_interval_seconds` bounds how often the bot can speak.
+
+        The second is a delivery-facing limit that the agent does not get to
+        reinterpret as "I should stay quiet": the observation stays queued and
+        the turn is deferred, so it can still act once the interval passes.
+        """
+        now = self._clock()
+        hour_ago = now - 3600
+        if self.max_activations_per_hour is not None:
+            used = self.store.count_activations_since(chat_id, hour_ago)
+            if used >= self.max_activations_per_hour:
+                return "deferred_budget"
+        if self.min_action_interval_seconds and self.min_action_interval_seconds > 0:
+            last = self.store.last_action_at(chat_id)
+            if last is not None and now - last < self.min_action_interval_seconds:
+                return "deferred_budget"
+        if self.max_actions_per_hour is not None:
+            used = self.store.count_actions_since(chat_id, hour_ago)
+            if used >= self.max_actions_per_hour:
+                return "deferred_budget"
+        return None
+
     # -- one autonomous turn ----------------------------------------------
 
     async def activate(self, chat_id: int, topic_id: int | None) -> WorkflowResult | None:
@@ -227,7 +286,29 @@ class AutonomousLoop:
         )
         if not rows:
             self._batch_started.pop((chat_id, topic_id), None)
+            self._last_activity.pop((chat_id, topic_id), None)
+            self._retry_after.pop((chat_id, topic_id), None)
             return None
+
+        # A cost brake, not a social judgement. Observations stay queued and
+        # keep their order; the only thing that is deferred is the model call.
+        # Crucially this is recorded as `deferred_budget`, never as the agent
+        # having chosen silence, and the scope is re-armed so it runs later.
+        budget = self._budget_verdict(chat_id)
+        if budget is not None:
+            self.deferred += 1
+            # Hold the scope for a real interval rather than retrying on every
+            # 250 ms tick, which would spin the scheduler and flood the log
+            # while the window is still closed.
+            self._retry_after[(chat_id, topic_id)] = (
+                self._clock() + self._budget_retry_delay()
+            )
+            self._batch_started[(chat_id, topic_id)] = self._clock()
+            log.info("deferred chat %s topic %s: %s", chat_id, topic_id, budget)
+            return WorkflowResult(
+                workflow_id="", state="deferred", outcome=budget,
+                detail={"reason": budget, "pending": len(rows)},
+            )
 
         observations = [_row_to_observation(row) for row in rows]
         workflow_id = self.store.open_workflow(
@@ -238,6 +319,8 @@ class AutonomousLoop:
             workflow_id=_new_id("wf"),
         )
         self._batch_started.pop((chat_id, topic_id), None)
+        self._last_activity.pop((chat_id, topic_id), None)
+        self._retry_after.pop((chat_id, topic_id), None)
         self.workflows += 1
 
         # Mark any wait that this batch structurally satisfies. The agent is

@@ -289,8 +289,15 @@ class SendRecord:
 class Store:
     """One SQLite file, WAL, explicit transactions. No ORM, no async."""
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, clock: Any = None) -> None:
         self.path = Path(path)
+        # Time base. Defaults to wall clock. The application injects the same
+        # clock its scheduler uses, so budget windows and stored timestamps
+        # cannot disagree (a batch once looked perpetually fresh because the
+        # store wrote time.time() while the scheduler read an injected clock).
+        # Late-bound to the module function so a caller (or a test harness in
+        # another process) that patches `store._now` still controls time.
+        self._clock = clock or (lambda: _now())
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.path), timeout=15.0)
         self._conn.row_factory = sqlite3.Row
@@ -306,6 +313,10 @@ class Store:
         self._conn.commit()
 
     # -- lifecycle ---------------------------------------------------------
+
+    def _now(self) -> float:
+        """Current time on this store's injected clock."""
+        return float(self._clock())
 
     def close(self) -> None:
         self._conn.close()
@@ -340,7 +351,7 @@ class Store:
                 return
             conn.execute(
                 "INSERT INTO autonomous_responses VALUES (?, ?, ?, ?, ?)",
-                (activation.id, chat_id, topic_id, envelope, _now()),
+                (activation.id, chat_id, topic_id, envelope, self._now()),
             )
             for call in calls:
                 conn.execute(
@@ -350,6 +361,20 @@ class Store:
                 )
 
     # -- autonomous observation stream -------------------------------------
+
+    def scopes_with_pending_observations(self) -> list[tuple[int, int | None]]:
+        """Every (chat, topic) that still has observations past its cursor.
+
+        Used at startup: a restart must re-arm these scopes, not just count
+        them, or the backlog is never looked at again.
+        """
+        rows = self._query(
+            "SELECT DISTINCT o.chat_id, o.topic_id FROM observation_events o"
+            " LEFT JOIN observation_cursors c"
+            "   ON c.chat_id = o.chat_id AND c.topic_id IS o.topic_id"
+            " WHERE o.sequence > COALESCE(c.last_processed, 0)"
+        )
+        return [(int(row["chat_id"]), row["topic_id"]) for row in rows]
 
     def pending_observations(
         self, chat_id: int, topic_id: int | None, *, limit: int = 64
@@ -401,7 +426,7 @@ class Store:
             ).fetchone()
             if existing is not None:
                 return str(existing["workflow_id"])
-            now = _now()
+            now = self._now()
             conn.execute(
                 "INSERT INTO workflows (workflow_id, chat_id, topic_id, first_sequence,"
                 " last_sequence, state, detail_json, created_at, updated_at)"
@@ -438,7 +463,7 @@ class Store:
             conn.execute(
                 "UPDATE workflows SET state = ?, outcome = ?, detail_json = ?, updated_at = ?"
                 " WHERE workflow_id = ?",
-                (state, outcome, json.dumps(detail or {}, ensure_ascii=False), _now(),
+                (state, outcome, json.dumps(detail or {}, ensure_ascii=False), self._now(),
                  workflow_id),
             )
             if state == "completed":
@@ -454,7 +479,7 @@ class Store:
                         " VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, topic_id)"
                         " DO UPDATE SET last_processed = excluded.last_processed,"
                         " updated_at = excluded.updated_at",
-                        (row["chat_id"], row["topic_id"], row["last_sequence"], _now()),
+                        (row["chat_id"], row["topic_id"], row["last_sequence"], self._now()),
                     )
             return True
 
@@ -466,7 +491,7 @@ class Store:
             conn.execute(
                 "INSERT OR IGNORE INTO observation_skips"
                 " (sequence, chat_id, topic_id, reason, recorded_at) VALUES (?, ?, ?, ?, ?)",
-                (sequence, chat_id, topic_id, reason[:200], _now()),
+                (sequence, chat_id, topic_id, reason[:200], self._now()),
             )
 
     # -- agent waits and state ---------------------------------------------
@@ -483,7 +508,7 @@ class Store:
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)",
                 (wait_id, chat_id, topic_id, kind, purpose,
                  json.dumps(event_types, ensure_ascii=False) if event_types else None,
-                 due_at, expires_at, _now()),
+                 due_at, expires_at, self._now()),
             )
 
     def active_waits(self, chat_id: int, topic_id: int | None) -> list[sqlite3.Row]:
@@ -507,7 +532,7 @@ class Store:
         with self._write() as conn:
             cursor = conn.execute(
                 "UPDATE agent_waits SET status = ?, resolved_at = ?"
-                " WHERE wait_id = ? AND status = 'active'", (status, _now(), wait_id),
+                " WHERE wait_id = ? AND status = 'active'", (status, self._now(), wait_id),
             )
             return cursor.rowcount == 1
 
@@ -545,7 +570,7 @@ class Store:
                 " created_at = excluded.created_at, expires_at = excluded.expires_at",
                 (chat_id, topic_id, key,
                  json.dumps(value, ensure_ascii=False, allow_nan=False),
-                 source, _now(), expires_at),
+                 source, self._now(), expires_at),
             )
 
     def get_state(self, chat_id: int, topic_id: int | None, *, limit: int = 50) -> dict[str, Any]:
@@ -554,7 +579,7 @@ class Store:
             " WHERE chat_id = ? AND topic_id IS ? ORDER BY created_at DESC LIMIT ?",
             (chat_id, topic_id, limit),
         )
-        now = _now()
+        now = self._now()
         return {
             str(row["key"]): json.loads(row["value_json"])
             for row in rows
@@ -577,7 +602,7 @@ class Store:
                 " created_at, updated_at, expires_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 (action_id, workflow_id, chat_id, topic_id, reply_to, text,
-                 observed_through, freshness, max_unobserved, _now(), _now(), expires_at),
+                 observed_through, freshness, max_unobserved, self._now(), self._now(), expires_at),
             )
             return cursor.rowcount == 1
 
@@ -589,7 +614,7 @@ class Store:
         write transaction that flips the status, so two workers cannot both win
         and a new observation cannot slip in between the check and the claim.
         """
-        moment = _now() if now is None else now
+        moment = self._now() if now is None else now
         with self._write() as conn:
             row = conn.execute(
                 "SELECT * FROM actions WHERE action_id = ?", (action_id,),
@@ -634,7 +659,7 @@ class Store:
             conn.execute(
                 "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?,"
                 " updated_at = ? WHERE action_id = ?",
-                (status, telegram_message_id, (error or "")[:500] or None, _now(), action_id),
+                (status, telegram_message_id, (error or "")[:500] or None, self._now(), action_id),
             )
 
     def recover_orphaned_actions(self) -> list[str]:
@@ -644,7 +669,7 @@ class Store:
             conn.execute(
                 "UPDATE actions SET status = 'unknown',"
                 " error = 'process exited during send; delivery unconfirmed',"
-                " updated_at = ? WHERE status = 'sending'", (_now(),),
+                " updated_at = ? WHERE status = 'sending'", (self._now(),),
             )
             return [str(row["action_id"]) for row in rows]
 
@@ -657,6 +682,41 @@ class Store:
     def get_action(self, action_id: str) -> sqlite3.Row | None:
         rows = self._query("SELECT * FROM actions WHERE action_id = ?", (action_id,))
         return rows[0] if rows else None
+
+    # -- cost and disturbance budgets --------------------------------------
+
+    def count_actions_since(self, chat_id: int, since: float) -> int:
+        """How many messages actually reached the group since `since`.
+
+        Counts `sent` and `unknown`: an unknown delivery may well be visible,
+        so it must consume budget rather than let a retry storm through.
+        """
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM actions WHERE chat_id = ?"
+            " AND status IN ('sent', 'unknown') AND created_at >= ?",
+            (chat_id, since),
+        )
+        return int(rows[0]["n"]) if rows else 0
+
+    def last_action_at(self, chat_id: int) -> float | None:
+        rows = self._query(
+            "SELECT MAX(created_at) AS t FROM actions WHERE chat_id = ?"
+            " AND status IN ('sent', 'unknown')",
+            (chat_id,),
+        )
+        return float(rows[0]["t"]) if rows and rows[0]["t"] is not None else None
+
+    def count_activations_since(self, chat_id: int, since: float) -> int:
+        """Model opportunities granted since `since`, across all topics.
+
+        This is the cost brake: observations can arrive freely, but the number
+        of times the model is asked to look is bounded per hour.
+        """
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM workflows WHERE chat_id = ? AND created_at >= ?",
+            (chat_id, since),
+        )
+        return int(rows[0]["n"]) if rows else 0
 
     def record_bot_message(self, *, chat_id: int, topic_id: int | None, message_id: int,
                            text: str, sender_label: str, sender_id: int | None,
@@ -693,7 +753,7 @@ class Store:
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (update_id, chat_id, message_id, _now(), json.dumps(payload, ensure_ascii=False)),
+                (update_id, chat_id, message_id, self._now(), json.dumps(payload, ensure_ascii=False)),
             )
             return cursor.rowcount == 1
 
@@ -713,7 +773,7 @@ class Store:
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (update_id, chat_id, message_id, _now(), json.dumps({
+                (update_id, chat_id, message_id, self._now(), json.dumps({
                     "kind": "message_reaction",
                     "old_vote": old_vote,
                     "new_vote": new_vote,
@@ -732,7 +792,7 @@ class Store:
                 "INSERT INTO observation_events"
                 " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
                 " VALUES (?, ?, ?, 'feedback', ?, ?)",
-                (update_id, chat_id, sent["topic_id"], _now(), json.dumps({
+                (update_id, chat_id, sent["topic_id"], self._now(), json.dumps({
                     "message_id": message_id, "old_vote": old_vote, "new_vote": new_vote,
                 })),
             )
@@ -743,7 +803,7 @@ class Store:
                 " (update_id, chat_id, message_id, decision_id, old_vote, new_vote, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (update_id, chat_id, message_id, sent["decision_id"],
-                 old_vote, new_vote, _now()),
+                 old_vote, new_vote, self._now()),
             )
             return "recorded"
 
@@ -791,7 +851,7 @@ class Store:
             update = conn.execute(
                 "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (update_id, message.chat_id, message.message_id, _now(),
+                (update_id, message.chat_id, message.message_id, self._now(),
                  json.dumps(payload, ensure_ascii=False)),
             )
             if update.rowcount != 1:
@@ -804,7 +864,7 @@ class Store:
                  "message_edit" if conn.execute(
                      "SELECT 1 FROM messages WHERE chat_id = ? AND message_id = ?",
                      (message.chat_id, message.message_id),
-                 ).fetchone() else "message", _now(), json.dumps({
+                 ).fetchone() else "message", self._now(), json.dumps({
                      "message_id": message.message_id, "sender_id": message.sender_id,
                      "sender_label": message.sender_label, "is_bot": message.is_bot,
                      "text": message.text, "created_at": message.created_at,
@@ -965,14 +1025,14 @@ class Store:
                 "INSERT OR IGNORE INTO turns (turn_id, chat_id, topic_id, first_message,"
                 " last_message, opened_at, closed_at, trigger, outcome)"
                 " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, NULL)",
-                (turn_id, chat_id, topic_id, first_message, last_message, _now(), trigger),
+                (turn_id, chat_id, topic_id, first_message, last_message, self._now(), trigger),
             )
 
     def close_turn(self, turn_id: str, outcome: str) -> None:
         with self._write() as conn:
             conn.execute(
                 "UPDATE turns SET closed_at = ?, outcome = ? WHERE turn_id = ?",
-                (_now(), outcome, turn_id),
+                (self._now(), outcome, turn_id),
             )
 
     def record_decision(
@@ -1001,7 +1061,7 @@ class Store:
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                 (
                     decision_id, chat_id, topic_id, turn_id, outcome, reason,
-                    json.dumps(detail, ensure_ascii=False), trigger, _now(),
+                    json.dumps(detail, ensure_ascii=False), trigger, self._now(),
                 ),
             )
 
@@ -1063,7 +1123,7 @@ class Store:
         reply_to: int | None, text: str,
     ) -> None:
         """Record the intent once, preserving any existing delivery state."""
-        now = _now()
+        now = self._now()
         with self._write() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO sends (decision_id, chat_id, topic_id, reply_to,"
@@ -1090,7 +1150,7 @@ class Store:
                 " AND created_at >= ? AND NOT EXISTS (SELECT 1 FROM messages m"
                 " WHERE m.chat_id = sends.chat_id AND m.topic_id IS sends.topic_id"
                 " AND m.is_bot = 0 AND m.message_id > sends.reply_to)",
-                (_now(), decision_id, _now() - 86400, _now() - 86400, _now() - 86400),
+                (self._now(), decision_id, self._now() - 86400, self._now() - 86400, self._now() - 86400),
             )
             return cursor.rowcount == 1
 
@@ -1101,7 +1161,7 @@ class Store:
         if not rows:
             return True
         row = rows[0]
-        if row['superseded_by'] is not None or _now() - row['created_at'] > max_age:
+        if row['superseded_by'] is not None or self._now() - row['created_at'] > max_age:
             return True
         if row['reply_to'] is None:
             return False
@@ -1112,19 +1172,19 @@ class Store:
     def cancel_pending(self, decision_id: str, reason: str) -> None:
         with self._write() as conn:
             cursor = conn.execute("UPDATE sends SET status = 'failed', error = ?, updated_at = ?"
-                         " WHERE decision_id = ? AND status = 'pending'", (reason, _now(), decision_id))
+                         " WHERE decision_id = ? AND status = 'pending'", (reason, self._now(), decision_id))
             if cursor.rowcount:
                 conn.execute("UPDATE turns SET closed_at = ?, outcome = 'superseded' WHERE turn_id ="
                              " (SELECT turn_id FROM decisions WHERE decision_id = ?) AND closed_at IS NULL",
-                             (_now(), decision_id))
+                             (self._now(), decision_id))
 
     def finish_sent(self, decision_id: str, telegram_message_id: int, message: StoredMessage | None) -> None:
         """Commit confirmed delivery, turn closure and chat history together."""
         with self._write() as conn:
             conn.execute("UPDATE sends SET status = 'sent', telegram_message_id = ?, error = NULL, updated_at = ?"
-                         " WHERE decision_id = ? AND status = 'sending'", (telegram_message_id, _now(), decision_id))
+                         " WHERE decision_id = ? AND status = 'sending'", (telegram_message_id, self._now(), decision_id))
             conn.execute("UPDATE turns SET closed_at = ?, outcome = 'sent' WHERE turn_id ="
-                         " (SELECT turn_id FROM decisions WHERE decision_id = ?)", (_now(), decision_id))
+                         " (SELECT turn_id FROM decisions WHERE decision_id = ?)", (self._now(), decision_id))
             if message is not None:
                 conn.execute("INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"
                              " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
@@ -1137,7 +1197,7 @@ class Store:
             conn.execute(
                 "UPDATE sends SET status = 'sent', telegram_message_id = ?, error = NULL,"
                 " updated_at = ? WHERE decision_id = ?",
-                (telegram_message_id, _now(), decision_id),
+                (telegram_message_id, self._now(), decision_id),
             )
 
     def mark_send_unknown(self, decision_id: str, error: str) -> None:
@@ -1146,7 +1206,7 @@ class Store:
             conn.execute(
                 "UPDATE sends SET status = 'unknown', error = ?, updated_at = ?"
                 " WHERE decision_id = ?",
-                (error[:500], _now(), decision_id),
+                (error[:500], self._now(), decision_id),
             )
 
     def mark_send_failed(self, decision_id: str, error: str) -> None:
@@ -1155,7 +1215,7 @@ class Store:
             conn.execute(
                 "UPDATE sends SET status = 'failed', error = ?, updated_at = ?"
                 " WHERE decision_id = ?",
-                (error[:500], _now(), decision_id),
+                (error[:500], self._now(), decision_id),
             )
 
     def get_send(self, decision_id: str) -> SendRecord | None:
@@ -1181,7 +1241,7 @@ class Store:
                 "UPDATE sends SET status = 'unknown',"
                 " error = 'process exited during send; delivery unconfirmed', updated_at = ?"
                 " WHERE status = 'sending'",
-                (_now(),),
+                (self._now(),),
             )
             return [row["decision_id"] for row in rows]
 
