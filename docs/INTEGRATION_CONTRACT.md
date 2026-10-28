@@ -13,6 +13,7 @@ commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
             13c75ec   configurable output-token cap
             1eb558ca3a4c3b1cade8db71bddf41375ae89eb6   fix: preserve retry activation state
+            8498fb400d3b53d86da580c93b434bf11df3fa3e   feat: structured observations + pre-tool commit hook
 ```
 
 Core features consumed by this application:
@@ -23,6 +24,7 @@ Core features consumed by this application:
 | `6a300ce` | `Runtime(..., python_host=False)` → `NullPythonHost` |
 | `13c75ec` | `Settings.max_output_tokens` / `ModelRequest.max_output_tokens` |
 | `1eb558c` | retired `agent.retry` no longer produces a second activation; a recovered activation no longer keeps its stale pause error |
+| `8498fb4` | `Runtime.submit_observation(mapping)` admits a bounded structured observation and projects it as a `runtime_event` with its event id; `Runtime(..., response_commit_hook=)` runs after response validation and before recording or dispatching tools, and a raising hook pauses as `response_commit_failed`; observations reset the between-input activation budget while internal events stay capped |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
@@ -45,6 +47,7 @@ the shared contract updated **before** either side is merged.
 | historical working tree | based on `6a300ce` | Core 175 passed; app 131 passed | tests imported the sibling Core checkout with the optional output-token extension |
 | 0.1.0 | `13c75ec` | 175 passed alongside 3 intermittent Windows failures in one full run | configurable output-token cap; clean dependency install verified 2026-10-28 |
 | 0.1.0 | `1eb558ca3a4c3b1cade8db71bddf41375ae89eb6` | 181 passed | fixes retry control-event double activation and stale pause error; verified with the App suite (194 passed) and offline milestones |
+| 0.2.0 | `8498fb400d3b53d86da580c93b434bf11df3fa3e` | 187 passed | autonomous participation: structured observations, pre-tool commit hook, observation budget reset; App suite 257 passed |
 
 ## Depends on (public, stable)
 
