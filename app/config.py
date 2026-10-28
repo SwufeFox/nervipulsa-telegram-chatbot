@@ -144,6 +144,12 @@ class AppConfig:
 
     # -- diagnostics -------------------------------------------------------
     log_level: str = "INFO"
+    # Characters of message text to show in a log preview. 0 (the default)
+    # keeps message content out of the terminal entirely; any positive value is
+    # a deliberate choice by the operator.
+    log_summary_chars: int = 0
+    # How often the periodic status block is printed, in seconds. 0 disables it.
+    log_status_seconds: float = 60.0
 
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
     # Keys present in the config file that no setting consumes. Surfaced by
@@ -181,6 +187,8 @@ class AppConfig:
             "max_activations_per_hour": self.max_activations_per_hour,
             "max_actions_per_hour": self.max_actions_per_hour,
             "min_action_interval_seconds": self.min_action_interval_seconds,
+            "log_summary_chars": self.log_summary_chars,
+            "log_status_seconds": self.log_status_seconds,
             "proactive_min_interval_seconds": self.proactive_min_interval_seconds,
             "proactive_max_per_hour": self.proactive_max_per_hour,
             "provider": self.provider,
@@ -216,7 +224,7 @@ def load_config(
         "proactive_max_per_hour", "proactive_min_confidence", "workspace",
         "db_path", "provider", "base_url", "model", "context_limit",
         "request_timeout", "soul_path", "introduction_path", "system_prompt_path",
-        "log_level", "max_output_tokens",
+        "log_level", "max_output_tokens", "log_summary_chars", "log_status_seconds",
         # Autonomous scheduling and its resource limits. These are the knobs
         # an operator actually needs to tune cost and disturbance, so they
         # must be readable from the file rather than only from Python.

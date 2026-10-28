@@ -83,6 +83,12 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _label(kinds: dict[int, str], chat_id: int, topic_id: int | None) -> str:
+    from .logwatch import scope
+
+    return scope(chat_id, topic_id, kinds.get(chat_id))
+
+
 def _row_to_observation(row: Any) -> Observation:
     payload = json.loads(row["payload_json"])
     return Observation(
@@ -149,6 +155,11 @@ class AutonomousLoop:
         # How many pending intents one outbox pass may examine. Bounded so a
         # single chat's throttled backlog cannot crowd out other chats.
         self.max_actions_per_flush = max(1, int(max_actions_per_flush))
+        # chat_id -> Bot API chat type, supplied by the ingest path so log
+        # lines can say `chat:-100…(group)` instead of a bare id.
+        self.chat_kinds: dict[int, str] = {}
+        # Characters of message text to preview in logs. 0 means never.
+        self.summary_chars = 0
 
         self._wake = asyncio.Event()
         # Opened/last-activity per scope, both on the injected clock. Using
@@ -375,7 +386,11 @@ class AutonomousLoop:
                 self._monotonic() + self._budget_retry_delay()
             )
             self._batch_started[(chat_id, topic_id)] = self._monotonic()
-            log.info("activation deferred chat_id=%s topic_id=%s reason=activation_budget observations=%s budget=%s first_sequence=%s last_sequence=%s retry_seconds=%s", chat_id, topic_id, len(rows), budget, rows[0]["sequence"], rows[-1]["sequence"], self._budget_retry_delay())
+            log.warning("activation deferred %s reason=activation_budget budget=%s "
+                        "observations=%s seq=%s-%s retry_seconds=%s",
+                        _label(self.chat_kinds, chat_id, topic_id), budget, len(rows),
+                        rows[0]["sequence"], rows[-1]["sequence"],
+                        self._budget_retry_delay())
             return WorkflowResult(
                 workflow_id="", state="deferred", outcome=budget,
                 detail={"reason": budget, "pending": len(rows)},
@@ -393,7 +408,32 @@ class AutonomousLoop:
         self._last_activity.pop((chat_id, topic_id), None)
         self._retry_after.pop((chat_id, topic_id), None)
         self.workflows += 1
-        log.info("batch activated chat_id=%s topic_id=%s workflow_id=%s observations=%s first_sequence=%s last_sequence=%s", chat_id, topic_id, workflow_id, len(observations), observations[0].sequence, observations[-1].sequence)
+        # How far behind this batch was, and how much is still queued after
+        # it: the backlog number is what turns "it looks fine" into "it is 40
+        # minutes behind".
+        # Prefer the message's own timestamp: after a restart the whole backlog
+        # is ingested at once, so `received_at` would claim a zero lag for
+        # messages that are 40 minutes old.
+        moments = [
+            float(o.payload.get("created_at") or o.received_at)
+            for o in observations
+        ]
+        oldest = min(moments, default=0.0)
+        lag = max(0.0, time.time() - oldest) if oldest else 0.0
+        # Count what is left *after* this batch, not what the cursor says: the
+        # workflow is still running, so the cursor has not moved yet and would
+        # report this very batch as backlog.
+        remaining = len(self.store._query(
+            "SELECT 1 FROM observation_events"
+            " WHERE chat_id = ? AND topic_id IS ? AND sequence > ? LIMIT ?",
+            (chat_id, topic_id, observations[-1].sequence,
+             self.max_batch_observations),
+        ))
+        log.info("batch activated %s workflow=%s observations=%s seq=%s-%s "
+                 "oldest_lag=%.0fs backlog_after=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id,
+                 len(observations), observations[0].sequence,
+                 observations[-1].sequence, lag, remaining)
 
         # Mark any wait that this batch structurally satisfies. The agent is
         # woken by the events themselves; the wait is not a decision.
@@ -404,7 +444,8 @@ class AutonomousLoop:
 
         agent = await self._agent_for(chat_id, topic_id)
         if agent is None:
-            log.info("activation ended chat_id=%s topic_id=%s workflow_id=%s outcome=no_agent", chat_id, topic_id, workflow_id)
+            log.info("activation ended %s workflow=%s outcome=no_agent",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id)
             self.store.close_workflow(workflow_id, "failed", outcome="no_agent")
             self._requeue_after_failure(chat_id, topic_id)
             return WorkflowResult(workflow_id, "failed", "no_agent")
@@ -415,7 +456,8 @@ class AutonomousLoop:
         observation_payload = self._render(observations, chat_id, topic_id)
 
         started = time.monotonic()
-        log.info("agent call started chat_id=%s topic_id=%s workflow_id=%s", chat_id, topic_id, workflow_id)
+        log.info("agent call started %s workflow=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id)
         try:
             if hasattr(agent, "observe"):
                 result = await agent.observe(observation_payload, tag=workflow_id,
@@ -425,7 +467,11 @@ class AutonomousLoop:
                                          prompt=json.dumps(observation_payload, ensure_ascii=False),
                                          tag=workflow_id)
         except Exception as exc:
-            log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=agent_error error_type=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, type(exc).__name__, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
+            log.info("agent call ended %s workflow=%s outcome=agent_error error_type=%s "
+                 "elapsed_ms=%.1f pending_actions=%s waits=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id,
+                 type(exc).__name__, (time.monotonic() - started) * 1000,
+                 *self._pending_counts(chat_id, topic_id))
             self.store.close_workflow(workflow_id, "failed",
                                       outcome="agent_error", detail={"error": str(exc)[:500]})
             self._requeue_after_failure(chat_id, topic_id)
@@ -434,7 +480,11 @@ class AutonomousLoop:
         self.model_calls += 1
         status = getattr(result, "status", "error")
         if status in {"error", "timeout", "rejected", "paused"}:
-            log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=model_activation_failed activation_status=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, status, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
+            log.info("agent call ended %s workflow=%s outcome=model_activation_failed "
+                 "activation_status=%s elapsed_ms=%.1f pending_actions=%s waits=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id, status,
+                 (time.monotonic() - started) * 1000,
+                 *self._pending_counts(chat_id, topic_id))
             # A provider failure is not the agent choosing silence.
             self.store.close_workflow(
                 workflow_id, "failed", outcome="model_activation_failed",
@@ -457,7 +507,11 @@ class AutonomousLoop:
 
         outcome = getattr(result, "outcome", None) or handler.outcome or "no_action"
         logged_outcome = outcome if isinstance(outcome, str) and outcome in {"silent", "no_action", "speak", "waiting"} else "other"
-        log.info("agent call ended chat_id=%s topic_id=%s workflow_id=%s outcome=%s elapsed_ms=%.1f pending_actions=%s waits=%s", chat_id, topic_id, workflow_id, logged_outcome, (time.monotonic() - started) * 1000, *self._pending_counts(chat_id, topic_id))
+        log.info("agent call ended %s workflow=%s outcome=%s elapsed_ms=%.1f "
+                 "pending_actions=%s waits=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id, logged_outcome,
+                 (time.monotonic() - started) * 1000,
+                 *self._pending_counts(chat_id, topic_id))
         if handler.actions:
             self.actions_staged += len(handler.actions)
         if outcome in {"silent", "no_action"} and not handler.actions:
@@ -567,13 +621,15 @@ class AutonomousLoop:
             )
             if verdict == "throttled":
                 if action_id not in self._throttled_actions:
-                    log.info("action throttled chat_id=%s topic_id=%s action_id=%s",
-                             row["chat_id"], row["topic_id"], action_id)
+                    log.info("action throttled %s action_id=%s",
+                             _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]), action_id)
                     self._throttled_actions.add(action_id)
                 continue
             self._throttled_actions.discard(action_id)
             logged_verdict = verdict if verdict in {"claimed", "stale", "expired"} else "other"
-            log.info("action claim chat_id=%s topic_id=%s action_id=%s outcome=%s", row["chat_id"], row["topic_id"], action_id, logged_verdict)
+            log.info("action claim %s action_id=%s outcome=%s",
+                     _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]),
+                     action_id, logged_verdict)
             if verdict == "stale":
                 # Same-topic information arrived that this intent never saw.
                 # Give the agent another look instead of sending stale text.
@@ -598,7 +654,9 @@ class AutonomousLoop:
                 )
             except Exception as exc:
                 # Unknown, not failed: the request may have reached Telegram.
-                log.info("action delivery chat_id=%s topic_id=%s action_id=%s outcome=unknown error_type=%s", row["chat_id"], row["topic_id"], action_id, type(exc).__name__)
+                log.info("action delivery %s action_id=%s outcome=unknown error_type=%s",
+                         _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]),
+                         action_id, type(exc).__name__)
                 detail = str(exc)[:500]
                 self.store.finish_action(action_id, "unknown", error=detail)
                 self._report_result(row, action_id, "unknown", detail)
@@ -606,7 +664,9 @@ class AutonomousLoop:
             status = getattr(outcome, "status", None)
             name = getattr(status, "value", status)
             error = getattr(outcome, "error", None)
-            log.info("action delivery chat_id=%s topic_id=%s action_id=%s outcome=%s", row["chat_id"], row["topic_id"], action_id, name if name in ("sent", "unknown") else "failed")
+            log.info("action delivery %s action_id=%s outcome=%s",
+                     _label(self.chat_kinds, int(row["chat_id"]), row["topic_id"]),
+                     action_id, name if name in ("sent", "unknown") else "failed")
             if name == "sent":
                 self.actions_sent += 1
                 telegram_id = getattr(outcome, "telegram_message_id", None)
@@ -644,7 +704,8 @@ class AutonomousLoop:
             return
         chat_id = int(row["chat_id"])
         topic_id = row["topic_id"]
-        log.warning("action result action_id=%s chat_id=%s status=%s", action_id, chat_id, status)
+        log.warning("action result %s action_id=%s status=%s",
+                    _label(self.chat_kinds, chat_id, topic_id), action_id, status)
         self.note_activity(chat_id, topic_id)
 
 

@@ -21,11 +21,13 @@ import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from telegram import Bot
 
+from . import logwatch
 from .agent import NervipulsaAgent, ScriptedAgent
 from .bot import GroupAgent
 from .config import AppConfig, load_config, load_profile, load_system_prompt
@@ -223,6 +225,33 @@ def log_poll_ingress(tick, *, paused: bool) -> None:
         )
 
 
+def log_status(bot, config: AppConfig) -> None:
+    """Print the periodic status block.
+
+    Per-event lines answer "what happened"; this answers "where do we stand".
+    A backlog, a stuck turn or a nearly exhausted budget is otherwise only
+    visible by querying SQLite by hand.
+    """
+    log = logging.getLogger("app.status")
+    try:
+        snapshot = logwatch.status_snapshot(
+            bot.store, window=3600.0,
+        )
+        lines = logwatch.status_lines(
+            snapshot,
+            kinds=bot.chat_kinds,
+            limits={
+                "max_activations_per_hour": config.max_activations_per_hour,
+                "max_actions_per_hour": config.max_actions_per_hour,
+            },
+        )
+    except Exception as exc:
+        log.warning("status snapshot failed (error_type=%s)", type(exc).__name__)
+        return
+    for line in lines:
+        log.info("%s", line)
+
+
 async def run_live(config: AppConfig, system_prompt: str) -> int:
     if not config.telegram_token:
         print("TELEGRAM_BOT_TOKEN is required for live mode", file=sys.stderr)
@@ -313,9 +342,18 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
     pause_logged = False
     log = logging.getLogger(__name__)
     consecutive_failures = 0
+    status_seconds = getattr(config, "log_status_seconds", 0) or 0
+    last_status = 0.0
+
     async def wake_due_turns() -> None:
+        nonlocal last_status
         while not stop.is_set():
             bot.schedule_turns()
+            # Checked here rather than on its own task so it shares the same
+            # 100 ms tick and cannot drift from the scheduler it reports on.
+            if status_seconds > 0 and time.monotonic() - last_status >= status_seconds:
+                last_status = time.monotonic()
+                log_status(bot, config)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=0.1)
             except asyncio.TimeoutError:

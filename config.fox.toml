@@ -15,7 +15,7 @@ username = "linGotFoxbot"
 
 [telegram]
 # 只处理这些群。留空则拒绝启动——比不小心裸奔好。
-allowed_chat_ids = [8283457993]
+allowed_chat_ids = [8283457993, -1004402809405]
 # 谁能用 /pause /resume /stats /purge。填你自己的 user id。
 admin_user_ids = [8283457993]
 poll_timeout = 25

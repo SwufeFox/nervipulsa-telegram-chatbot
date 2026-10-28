@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+from . import logwatch
 from .agent import AgentAdapter, AgentResult
 from .autonomy import AutonomousLoop
 from .config import AppConfig
@@ -199,6 +200,9 @@ class GroupAgent:
         self._recovered_sends: list[SendRecord] = []
         self._recovered_decisions: list[Any] = []
         self._topic_locks: dict[tuple[int, int | None], asyncio.Lock] = {}
+        # chat_id -> Bot API chat type, learned while ingesting. A log line
+        # reading `chat:-1004…(group)` is worth much more than the bare id.
+        self.chat_kinds: dict[int, str] = {}
         self._workers: set[asyncio.Task] = set()
         self._worker_limit = asyncio.Semaphore(4)
         # Guarded in `_autonomous_pass`: the wake loop must not start a second
@@ -232,6 +236,10 @@ class GroupAgent:
                     self._clock if self._clock is not time.time else time.monotonic
                 ),
             )
+            # Shared, not copied: the ingest path learns a chat's type on the
+            # first message, and autonomy's log lines should see it.
+            self.autonomy.chat_kinds = self.chat_kinds
+            self.autonomy.summary_chars = getattr(config, "log_summary_chars", 0)
         else:
             self.autonomy = autonomy
 
@@ -450,7 +458,8 @@ class GroupAgent:
         if not self.config.allows_chat(inbound.chat_id):
             # Reject before persistence or scheduling.
             tick.unauthorized += 1
-            log.warning("unauthorized update chat_id=%s chat_type=%s update_type=message",
+            log.warning("unauthorized update chat_id=%s chat_type=%s update_type=message "
+                        "(add this id to allowed_chat_ids to include it)",
                         inbound.chat_id, _safe_chat_type(inbound.chat_type))
             return
 
@@ -495,6 +504,14 @@ class GroupAgent:
             return
 
         tick.messages_stored += 1
+        if inbound.chat_type:
+            self.chat_kinds[inbound.chat_id] = inbound.chat_type
+        preview = logwatch.summary(inbound.text, self.config.log_summary_chars)
+        log.info("stored %s message_id=%s sender=%s kind=%s%s",
+                 logwatch.scope(inbound.chat_id, inbound.topic_id, inbound.chat_type),
+                 inbound.message_id, inbound.sender_label,
+                 inbound.media_kind or "text",
+                 f' text="{preview}"' if preview else "")
 
         # Our own message echoed back by the API: keep it in the log for context,
         # but never open a turn on it.

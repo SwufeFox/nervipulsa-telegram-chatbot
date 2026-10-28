@@ -36,8 +36,9 @@ def test_batch_call_and_untrusted_outcome_are_safe(caplog):
     loop = make_loop(store, clock, Agent())
     with caplog.at_level(logging.INFO, logger="app.autonomy"):
         run(loop.activate(42, 7))
-    assert "batch activated chat_id=42 topic_id=7 workflow_id=wf_" in caplog.text
-    assert "observations=2 first_sequence=1 last_sequence=2" in caplog.text
+    assert "batch activated chat:42(dm)/topic:7 workflow=wf_" in caplog.text
+    assert "observations=2 seq=1-2" in caplog.text
+    assert "backlog_after=0" in caplog.text
     assert "agent call started" in caplog.text
     assert "outcome=other elapsed_ms=" in caplog.text
     assert "pending_actions=0 waits=0" in caplog.text
@@ -58,7 +59,8 @@ def test_agent_exception_and_budget_do_not_log_secrets(caplog):
         run(loop.activate(42, 7))
         loop.max_activations_per_hour = None
         run(loop.activate(42, 7))
-    assert "reason=activation_budget observations=2" in caplog.text
+    assert "reason=activation_budget" in caplog.text
+    assert "observations=2" in caplog.text
     assert "outcome=agent_error error_type=ValueError" in caplog.text
     assert SECRET not in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
@@ -85,7 +87,7 @@ def test_throttled_action_logged_once_then_claimed_unknown(caplog):
             clock.advance(0.25)
         clock.advance(21)
         run(loop.flush_actions())
-    assert caplog.text.count("action throttled chat_id=42 topic_id=7 action_id=pending") == 1
+    assert caplog.text.count("action throttled chat:42(dm)/topic:7 action_id=pending") == 1
     assert "action_id=pending outcome=claimed" in caplog.text
     assert "action_id=pending outcome=unknown error_type=RuntimeError" in caplog.text
     assert SECRET not in caplog.text
