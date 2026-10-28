@@ -32,6 +32,7 @@ def make_bot(store, config, transport, clock, system_prompt, responder=None, **k
         PolicyConfig(proactive_enabled=False, min_interval_seconds=240, max_per_hour=4)
     )
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=turns, policy=policy, bot_user_id=fixtures.ALMA, clock=clock,
@@ -134,6 +135,7 @@ def test_provider_activation_failure_is_not_counted_as_empty_silence(
 
     agent = FailedAgent()
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -571,6 +573,7 @@ def test_configured_threshold_reaches_the_policy(store, transport, clock,
     # No explicit policy: this must go through the bot's own default wiring,
     # which is where the field was being dropped.
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: ScriptedAgent(lambda p: "x"),
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),

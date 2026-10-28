@@ -23,6 +23,7 @@ from conftest import FakeTransport, run
 def make_bot(store, config, transport, clock, system_prompt, responder=None):
     agent = ScriptedAgent(responder or (lambda prompt: "a reply"))
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),

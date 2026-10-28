@@ -117,6 +117,8 @@ class NervipulsaAgent:
         system_prompt: str,
         backend: ModelBackend | None = None,
         timeout: float = 60.0,
+        tool_catalog: Any | None = None,
+        response_commit_hook: Any | None = None,
     ) -> None:
         if not system_prompt.strip():
             raise ValueError("a non-empty system prompt is required")
@@ -132,6 +134,8 @@ class NervipulsaAgent:
             adapter=settings.adapter,
         )
         self._timeout = timeout
+        self._tool_catalog = tool_catalog
+        self._response_commit_hook = response_commit_hook
         self._runtime: Runtime | None = None
         self._lock = asyncio.Lock()
 
@@ -146,7 +150,8 @@ class NervipulsaAgent:
             self._settings,
             self._backend,
             self._workspace,
-            tool_catalog=EmptyToolCatalog(),
+            tool_catalog=self._tool_catalog or EmptyToolCatalog(),
+            response_commit_hook=self._response_commit_hook,
             system_prompt=self._system_prompt,
             # No tool is exposed, so nothing in this application can submit
             # Python. Declining the host means no interpreter is spawned and
@@ -157,13 +162,26 @@ class NervipulsaAgent:
         )
         await runtime.start()
         self._runtime = runtime
-        # Fail loudly at startup rather than on the first message: if the tools
-        # are not empty, the security boundary is broken.
+        # Fail loudly at startup rather than on the first message. The only
+        # acceptable tool set is the closed action catalog: a stray python_exec
+        # (or any other executor) here would hand the model arbitrary code in
+        # the host process, which this application never does.
+        from .autonomous_tools import CATALOG_TOOL_NAMES
+
         exposed = [schema.get("function", {}).get("name") for schema in runtime.actor.tools]
-        if exposed:
+        if self._tool_catalog is None:
+            allowed: set[str] = set()
+        else:
+            allowed = set(str(name) for name in getattr(self._tool_catalog, "names", ()))
+            if allowed != set(CATALOG_TOOL_NAMES):
+                await runtime.shutdown()
+                self._runtime = None
+                raise RuntimeError(f"tool catalog exposes an unexpected set: {sorted(allowed)}")
+        unexpected = [name for name in exposed if name not in allowed]
+        if unexpected:
             await runtime.shutdown()
             self._runtime = None
-            raise RuntimeError(f"runtime exposed tools to the model: {exposed}")
+            raise RuntimeError(f"runtime exposed tools to the model: {unexpected}")
 
     async def stop(self) -> None:
         runtime, self._runtime = self._runtime, None
@@ -171,7 +189,34 @@ class NervipulsaAgent:
             await runtime.shutdown()
 
     async def ask(self, *, chat_id: int, prompt: str, tag: str) -> AgentResult:
-        """Submit one prompt and wait for the activation it produced.
+        return await self._submit(prompt, tag=tag, observation=False)
+
+    async def observe(self, observation: dict[str, Any], *, tag: str,
+                      handler: Any | None = None) -> AgentResult:
+        """Hand one frozen batch of observations to the agent.
+
+        `handler` is the application's action sink. When present, the agent is
+        offered the scoped action tools and its tool calls become durable
+        intents instead of plain completion text. Without it, `observe` is just
+        a structured prompt and the model cannot act - useful for diagnostics,
+        wrong for production.
+        """
+        if handler is not None and self._runtime is not None:
+            if self._tool_catalog is None:
+                # Fail closed: an observation that expects to be able to act
+                # must never silently fall back to "the model says text".
+                raise RuntimeError("autonomous observation requires a tool catalog")
+            self._tool_catalog.bind(handler)
+        try:
+            return await self._submit(observation, tag=tag, observation=True)
+        finally:
+            if handler is not None and self._tool_catalog is not None:
+                # The handler knows one workflow's watermark. Leaving it bound
+                # would let a later turn stage an action against a stale range.
+                self._tool_catalog.unbind()
+
+    async def _submit(self, payload: Any, *, tag: str, observation: bool) -> AgentResult:
+        """Submit one input and wait for the activation it produced.
 
         Serialized per chat: the runtime processes one activation at a time
         anyway, and holding the lock makes "which activation answered me"
@@ -186,7 +231,7 @@ class NervipulsaAgent:
             paused_before = runtime.actor.paused
             prior_attempts = len((getattr(paused_before, "context_metrics", None) or {}).get("attempts") or [])
             prior_status = getattr(paused_before, "status", None)
-            delivery = runtime.submit_text(prompt)
+            delivery = runtime.submit_observation(payload) if observation else runtime.submit_text(payload)
             if not delivery.accepted:
                 return AgentResult(
                     activation_id="",
@@ -243,6 +288,10 @@ class NervipulsaAgent:
 
             response = getattr(activation, "response", None)
             text = response.content if isinstance(response, ModelResponse) else None
+            detail["tool_calls"] = [
+                {"id": call.id, "name": call.name}
+                for call in (getattr(response, "tool_calls", None) or [])
+            ]
             return AgentResult(
                 activation_id=activation.id, text=text,
                 status=activation.status, detail=detail,

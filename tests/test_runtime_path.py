@@ -58,6 +58,7 @@ def test_a_reply_is_produced_by_the_real_runtime(tmp_path: Path, config, transpo
     agent = build(tmp_path, system_prompt, backend)
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -302,6 +303,7 @@ def test_no_python_execution_ever_happens(tmp_path: Path, config, transport, clo
     agent = build(tmp_path, system_prompt)
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -391,6 +393,7 @@ def test_each_chat_gets_its_own_runtime(tmp_path: Path, config, clock, system_pr
 
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config2, store=store, client=TelegramClient(transport=None or _NullTransport()),
         system_prompt=system_prompt, agent_factory=factory,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -440,6 +443,7 @@ def test_two_forum_topics_get_separate_runtimes(tmp_path: Path, config, clock,
 
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(_NullTransport()),
         system_prompt=system_prompt, agent_factory=factory,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -492,6 +496,7 @@ def test_same_topic_reuses_its_runtime(tmp_path: Path, config, clock,
 
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(_NullTransport()),
         system_prompt=system_prompt, agent_factory=factory,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),
@@ -520,6 +525,7 @@ def test_transcript_grows_only_with_what_the_runtime_was_given(tmp_path: Path,
     agent = build(tmp_path, system_prompt)
     store = Store(tmp_path / "bot.sqlite3")
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store, client=TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=lambda spec: agent,
         turn_manager=TurnManager(debounce_seconds=2.0, clock=clock),

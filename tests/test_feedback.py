@@ -64,7 +64,8 @@ def test_poll_path_records_and_dedupes_reaction_changes_without_identity(
     up = reaction(70, chat_id=fixtures.TEST_CHAT, message_id=9001,
                   old=[], new=[emoji("👍")], actor_id=123456789)
     transport.updates = [[up], [up]]
-    bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
+    bot = GroupAgent(legacy_policy=True,
+        config=config, store=store, client=TelegramClient(transport),
                      system_prompt=system_prompt, agent_factory=lambda spec: None)
 
     from conftest import run
@@ -103,7 +104,8 @@ def test_vote_change_and_removal_update_per_reply_totals(
 ):
     store = Store(tmp_path / "db.sqlite3")
     sent_reply(store, fixtures.TEST_CHAT, 9001)
-    bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
+    bot = GroupAgent(legacy_policy=True,
+        config=config, store=store, client=TelegramClient(transport),
                      system_prompt=system_prompt, agent_factory=lambda spec: None)
     from conftest import run
 
@@ -127,7 +129,8 @@ def test_feedback_requires_allowed_chat_and_our_sent_target(
 ):
     store = Store(tmp_path / "db.sqlite3")
     sent_reply(store, fixtures.TEST_CHAT, 9001)
-    bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
+    bot = GroupAgent(legacy_policy=True,
+        config=config, store=store, client=TelegramClient(transport),
                      system_prompt=system_prompt, agent_factory=lambda spec: None)
     from conftest import run
 
@@ -178,7 +181,8 @@ def test_reaction_event_and_update_dedupe_rollback_together_on_failure(
     update = reaction(88, chat_id=fixtures.TEST_CHAT, message_id=9001,
                       old=[], new=[emoji("👍")])
     transport.updates = [[update]]
-    bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
+    bot = GroupAgent(legacy_policy=True,
+        config=config, store=store, client=TelegramClient(transport),
                      system_prompt=system_prompt, agent_factory=lambda spec: None)
     from conftest import run
 
@@ -204,8 +208,12 @@ def test_normal_message_update_is_not_misread_as_feedback(
     tmp_path, config, transport, system_prompt
 ):
     store = Store(tmp_path / "db.sqlite3")
-    bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
-                     system_prompt=system_prompt, agent_factory=lambda spec: None)
+    from app.turns import TurnManager
+
+    bot = GroupAgent(legacy_policy=True,
+        config=config, store=store, client=TelegramClient(transport),
+                     system_prompt=system_prompt, agent_factory=lambda spec: None,
+                     turn_manager=TurnManager(debounce_seconds=0))
     normal = {
         "update_id": 12,
         "message": {

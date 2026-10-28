@@ -31,6 +31,7 @@ def make_bot(store, config, transport, clock, system_prompt, responder=None, cli
             return agent
 
     bot = GroupAgent(
+        legacy_policy=True,
         config=config, store=store,
         client=client or TelegramClient(transport),
         system_prompt=system_prompt, agent_factory=HoldingFactory(),
@@ -369,6 +370,25 @@ def test_a_send_cannot_be_claimed_twice(store) -> None:
     assert store.mark_sending("dec_x") is False
     store.mark_sent("dec_x", 42)
     assert store.mark_sending("dec_x") is False, "a sent message was re-claimed"
+
+
+def test_preparing_existing_send_preserves_delivery_state(store) -> None:
+    for status in ("sending", "sent", "unknown", "failed"):
+        decision_id = f"dec_existing_{status}"
+        store.prepare_send(decision_id=decision_id, chat_id=1, topic_id=None,
+                           reply_to=1, text="original")
+        assert store.mark_sending(decision_id)
+        if status == "sent":
+            store.mark_sent(decision_id, 42)
+        elif status == "unknown":
+            store.mark_send_unknown(decision_id, "uncertain")
+        elif status == "failed":
+            store.mark_send_failed(decision_id, "rejected")
+        before = store.get_send(decision_id)
+        store.prepare_send(decision_id=decision_id, chat_id=2, topic_id=None,
+                           reply_to=2, text="replacement")
+        assert store.get_send(decision_id) == before
+        assert not store.mark_sending(decision_id)
 
 
 # -- runtime restart -------------------------------------------------------

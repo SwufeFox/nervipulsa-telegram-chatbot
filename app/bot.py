@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
 from .agent import AgentAdapter, AgentResult
+from .autonomy import AutonomousLoop
 from .config import AppConfig
 from .conversation import build_prompt, is_duplicate_of_history, parse_reply
 from .policy import (
@@ -129,6 +130,8 @@ class AgentSpec:
     chat_id: int
     workspace: Path
     system_prompt: str
+    tool_catalog: Any = None
+    response_commit_hook: Any = None
 
 
 class GroupAgent:
@@ -147,6 +150,8 @@ class GroupAgent:
         bot_user_id: int | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Any] = asyncio.sleep,
+        autonomy: AutonomousLoop | None = None,
+        legacy_policy: bool = False,
     ) -> None:
         self.config = config
         self.store = store
@@ -181,6 +186,32 @@ class GroupAgent:
         self.recovered_inbound = 0
         self.stats = BotStats(proactive_enabled=config.proactive_enabled)
         self._started = False
+        self._recovered_sends: list[SendRecord] = []
+        self._recovered_decisions: list[Any] = []
+        self._topic_locks: dict[tuple[int, int | None], asyncio.Lock] = {}
+        self._workers: set[asyncio.Task] = set()
+        self._worker_limit = asyncio.Semaphore(4)
+        # The default participation model: observations wake the agent, and
+        # the agent decides what to do with the opportunity. The legacy
+        # policy path is retained only for explicitly constructed callers and
+        # for replaying old data, never as a fallback when the agent is unsure.
+        self.autonomy: AutonomousLoop | None = None
+        self.legacy_policy = legacy_policy
+        if autonomy is None and not legacy_policy:
+            self.autonomy = AutonomousLoop(
+                store=self.store,
+                agent_for=self._agent_for,
+                system_prompt=self.system_prompt,
+                clock=self._clock,
+                idle_seconds=getattr(config, "idle_seconds", 2.0),
+                max_batch_seconds=getattr(config, "max_batch_seconds", 15.0),
+                max_batch_observations=getattr(config, "max_batch_observations", 24),
+                send=self._send_action,
+                bot_name=config.bot_name,
+                bot_user_id=bot_user_id,
+            )
+        else:
+            self.autonomy = autonomy
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -197,27 +228,58 @@ class GroupAgent:
                 len(orphaned), ", ".join(orphaned[:5]),
             )
         # 2. 'pending' rows are safe: the intent was recorded, the request was not.
-        pending = self.store.recover_pending_sends()
-        for record in pending:
-            log.info("resuming prepared send %s for chat %s", record.decision_id, record.chat_id)
+        self._recovered_sends = self.store.recover_pending_sends()
+        self._recovered_decisions = self.store.unfinished_decisions()
 
-        # 3. Messages ingested but never turned into a decision (crash between
-        #    the durable write and turn processing). Re-open them so the next
-        #    run_turns() decides, instead of losing the message silently.
-        revived = 0
-        for message in self.store.unanswered_messages():
-            # Recovery must apply the same authorization gate as live ingest,
-            # otherwise a row written for a chat that was later revoked (or that
-            # predates the allow-list) becomes a way around it.
-            if not self.config.allows_chat(message.chat_id):
+        if self.autonomy is not None:
+            # Autonomous recovery is driven by the observation cursor, not by
+            # turns: any observation past the watermark is replayed by the
+            # next activation, and a 'sending' action is never retried.
+            orphaned_actions = self.store.recover_orphaned_actions()
+            if orphaned_actions:
                 log.warning(
-                    "skipping recovered message %s from unauthorized chat %s",
-                    message.message_id, message.chat_id,
+                    "marked %d interrupted action(s) as unknown delivery: %s",
+                    len(orphaned_actions), ", ".join(orphaned_actions[:5]),
                 )
+            for row in self.store.running_workflows():
+                # A workflow that never reached a terminal state did not move
+                # the cursor, so its observations will be seen again. Mark the
+                # stale row so the audit trail does not claim it finished.
+                self.store.close_workflow(
+                    str(row["workflow_id"]), "failed",
+                    outcome="interrupted_by_restart",
+                )
+            self.recovered_inbound = self._count_pending_observations()
+            if self.recovered_inbound:
+                log.warning("recovered %d observation(s) past the cursor",
+                            self.recovered_inbound)
+            return
+
+        revived = 0
+        covered: set[tuple[int, int]] = set()
+        for row in self.store.recover_open_turns():
+            if not self.config.allows_chat(row["chat_id"]):
+                continue
+            messages = [m for m in self.store.messages_for_turn(row) if not self._is_admin_command(m)]
+            if not messages:
+                continue
+            covered.update((m.chat_id, m.message_id) for m in messages)
+            self._pending_turns.append(Turn(
+                turn_id=row["turn_id"], chat_id=row["chat_id"], topic_id=row["topic_id"],
+                messages=messages, opened_at=0, closed_at=0))
+            revived += len(messages)
+        for message in self.store.recover_unanswered_messages(limit=1000000):
+            if (message.chat_id, message.message_id) in covered:
+                continue
+            if not self.config.allows_chat(message.chat_id):
+                continue
+            if self._is_admin_command(message):
                 continue
             if message.is_bot and message.sender_id == self.bot_user_id:
                 continue
-            self.turns.observe(message)
+            full = self.turns.observe(message)
+            if full is not None:
+                self._pending_turns.append(full)
             revived += 1
         self.recovered_inbound = revived
         if revived:
@@ -227,6 +289,10 @@ class GroupAgent:
             )
 
     async def stop(self) -> None:
+        for task in list(self._workers):
+            task.cancel()
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
         for (chat_id, topic_id), agent in list(self._agents.items()):
             try:
                 await agent.stop()
@@ -238,7 +304,7 @@ class GroupAgent:
 
     # -- one poll cycle ----------------------------------------------------
 
-    async def poll_once(self, *, offset: int | None) -> tuple[int | None, TickStats]:
+    async def poll_once(self, *, offset: int | None, background: bool = False) -> tuple[int | None, TickStats]:
         """Fetch one batch, ingest it durably, then close and answer turns."""
         tick = TickStats()
         try:
@@ -270,7 +336,10 @@ class GroupAgent:
             new_offset = highest + 1
             self.store.set_update_cursor(new_offset)
 
-        await self.run_turns(tick)
+        if background:
+            self.schedule_turns()
+        else:
+            await self.run_turns(tick)
         self.stats.absorb(tick)
         return new_offset, tick
 
@@ -293,6 +362,12 @@ class GroupAgent:
         decisions = await self.run_turns(tick)
         self.stats.absorb(tick)
         return tick, decisions
+
+    async def autonomous_step(self, *, force: bool = True) -> list[Any]:
+        """One autonomous pass, for tests that drive the clock directly."""
+        if self.autonomy is None:
+            return []
+        return await self.autonomy.tick(force=force)
 
     # -- ingest ------------------------------------------------------------
 
@@ -327,17 +402,6 @@ class GroupAgent:
             log.debug("ignored update from unauthorized chat %s", inbound.chat_id)
             return
 
-        # Dedupe BEFORE anything durable, so a redelivery costs one indexed read.
-        inserted = self.store.record_update(
-            update_id=inbound.update_id,
-            chat_id=inbound.chat_id,
-            message_id=inbound.message_id,
-            payload=_minimal_payload(inbound),
-        )
-        if not inserted:
-            tick.duplicates += 1
-            return
-
         message = StoredMessage(
             chat_id=inbound.chat_id,
             message_id=inbound.message_id,
@@ -352,7 +416,9 @@ class GroupAgent:
                 and inbound.reply_to_sender_id == self.bot_user_id
             ),
         )
-        if not self.store.record_message(message, update_id=inbound.update_id):
+        if not self.store.record_inbound_message(
+            message, update_id=inbound.update_id, payload=_minimal_payload(inbound)
+        ):
             # Same (chat, message) under a new update id: an edit, most likely.
             tick.duplicates += 1
             return
@@ -368,6 +434,12 @@ class GroupAgent:
         if self._handle_admin(message, tick):
             return
 
+        if self.autonomy is not None:
+            # The observation is already durable. Scheduling decides *when*
+            # the agent gets to look; it never decides whether it may think.
+            self.autonomy.note_activity(message.chat_id, message.topic_id)
+            return
+
         full = self.turns.observe(message)
         if full is not None:
             tick.turns_closed += 1
@@ -377,7 +449,153 @@ class GroupAgent:
 
     # -- turn processing ---------------------------------------------------
 
+    def _schedule(self, coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        self._workers.add(task)
+        task.add_done_callback(self._workers.discard)
+
+    def schedule_turns(self) -> None:
+        """Schedule each ready topic independently of polling and other topics."""
+        if self.autonomy is not None:
+            # `run_turns()` is the autonomous pass; it must not also run the
+            # legacy turn path or there would be two participation models.
+            self._schedule(self._autonomous_pass())
+            return
+        for work in self._take_recovery(TickStats()):
+            self._schedule(work)
+        closed = list(self._pending_turns)
+        self._pending_turns.clear()
+        closed.extend(self.turns.ready())
+        closed.sort(key=lambda turn: turn.opened_at)
+        for turn in closed:
+            self._schedule(self._scheduled_turn(turn))
+
+    async def _scheduled_turn(self, turn: Turn) -> None:
+        tick = TickStats()
+        try:
+            decision = await self._run_one(turn, tick)
+            tick.turns_closed += 1
+            if decision.is_reply:
+                tick.replies_decided += 1
+            else:
+                tick.silences_decided += 1
+        except Exception:
+            tick.errors += 1
+            log.exception("turn %s failed", turn.turn_id)
+            self._record_failed_turn(turn, tick)
+        finally:
+            self.stats.absorb(tick)
+
+    async def _run_one(self, turn: Turn, tick: TickStats) -> Decision:
+        key = (turn.chat_id, turn.topic_id)
+        lock = self._topic_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            async with self._worker_limit:
+                return await self._process_turn(turn, tick)
+
+    def _take_recovery(self, tick: TickStats) -> list[Any]:
+        sends, self._recovered_sends = self._recovered_sends, []
+        decisions, self._recovered_decisions = self._recovered_decisions, []
+        work = []
+        for record in sends:
+            rows = self.store._query(
+                "SELECT t.opened_at FROM decisions d JOIN turns t ON t.turn_id = d.turn_id"
+                " WHERE d.decision_id = ?", (record.decision_id,))
+            work.append((rows[0]["opened_at"] if rows else 0, self._recover_send(record, tick)))
+        work.extend((row["opened_at"], self._recover_decision(row, tick)) for row in decisions)
+        return [coroutine for _, coroutine in sorted(work, key=lambda item: item[0])]
+
+    async def _recover_send(self, record: SendRecord, tick: TickStats) -> None:
+        async with self._topic_locks.setdefault((record.chat_id, record.topic_id), asyncio.Lock()):
+            async with self._worker_limit:
+                if not self.config.allows_chat(record.chat_id) or self.store.pending_obsolete(record.decision_id):
+                    self.store.cancel_pending(record.decision_id, "obsolete or unauthorized")
+                    return
+                rows = self.store._query("SELECT turn_id FROM decisions WHERE decision_id = ?", (record.decision_id,))
+                if not rows:
+                    self.store.cancel_pending(record.decision_id, "missing decision")
+                    return
+                turn = Turn(rows[0]["turn_id"], record.chat_id, record.topic_id, [], 0, 0)
+                await self._deliver(decision_id=record.decision_id, chat_id=record.chat_id,
+                                    topic_id=record.topic_id, reply_to=record.reply_to,
+                                    text=record.text, turn=turn, tick=tick)
+
+    async def _recover_decision(self, row: Any, tick: TickStats) -> None:
+        async with self._topic_locks.setdefault((row["chat_id"], row["topic_id"]), asyncio.Lock()):
+            async with self._worker_limit:
+                if not self.config.allows_chat(row["chat_id"]):
+                    return
+                if time.time() - min(row["created_at"], row["opened_at"]) > 86400:
+                    self.store.close_turn(row["turn_id"], "expired")
+                    return
+                messages = [m for m in self.store.messages_for_turn(row) if not self._is_admin_command(m)]
+                if not messages:
+                    return
+                turn = Turn(row["turn_id"], row["chat_id"], row["topic_id"], messages, 0, 0)
+                import json
+                decision = Decision(row["outcome"], row["reason"], row["trigger"], detail=json.loads(row["detail_json"]))
+                history = self.store.recent_messages(turn.chat_id, topic_id=turn.topic_id, limit=self.config.history_messages)
+                await self._reply(turn, decision, row["decision_id"], history, tick)
+
+    async def _recover_work(self, tick: TickStats) -> None:
+        await asyncio.gather(*self._take_recovery(tick))
+
+    def _tool_catalog_for(self) -> Any:
+        """One catalog per agent; the handler is rebound per workflow."""
+        if self.autonomy is None:
+            return None
+        from .autonomous_tools import AutonomousToolCatalog
+
+        return AutonomousToolCatalog()
+
+    def _response_hook_for(self, chat_id: int, topic_id: int | None) -> Any:
+        """A hook bound to one scope, so concurrent topics cannot cross-talk.
+
+        The runtime calls it after response validation and before tool
+        dispatch. Raising here prevents every tool effect: an intent that
+        cannot be recorded must not happen.
+        """
+        if self.autonomy is None:
+            return None
+
+        async def hook(activation: Any, response: Any) -> None:
+            self.store.commit_autonomous_response(chat_id, topic_id, activation, response)
+
+        return hook
+
+    async def _send_action(self, *, chat_id: int, topic_id: int | None, text: str,
+                           reply_to: int | None) -> Any:
+        """Transport boundary for an already-claimed action intent."""
+        return await self.client.send_message(
+            chat_id=chat_id, text=text, reply_to_message_id=reply_to, topic_id=topic_id,
+        )
+
+    def _count_pending_observations(self) -> int:
+        """Unprocessed observations across all known scopes, for diagnostics."""
+        rows = self.store._query(
+            "SELECT o.chat_id, o.topic_id, COUNT(*) AS n FROM observation_events o"
+            " LEFT JOIN observation_cursors c"
+            "   ON c.chat_id = o.chat_id AND c.topic_id IS o.topic_id"
+            " WHERE o.sequence > COALESCE(c.last_processed, 0)"
+            " GROUP BY o.chat_id, o.topic_id"
+        )
+        return sum(int(row["n"]) for row in rows)
+
+    def queued_topics(self) -> list[tuple[int, int | None]]:
+        return sorted(self.autonomy._batch_started) if self.autonomy else []
+
+    async def _autonomous_pass(self) -> None:
+        assert self.autonomy is not None
+        async with self._worker_limit:
+            try:
+                await self.autonomy.tick()
+            except Exception:
+                log.exception("autonomous pass failed")
+
     async def run_turns(self, tick: TickStats | None = None) -> list[Decision]:
+        if self.autonomy is not None:
+            await self._autonomous_pass()
+            return []
         """Process every closed turn.
 
         Counters go into the caller's `tick` when one is supplied (so `step()` and
@@ -388,9 +606,10 @@ class GroupAgent:
         if tick is None:
             tick = TickStats()
         try:
+            await self._recover_work(tick)
             closed = list(self._pending_turns)
             self._pending_turns.clear()
-            closed.extend(self.turns.ready(now=self._clock()))
+            closed.extend(self.turns.ready())
             closed.sort(key=lambda turn: turn.opened_at)
 
             decisions: list[Decision] = []
@@ -399,7 +618,7 @@ class GroupAgent:
                 # recorded on that turn, the rest still get decided, and the
                 # caller never sees an exception that would stop the poll loop.
                 try:
-                    decision = await self._process_turn(turn, tick)
+                    decision = await self._run_one(turn, tick)
                 except Exception:
                     tick.errors += 1
                     log.exception(
@@ -526,8 +745,8 @@ class GroupAgent:
         prompt = build_prompt(
             chat_id=turn.chat_id,
             topic_id=turn.topic_id,
-            history=history,
-            turn_messages=turn.messages,
+            history=[m for m in history if not self._is_admin_command(m)],
+            turn_messages=[m for m in turn.messages if not self._is_admin_command(m)],
             bot_user_id=self.bot_user_id,
             bot_name=self.config.bot_name,
         )
@@ -536,6 +755,7 @@ class GroupAgent:
         for row in self.store.recent_decisions(turn.chat_id, limit=5):
             if (
                 row["decision_id"] != decision_id
+                and row["topic_id"] == turn.topic_id
                 and row["outcome"] == "reply"
                 and row["superseded_by"] is None
             ):
@@ -609,6 +829,23 @@ class GroupAgent:
             log.info("dropped duplicate reply for chat %s", turn.chat_id)
             return
 
+        newer_rows = self.store._query(
+            "SELECT * FROM messages WHERE chat_id = ? AND topic_id IS ? AND is_bot = 0"
+            " AND message_id > ? ORDER BY message_id",
+            (turn.chat_id, turn.topic_id, turn.last_message_id),
+        )
+        if newer_rows:
+            from .store import _row_to_message
+            newer = [_row_to_message(row) for row in newer_rows]
+            turn.messages.extend(newer)
+            with self.store._write() as conn:
+                conn.execute("UPDATE turns SET last_message = ? WHERE turn_id = ?",
+                             (turn.last_message_id, turn.turn_id))
+            history = self.store.recent_messages(turn.chat_id, topic_id=turn.topic_id,
+                                                 limit=self.config.history_messages)
+            await self._reply(turn, decision, decision_id, history, tick)
+            return
+
         self.store.prepare_send(
             decision_id=decision_id,
             chat_id=turn.chat_id,
@@ -640,7 +877,7 @@ class GroupAgent:
         """Claim, send, record. The claim is the last durable step before I/O."""
         if not self.store.mark_sending(decision_id):
             log.warning("send %s was not claimable; skipping", decision_id)
-            self.store.close_turn(turn.turn_id, "not_claimed")
+            self.store.cancel_pending(decision_id, "obsolete or not claimable")
             return
 
         outcome: SendOutcome = await self.client.send_message(
@@ -651,22 +888,13 @@ class GroupAgent:
         )
         if outcome.status is SendStatus.SENT:
             tick.sends_ok += 1
-            self.store.mark_sent(decision_id, outcome.telegram_message_id or 0)
-            self.store.close_turn(turn.turn_id, "sent")
+            message = None
             if outcome.telegram_message_id and outcome.telegram_message_id > 0:
-                self.store.record_message(
-                    StoredMessage(
-                        chat_id=chat_id,
-                        message_id=outcome.telegram_message_id,
-                        topic_id=topic_id,
-                        sender_id=self.bot_user_id,
-                        sender_label=self.config.bot_name,
-                        is_bot=True,
-                        text=text,
-                        created_at=self._clock(),
-                    ),
-                    update_id=-1,
-                )
+                message = StoredMessage(chat_id=chat_id, message_id=outcome.telegram_message_id,
+                                        topic_id=topic_id, sender_id=self.bot_user_id,
+                                        sender_label=self.config.bot_name, is_bot=True,
+                                        text=text, created_at=self._clock())
+            self.store.finish_sent(decision_id, outcome.telegram_message_id or 0, message)
         elif outcome.status is SendStatus.UNKNOWN:
             tick.sends_unknown += 1
             self.store.mark_send_unknown(decision_id, outcome.error or "unknown")
@@ -737,6 +965,8 @@ class GroupAgent:
             chat_id=chat_id,
             workspace=Path(self.config.workspace) / suffix,
             system_prompt=self.system_prompt,
+            tool_catalog=self._tool_catalog_for(),
+            response_commit_hook=self._response_hook_for(chat_id, topic_id),
         )
         try:
             agent = self._agent_factory(spec)
@@ -761,6 +991,11 @@ class GroupAgent:
         closed = self.turns.flush()
         self._pending_turns.extend(closed)
         return len(closed)
+
+    @classmethod
+    def _is_admin_command(cls, message: StoredMessage) -> bool:
+        text = message.text.strip()
+        return bool(text.startswith("/") and text.split(maxsplit=1)[0].lstrip("/").split("@")[0].lower() in cls.ADMIN_COMMANDS)
 
     def _handle_admin(self, message: StoredMessage, tick: TickStats) -> bool:
         """Handle an admin command. Returns True if the message was consumed.

@@ -76,6 +76,11 @@ def build_agent_factory(config: AppConfig, system_prompt: str, *, offline: bool 
             workspace=spec.workspace,
             system_prompt=system_prompt,
             timeout=config.request_timeout,
+            # The autonomous path gives the model a closed set of action
+            # tools. Passing the catalog here (not later) matters: the actor
+            # snapshots its schema list at construction.
+            tool_catalog=getattr(spec, "tool_catalog", None),
+            response_commit_hook=getattr(spec, "response_commit_hook", None),
         )
 
     return factory
@@ -152,7 +157,13 @@ async def replay(config: AppConfig, system_prompt: str) -> int:
     transport = _RecordingTransport()
     agent = ScriptedAgent(_offline_responder)
     clock = [1_700_000_000.0]
+    # --replay deliberately demonstrates the *legacy* rule path: it exists to
+    # reproduce old fixtures offline, not to model the production agent. The
+    # autonomous loop needs a tool-calling responder, which a canned offline
+    # responder is not. Say so rather than let the output imply the bot still
+    # works this way.
     bot = GroupAgent(
+        legacy_policy=True,
         config=config,
         store=store,
         client=TelegramClient(transport),
@@ -178,6 +189,8 @@ async def replay(config: AppConfig, system_prompt: str) -> int:
     for payload in transport.sends:
         print(f"  {payload['text']}")
     print(f"\nstore: {json.dumps(store.stats(), ensure_ascii=False)}")
+    print("\nnote: --replay exercises the legacy rule path for offline fixtures;")
+    print("      live mode lets the agent decide through its action tools.")
     await bot.stop()
     store.close()
     return 0
@@ -263,6 +276,15 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
     pause_logged = False
     log = logging.getLogger(__name__)
     consecutive_failures = 0
+    async def wake_due_turns() -> None:
+        while not stop.is_set():
+            bot.schedule_turns()
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                pass
+
+    timer = asyncio.create_task(wake_due_turns())
     while not stop.is_set():
         if bot.stats.paused and not pause_logged:
             print("paused: still recording messages, will not reply")
@@ -270,7 +292,16 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
         elif not bot.stats.paused:
             pause_logged = False
         try:
-            offset, tick = await bot.poll_once(offset=offset)
+            poll_task = asyncio.create_task(bot.poll_once(offset=offset, background=True))
+            stop_task = asyncio.create_task(stop.wait())
+            done, _ = await asyncio.wait((poll_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
+            if stop_task in done and not poll_task.done():
+                poll_task.cancel()
+                await asyncio.gather(poll_task, return_exceptions=True)
+                break
+            stop_task.cancel()
+            await asyncio.gather(stop_task, return_exceptions=True)
+            offset, tick = await poll_task
             consecutive_failures = 0
         except asyncio.CancelledError:
             raise
@@ -294,6 +325,8 @@ async def run_live(config: AppConfig, system_prompt: str) -> int:
                 " (paused)" if bot.stats.paused else "",
             )
 
+    timer.cancel()
+    await asyncio.gather(timer, return_exceptions=True)
     # Close any open debounce window so a message that arrived in the last few
     # seconds is still decided rather than silently dropped on exit.
     pending = bot.hold_open_turns()

@@ -88,6 +88,14 @@ class AppConfig:
     max_turn_messages: int = 12
     history_messages: int = 24
 
+    # -- autonomous participation (the default path) -----------------------
+    # These are cost/latency controls only. None of them inspects message
+    # content to decide whether the agent "deserves" to think: they decide
+    # when an opportunity is delivered, and the agent decides what to do.
+    idle_seconds: float = 2.0
+    max_batch_seconds: float = 15.0
+    max_batch_observations: int = 24
+
     # -- proactive rate limiting ------------------------------------------
     proactive_min_interval_seconds: float = 240.0
     proactive_max_per_hour: int = 4

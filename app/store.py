@@ -112,6 +112,136 @@ CREATE TABLE IF NOT EXISTS sends (
 );
 CREATE INDEX IF NOT EXISTS sends_status ON sends (status);
 
+CREATE TABLE IF NOT EXISTS observation_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    update_id INTEGER NOT NULL UNIQUE,
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER,
+    kind TEXT NOT NULL,
+    received_at REAL NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS observation_events_scope
+    ON observation_events (chat_id, topic_id, sequence);
+
+CREATE TABLE IF NOT EXISTS autonomous_responses (
+    activation_id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    topic_id INTEGER,
+    envelope_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS autonomous_calls (
+    activation_id TEXT NOT NULL,
+    call_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    arguments_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'committed',
+    receipt_json TEXT,
+    PRIMARY KEY (activation_id, call_id),
+    FOREIGN KEY (activation_id) REFERENCES autonomous_responses(activation_id)
+);
+
+-- One row per logical "自主工作单元": a frozen range of observations handed to
+-- the agent, plus how that turn ended. Deliberately separate from a Core
+-- activation: one workflow may involve several model requests and tool
+-- round-trips, and only the workflow owns the event-consumption watermark.
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id     TEXT PRIMARY KEY,
+    chat_id         INTEGER NOT NULL,
+    topic_id        INTEGER,
+    first_sequence  INTEGER NOT NULL,
+    last_sequence   INTEGER NOT NULL,
+    state           TEXT    NOT NULL CHECK (
+                        state IN ('running', 'completed', 'deferred', 'failed')
+                    ),
+    outcome         TEXT,
+    detail_json     TEXT    NOT NULL DEFAULT '{}',
+    created_at      REAL    NOT NULL,
+    updated_at      REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS workflows_scope
+    ON workflows (chat_id, topic_id, created_at);
+
+-- Continuation watermark per (chat, topic). Only advanced once a workflow has
+-- reached a terminal state, so a crash replays unprocessed observations.
+CREATE TABLE IF NOT EXISTS observation_cursors (
+    chat_id        INTEGER NOT NULL,
+    topic_id       INTEGER,
+    last_processed INTEGER NOT NULL,
+    updated_at     REAL    NOT NULL,
+    PRIMARY KEY (chat_id, topic_id)
+);
+
+-- Why an observation never made it into a model request. A silent gap here is
+-- indistinguishable from "the agent chose not to react", so it is recorded.
+CREATE TABLE IF NOT EXISTS observation_skips (
+    sequence      INTEGER PRIMARY KEY,
+    chat_id       INTEGER NOT NULL,
+    topic_id      INTEGER,
+    reason        TEXT NOT NULL,
+    recorded_at   REAL NOT NULL
+);
+
+-- Durable agent-chosen waits. A timer firing is only a reason to look again.
+CREATE TABLE IF NOT EXISTS agent_waits (
+    wait_id        TEXT PRIMARY KEY,
+    chat_id        INTEGER NOT NULL,
+    topic_id       INTEGER,
+    kind           TEXT    NOT NULL CHECK (kind IN ('event', 'until')),
+    purpose        TEXT    NOT NULL,
+    event_types_json TEXT,
+    due_at         REAL,
+    expires_at     REAL,
+    status         TEXT    NOT NULL CHECK (
+                       status IN ('active', 'cancelled', 'expired', 'satisfied')
+                   ),
+    created_at     REAL    NOT NULL,
+    resolved_at    REAL
+);
+CREATE INDEX IF NOT EXISTS agent_waits_due ON agent_waits (status, due_at);
+
+-- Small, agent-authored notes. Source and provenance stay attached; this is
+-- not a channel for the model to rewrite its own instructions or permissions.
+CREATE TABLE IF NOT EXISTS agent_state (
+    chat_id      INTEGER NOT NULL,
+    topic_id     INTEGER,
+    key          TEXT    NOT NULL,
+    value_json   TEXT    NOT NULL,
+    source       TEXT    NOT NULL DEFAULT 'agent',
+    created_at   REAL    NOT NULL,
+    expires_at   REAL,
+    PRIMARY KEY (chat_id, topic_id, key)
+);
+
+-- Intent before effect. An agent's send_message lands here first; only the
+-- outbox worker can turn a row into a Telegram request, and only after an
+-- atomic claim that re-checks freshness.
+CREATE TABLE IF NOT EXISTS actions (
+    action_id       TEXT PRIMARY KEY,
+    workflow_id     TEXT,
+    chat_id         INTEGER NOT NULL,
+    topic_id        INTEGER,
+    reply_to        INTEGER,
+    text            TEXT    NOT NULL,
+    observed_through INTEGER NOT NULL,
+    freshness       TEXT    NOT NULL DEFAULT 'strict',
+    max_unobserved  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT    NOT NULL CHECK (
+                        status IN ('pending', 'sending', 'sent', 'failed',
+                                   'unknown', 'cancelled')
+                    ),
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    telegram_message_id INTEGER,
+    error           TEXT,
+    created_at      REAL    NOT NULL,
+    updated_at      REAL    NOT NULL,
+    expires_at      REAL
+);
+CREATE INDEX IF NOT EXISTS actions_status ON actions (status, created_at);
+CREATE INDEX IF NOT EXISTS actions_scope ON actions (chat_id, topic_id, status);
+
 CREATE TABLE IF NOT EXISTS feedback_events (
     update_id     INTEGER PRIMARY KEY,
     chat_id       INTEGER NOT NULL,
@@ -192,6 +322,358 @@ class Store:
     def _query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         return list(self._conn.execute(sql, params))
 
+    def commit_autonomous_response(self, chat_id: int, topic_id: int | None,
+                                   activation: Any, response: Any) -> None:
+        """Atomically journal the complete validated response before tool dispatch."""
+        from dataclasses import asdict
+
+        envelope = json.dumps(asdict(response), ensure_ascii=False, allow_nan=False)
+        calls = response.tool_calls
+        with self._write() as conn:
+            previous = conn.execute(
+                "SELECT chat_id, topic_id, envelope_json FROM autonomous_responses WHERE activation_id = ?",
+                (activation.id,),
+            ).fetchone()
+            if previous:
+                if (previous["chat_id"], previous["topic_id"], previous["envelope_json"]) != (chat_id, topic_id, envelope):
+                    raise ValueError("activation response changed after commit")
+                return
+            conn.execute(
+                "INSERT INTO autonomous_responses VALUES (?, ?, ?, ?, ?)",
+                (activation.id, chat_id, topic_id, envelope, _now()),
+            )
+            for call in calls:
+                conn.execute(
+                    "INSERT INTO autonomous_calls (activation_id, call_id, name, arguments_json) VALUES (?, ?, ?, ?)",
+                    (activation.id, call.id, call.name,
+                     json.dumps(call.arguments, ensure_ascii=False, allow_nan=False)),
+                )
+
+    # -- autonomous observation stream -------------------------------------
+
+    def pending_observations(
+        self, chat_id: int, topic_id: int | None, *, limit: int = 64
+    ) -> list[sqlite3.Row]:
+        """Observations not yet consumed by a terminal workflow, oldest first.
+
+        The cursor is the authority, not the messages table: a message may be
+        stored long before the agent looks at it, and an edit arrives as a new
+        observation without creating a new message row.
+        """
+        cursor = self.observation_cursor(chat_id, topic_id)
+        if topic_id is None:
+            rows = self._query(
+                "SELECT * FROM observation_events WHERE chat_id = ? AND topic_id IS NULL"
+                " AND sequence > ? ORDER BY sequence LIMIT ?",
+                (chat_id, cursor, limit),
+            )
+        else:
+            rows = self._query(
+                "SELECT * FROM observation_events WHERE chat_id = ? AND topic_id = ?"
+                " AND sequence > ? ORDER BY sequence LIMIT ?",
+                (chat_id, topic_id, cursor, limit),
+            )
+        return rows
+
+    def observation_cursor(self, chat_id: int, topic_id: int | None) -> int:
+        if topic_id is None:
+            rows = self._query(
+                "SELECT last_processed FROM observation_cursors"
+                " WHERE chat_id = ? AND topic_id IS NULL", (chat_id,),
+            )
+        else:
+            rows = self._query(
+                "SELECT last_processed FROM observation_cursors"
+                " WHERE chat_id = ? AND topic_id = ?", (chat_id, topic_id),
+            )
+        return int(rows[0]["last_processed"]) if rows else 0
+
+    def open_workflow(
+        self, *, chat_id: int, topic_id: int | None,
+        first_sequence: int, last_sequence: int, workflow_id: str,
+    ) -> str:
+        """Freeze one observation range for the agent. Idempotent on the range."""
+        with self._write() as conn:
+            existing = conn.execute(
+                "SELECT workflow_id FROM workflows WHERE chat_id = ? AND topic_id IS ?"
+                " AND state = 'running'",
+                (chat_id, topic_id),
+            ).fetchone()
+            if existing is not None:
+                return str(existing["workflow_id"])
+            now = _now()
+            conn.execute(
+                "INSERT INTO workflows (workflow_id, chat_id, topic_id, first_sequence,"
+                " last_sequence, state, detail_json, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'running', '{}', ?, ?)",
+                (workflow_id, chat_id, topic_id, first_sequence, last_sequence, now, now),
+            )
+            return workflow_id
+
+    def running_workflows(self) -> list[sqlite3.Row]:
+        return self._query("SELECT * FROM workflows WHERE state = 'running' ORDER BY created_at")
+
+    def close_workflow(
+        self, workflow_id: str, state: str, *,
+        outcome: str | None = None, detail: dict[str, Any] | None = None,
+    ) -> bool:
+        """Terminal transition. Advancing the cursor and closing commit together.
+
+        Nothing before this point moves the watermark, so a crash mid-turn
+        replays the same observations instead of silently skipping them.
+        """
+        if state not in {"completed", "deferred", "failed"}:
+            raise ValueError(f"not a terminal workflow state: {state}")
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT chat_id, topic_id, last_sequence, state FROM workflows"
+                " WHERE workflow_id = ?", (workflow_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["state"] != "running":
+                # Already terminal: replaying recovery must not move the
+                # watermark backwards or double-count the turn.
+                return False
+            conn.execute(
+                "UPDATE workflows SET state = ?, outcome = ?, detail_json = ?, updated_at = ?"
+                " WHERE workflow_id = ?",
+                (state, outcome, json.dumps(detail or {}, ensure_ascii=False), _now(),
+                 workflow_id),
+            )
+            if state == "completed":
+                cursor = conn.execute(
+                    "SELECT last_processed FROM observation_cursors"
+                    " WHERE chat_id = ? AND topic_id IS ?",
+                    (row["chat_id"], row["topic_id"]),
+                ).fetchone()
+                previous = int(cursor["last_processed"]) if cursor else 0
+                if int(row["last_sequence"]) > previous:
+                    conn.execute(
+                        "INSERT INTO observation_cursors (chat_id, topic_id, last_processed, updated_at)"
+                        " VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, topic_id)"
+                        " DO UPDATE SET last_processed = excluded.last_processed,"
+                        " updated_at = excluded.updated_at",
+                        (row["chat_id"], row["topic_id"], row["last_sequence"], _now()),
+                    )
+            return True
+
+    def record_observation_skip(
+        self, *, sequence: int, chat_id: int, topic_id: int | None, reason: str,
+    ) -> None:
+        """Record an observation that will never be shown. Never silent."""
+        with self._write() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO observation_skips"
+                " (sequence, chat_id, topic_id, reason, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                (sequence, chat_id, topic_id, reason[:200], _now()),
+            )
+
+    # -- agent waits and state ---------------------------------------------
+
+    def add_wait(
+        self, *, wait_id: str, chat_id: int, topic_id: int | None, kind: str,
+        purpose: str, event_types: list[str] | None = None,
+        due_at: float | None = None, expires_at: float | None = None,
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO agent_waits (wait_id, chat_id, topic_id, kind,"
+                " purpose, event_types_json, due_at, expires_at, status, created_at, resolved_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL)",
+                (wait_id, chat_id, topic_id, kind, purpose,
+                 json.dumps(event_types, ensure_ascii=False) if event_types else None,
+                 due_at, expires_at, _now()),
+            )
+
+    def active_waits(self, chat_id: int, topic_id: int | None) -> list[sqlite3.Row]:
+        return self._query(
+            "SELECT * FROM agent_waits WHERE chat_id = ? AND topic_id IS ? AND status = 'active'"
+            " ORDER BY created_at", (chat_id, topic_id),
+        )
+
+    def due_waits(self, now: float) -> list[sqlite3.Row]:
+        """Timers that have come due. Firing only grants another look."""
+        return self._query(
+            "SELECT * FROM agent_waits WHERE status = 'active'"
+            " AND ((due_at IS NOT NULL AND due_at <= ?)"
+            "  OR (expires_at IS NOT NULL AND expires_at <= ?))"
+            " ORDER BY due_at", (now, now),
+        )
+
+    def resolve_wait(self, wait_id: str, status: str) -> bool:
+        if status not in {"cancelled", "expired", "satisfied"}:
+            raise ValueError(f"bad wait status: {status}")
+        with self._write() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_waits SET status = ?, resolved_at = ?"
+                " WHERE wait_id = ? AND status = 'active'", (status, _now(), wait_id),
+            )
+            return cursor.rowcount == 1
+
+    def satisfy_event_waits(
+        self, chat_id: int, topic_id: int | None, kind: str, now: float,
+    ) -> list[str]:
+        """Resolve waits whose expiry passed and report ones this event matches.
+
+        Matching is structural only (topic + allowed kinds). Anything semantic
+        is left to the agent when it is woken again.
+        """
+        satisfied: list[str] = []
+        for row in self.active_waits(chat_id, topic_id):
+            expires_at = row["expires_at"]
+            if expires_at is not None and float(expires_at) <= now:
+                self.resolve_wait(str(row["wait_id"]), "expired")
+                continue
+            allowed = row["event_types_json"]
+            kinds = json.loads(allowed) if allowed else None
+            if kinds is None or kind in kinds:
+                if self.resolve_wait(str(row["wait_id"]), "satisfied"):
+                    satisfied.append(str(row["wait_id"]))
+        return satisfied
+
+    def set_state(
+        self, *, chat_id: int, topic_id: int | None, key: str, value: Any,
+        source: str = "agent", expires_at: float | None = None,
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO agent_state (chat_id, topic_id, key, value_json, source,"
+                " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(chat_id, topic_id, key) DO UPDATE SET"
+                " value_json = excluded.value_json, source = excluded.source,"
+                " created_at = excluded.created_at, expires_at = excluded.expires_at",
+                (chat_id, topic_id, key,
+                 json.dumps(value, ensure_ascii=False, allow_nan=False),
+                 source, _now(), expires_at),
+            )
+
+    def get_state(self, chat_id: int, topic_id: int | None, *, limit: int = 50) -> dict[str, Any]:
+        rows = self._query(
+            "SELECT key, value_json, expires_at FROM agent_state"
+            " WHERE chat_id = ? AND topic_id IS ? ORDER BY created_at DESC LIMIT ?",
+            (chat_id, topic_id, limit),
+        )
+        now = _now()
+        return {
+            str(row["key"]): json.loads(row["value_json"])
+            for row in rows
+            if row["expires_at"] is None or float(row["expires_at"]) > now
+        }
+
+    # -- agent actions (intent before effect) -------------------------------
+
+    def prepare_action(
+        self, *, action_id: str, workflow_id: str | None, chat_id: int,
+        topic_id: int | None, text: str, observed_through: int,
+        reply_to: int | None = None, freshness: str = "strict",
+        max_unobserved: int = 0, expires_at: float | None = None,
+    ) -> bool:
+        """Record the intent once. Re-preparing the same ID is a no-op."""
+        with self._write() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO actions (action_id, workflow_id, chat_id, topic_id,"
+                " reply_to, text, observed_through, freshness, max_unobserved, status,"
+                " created_at, updated_at, expires_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (action_id, workflow_id, chat_id, topic_id, reply_to, text,
+                 observed_through, freshness, max_unobserved, _now(), _now(), expires_at),
+            )
+            return cursor.rowcount == 1
+
+    def claim_action(self, action_id: str, *, now: float | None = None) -> str:
+        """Atomically claim pending → sending, or report why it must not send.
+
+        Returns "claimed", "stale" (new observations arrived), "expired",
+        "unknown-topic" or "not-claimable". Every check runs inside the same
+        write transaction that flips the status, so two workers cannot both win
+        and a new observation cannot slip in between the check and the claim.
+        """
+        moment = _now() if now is None else now
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT * FROM actions WHERE action_id = ?", (action_id,),
+            ).fetchone()
+            if row is None or row["status"] != "pending":
+                return "not-claimable"
+            if row["expires_at"] is not None and float(row["expires_at"]) <= moment:
+                conn.execute(
+                    "UPDATE actions SET status = 'cancelled',"
+                    " error = 'expired_unexecuted', updated_at = ? WHERE action_id = ?",
+                    (moment, action_id),
+                )
+                return "expired"
+            # Compare against the actual newest observation in this scope, not
+            # the cursor: the cursor only moves when a workflow completes, so
+            # two concurrent batches would both look "current" against it.
+            newest = conn.execute(
+                "SELECT MAX(sequence) AS latest FROM observation_events"
+                " WHERE chat_id = ? AND topic_id IS ?",
+                (row["chat_id"], row["topic_id"]),
+            ).fetchone()
+            latest = int(newest["latest"]) if newest and newest["latest"] is not None else 0
+            unobserved = max(0, latest - int(row["observed_through"]))
+            if row["freshness"] == "strict" and unobserved:
+                return "stale"
+            if row["freshness"] == "bounded" and unobserved > int(row["max_unobserved"]):
+                return "stale"
+            changed = conn.execute(
+                "UPDATE actions SET status = 'sending', attempts = attempts + 1,"
+                " updated_at = ? WHERE action_id = ? AND status = 'pending'",
+                (moment, action_id),
+            )
+            return "claimed" if changed.rowcount == 1 else "not-claimable"
+
+    def finish_action(self, action_id: str, status: str, *,
+                      telegram_message_id: int | None = None, error: str | None = None) -> None:
+        # "cancelled" is a real terminal state: the intent was never executed
+        # because it expired or saw newer observations. It is not a failure.
+        if status not in {"sent", "failed", "unknown", "cancelled"}:
+            raise ValueError(f"bad action status: {status}")
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?,"
+                " updated_at = ? WHERE action_id = ?",
+                (status, telegram_message_id, (error or "")[:500] or None, _now(), action_id),
+            )
+
+    def recover_orphaned_actions(self) -> list[str]:
+        """A 'sending' action may already be visible in Telegram: never retry."""
+        with self._write() as conn:
+            rows = list(conn.execute("SELECT action_id FROM actions WHERE status = 'sending'"))
+            conn.execute(
+                "UPDATE actions SET status = 'unknown',"
+                " error = 'process exited during send; delivery unconfirmed',"
+                " updated_at = ? WHERE status = 'sending'", (_now(),),
+            )
+            return [str(row["action_id"]) for row in rows]
+
+    def pending_actions(self, *, limit: int = 50) -> list[sqlite3.Row]:
+        return self._query(
+            "SELECT * FROM actions WHERE status = 'pending' ORDER BY created_at LIMIT ?",
+            (limit,),
+        )
+
+    def get_action(self, action_id: str) -> sqlite3.Row | None:
+        rows = self._query("SELECT * FROM actions WHERE action_id = ?", (action_id,))
+        return rows[0] if rows else None
+
+    def record_bot_message(self, *, chat_id: int, topic_id: int | None, message_id: int,
+                           text: str, sender_label: str, sender_id: int | None,
+                           created_at: float) -> None:
+        """Record our own confirmed message so later turns can see it.
+
+        Only called after Telegram confirmed delivery; an unknown result must
+        never be written as public conversation history.
+        """
+        with self._write() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"
+                " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
+                " VALUES (?, ?, ?, ?, ?, 1, ?, ?, -1, 0)",
+                (chat_id, message_id, topic_id, sender_id, sender_label, text, created_at),
+            )
+
     # -- inbound -----------------------------------------------------------
 
     def record_update(
@@ -240,12 +722,20 @@ class Store:
             if cursor.rowcount != 1:
                 return "duplicate"
             sent = conn.execute(
-                "SELECT decision_id FROM sends"
+                "SELECT decision_id, topic_id FROM sends"
                 " WHERE chat_id = ? AND telegram_message_id = ? AND status = 'sent'",
                 (chat_id, message_id),
             ).fetchone()
             if sent is None:
                 return "unknown_target"
+            conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, ?, 'feedback', ?, ?)",
+                (update_id, chat_id, sent["topic_id"], _now(), json.dumps({
+                    "message_id": message_id, "old_vote": old_vote, "new_vote": new_vote,
+                })),
+            )
             if old_vote == new_vote:
                 return "no_change"
             conn.execute(
@@ -292,6 +782,44 @@ class Store:
 
     def has_update(self, update_id: int) -> bool:
         return bool(self._query("SELECT 1 FROM updates WHERE update_id = ?", (update_id,)))
+
+    def record_inbound_message(
+        self, message: StoredMessage, *, update_id: int, payload: dict[str, Any]
+    ) -> bool:
+        """Persist the deduplication key and message in one transaction."""
+        with self._write() as conn:
+            update = conn.execute(
+                "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (update_id, message.chat_id, message.message_id, _now(),
+                 json.dumps(payload, ensure_ascii=False)),
+            )
+            if update.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO observation_events"
+                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (update_id, message.chat_id, message.topic_id,
+                 "message_edit" if conn.execute(
+                     "SELECT 1 FROM messages WHERE chat_id = ? AND message_id = ?",
+                     (message.chat_id, message.message_id),
+                 ).fetchone() else "message", _now(), json.dumps({
+                     "message_id": message.message_id, "sender_id": message.sender_id,
+                     "sender_label": message.sender_label, "is_bot": message.is_bot,
+                     "text": message.text, "created_at": message.created_at,
+                     "reply_to_bot": message.reply_to_bot,
+                 }, ensure_ascii=False)),
+            )
+            inserted = conn.execute(
+                "INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"
+                " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (message.chat_id, message.message_id, message.topic_id, message.sender_id,
+                 message.sender_label, int(message.is_bot), message.text, message.created_at,
+                 update_id, int(message.reply_to_bot)),
+            )
+            return inserted.rowcount == 1
 
     def record_message(self, message: StoredMessage, *, update_id: int) -> bool:
         """Persist a chat message. Returns False if (chat_id, message_id) exists."""
@@ -379,6 +907,35 @@ class Store:
             if rows:
                 result.append(_row_to_message(rows[0]))
         return result
+
+    def recover_unanswered_messages(self, *, limit: int = 200) -> list[StoredMessage]:
+        """Return all inbound messages not covered by a durable decision."""
+        rows = self._query(
+            "SELECT m.* FROM messages m WHERE m.is_bot = 0 AND NOT EXISTS ("
+            " SELECT 1 FROM turns t JOIN decisions d ON d.turn_id = t.turn_id"
+            " WHERE t.chat_id = m.chat_id AND t.topic_id IS m.topic_id"
+            " AND m.message_id BETWEEN t.first_message AND t.last_message)"
+            " ORDER BY m.chat_id, m.topic_id, m.message_id LIMIT ?", (limit,))
+        return [_row_to_message(row) for row in rows]
+
+    def recover_open_turns(self) -> list[sqlite3.Row]:
+        return self._query("SELECT t.* FROM turns t WHERE t.closed_at IS NULL"
+                           " AND NOT EXISTS (SELECT 1 FROM decisions d WHERE d.turn_id = t.turn_id)"
+                           " ORDER BY t.opened_at")
+
+    def messages_for_turn(self, turn: sqlite3.Row) -> list[StoredMessage]:
+        rows = self._query("SELECT * FROM messages WHERE chat_id = ? AND topic_id IS ?"
+                           " AND message_id BETWEEN ? AND ? ORDER BY message_id",
+                           (turn['chat_id'], turn['topic_id'], turn['first_message'], turn['last_message']))
+        return [_row_to_message(row) for row in rows if not row['is_bot']]
+
+    def unfinished_decisions(self) -> list[sqlite3.Row]:
+        return self._query("SELECT d.*, t.first_message, t.last_message, t.opened_at FROM decisions d"
+                           " JOIN turns t ON t.turn_id = d.turn_id"
+                           " WHERE t.closed_at IS NULL AND d.outcome = 'reply'"
+                           " AND d.superseded_by IS NULL"
+                           " AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.decision_id = d.decision_id)"
+                           " ORDER BY d.created_at")
 
     def get_update_cursor(self) -> int | None:
         rows = self._query("SELECT value FROM meta WHERE key = 'poll_offset'")
@@ -473,7 +1030,9 @@ class Store:
         with self._write() as conn:
             cursor = conn.execute(
                 "UPDATE decisions SET superseded_by = ?"
-                " WHERE decision_id = ? AND superseded_by IS NULL AND outcome = 'reply'",
+                " WHERE decision_id = ? AND superseded_by IS NULL AND outcome = 'reply'"
+                " AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.decision_id = decisions.decision_id"
+                " AND s.status = 'sending')",
                 (superseded_by, decision_id),
             )
             return cursor.rowcount == 1
@@ -503,11 +1062,11 @@ class Store:
         self, *, decision_id: str, chat_id: int, topic_id: int | None,
         reply_to: int | None, text: str,
     ) -> None:
-        """Record the intent to send, before any Telegram request is made."""
+        """Record the intent once, preserving any existing delivery state."""
         now = _now()
         with self._write() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO sends (decision_id, chat_id, topic_id, reply_to,"
+                "INSERT OR IGNORE INTO sends (decision_id, chat_id, topic_id, reply_to,"
                 " text, status, attempts, telegram_message_id, error, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, NULL, ?, ?)",
                 (decision_id, chat_id, topic_id, reply_to, text, now, now),
@@ -523,10 +1082,55 @@ class Store:
         with self._write() as conn:
             cursor = conn.execute(
                 "UPDATE sends SET status = 'sending', attempts = attempts + 1, updated_at = ?"
-                " WHERE decision_id = ? AND status = 'pending'",
-                (_now(), decision_id),
+                " WHERE decision_id = ? AND status = 'pending'"
+                " AND (EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = sends.decision_id"
+                " AND d.outcome = 'reply' AND d.superseded_by IS NULL AND d.created_at >= ?"
+                " AND NOT EXISTS (SELECT 1 FROM turns t WHERE t.turn_id = d.turn_id AND t.opened_at < ?))"
+                " OR NOT EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = sends.decision_id))"
+                " AND created_at >= ? AND NOT EXISTS (SELECT 1 FROM messages m"
+                " WHERE m.chat_id = sends.chat_id AND m.topic_id IS sends.topic_id"
+                " AND m.is_bot = 0 AND m.message_id > sends.reply_to)",
+                (_now(), decision_id, _now() - 86400, _now() - 86400, _now() - 86400),
             )
             return cursor.rowcount == 1
+
+    def pending_obsolete(self, decision_id: str, *, max_age: float = 86400) -> bool:
+        rows = self._query("SELECT s.created_at, s.reply_to, s.chat_id, s.topic_id, d.superseded_by"
+                           " FROM sends s LEFT JOIN decisions d ON d.decision_id = s.decision_id"
+                           " WHERE s.decision_id = ?", (decision_id,))
+        if not rows:
+            return True
+        row = rows[0]
+        if row['superseded_by'] is not None or _now() - row['created_at'] > max_age:
+            return True
+        if row['reply_to'] is None:
+            return False
+        return bool(self._query("SELECT 1 FROM messages WHERE chat_id = ? AND topic_id IS ?"
+                                " AND is_bot = 0 AND message_id > ? LIMIT 1",
+                                (row['chat_id'], row['topic_id'], row['reply_to'])))
+
+    def cancel_pending(self, decision_id: str, reason: str) -> None:
+        with self._write() as conn:
+            cursor = conn.execute("UPDATE sends SET status = 'failed', error = ?, updated_at = ?"
+                         " WHERE decision_id = ? AND status = 'pending'", (reason, _now(), decision_id))
+            if cursor.rowcount:
+                conn.execute("UPDATE turns SET closed_at = ?, outcome = 'superseded' WHERE turn_id ="
+                             " (SELECT turn_id FROM decisions WHERE decision_id = ?) AND closed_at IS NULL",
+                             (_now(), decision_id))
+
+    def finish_sent(self, decision_id: str, telegram_message_id: int, message: StoredMessage | None) -> None:
+        """Commit confirmed delivery, turn closure and chat history together."""
+        with self._write() as conn:
+            conn.execute("UPDATE sends SET status = 'sent', telegram_message_id = ?, error = NULL, updated_at = ?"
+                         " WHERE decision_id = ? AND status = 'sending'", (telegram_message_id, _now(), decision_id))
+            conn.execute("UPDATE turns SET closed_at = ?, outcome = 'sent' WHERE turn_id ="
+                         " (SELECT turn_id FROM decisions WHERE decision_id = ?)", (_now(), decision_id))
+            if message is not None:
+                conn.execute("INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"
+                             " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
+                             " VALUES (?, ?, ?, ?, ?, 1, ?, ?, -1, 0)",
+                             (message.chat_id, message.message_id, message.topic_id, message.sender_id,
+                              message.sender_label, message.text, message.created_at))
 
     def mark_sent(self, decision_id: str, telegram_message_id: int) -> None:
         with self._write() as conn:
@@ -590,6 +1194,18 @@ class Store:
     def purge_chat(self, chat_id: int) -> None:
         """Delete all conversation data for one chat. Keeps no excerpts."""
         with self._write() as conn:
+            conn.execute("DELETE FROM observation_events WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM observation_skips WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM observation_cursors WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM workflows WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM autonomous_calls WHERE activation_id IN"
+                         " (SELECT activation_id FROM autonomous_responses WHERE chat_id = ?)",
+                         (chat_id,))
+            conn.execute("DELETE FROM autonomous_responses WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM agent_waits WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM agent_state WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM actions WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM feedback_events WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM turns WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM decisions WHERE chat_id = ?", (chat_id,))
