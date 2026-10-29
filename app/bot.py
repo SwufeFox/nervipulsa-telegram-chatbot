@@ -279,6 +279,24 @@ class GroupAgent:
                     str(row["workflow_id"]), "failed",
                     outcome="interrupted_by_restart",
                 )
+            # A delivered reply whose process died before closing its episode
+            # leaves a row that looks like unfinished work. Reconciliation has
+            # to happen before any new observation is attributed to an episode,
+            # so it runs here rather than lazily on the first wake.
+            stale = self.store.close_stale_episodes()
+            if stale:
+                log.warning("closed %d episode(s) with no goal or wait left: %s",
+                            len(stale), ", ".join(stale[:5]))
+            # Episodes deliberately survive a restart: the identity is what a
+            # replayed observation resumes into. Reporting them keeps the
+            # difference visible - "interrupted and resumed" is not "fresh".
+            for episode in self.store.open_episodes():
+                chat_id = int(episode["chat_id"])
+                log.info("resuming episode %s episode=%s activations=%s",
+                         logwatch.scope(chat_id, episode["topic_id"],
+                                        self.chat_kinds.get(chat_id)),
+                         episode["episode_id"],
+                         len(self.store.episode_activations(str(episode["episode_id"]))))
             self.recovered_inbound = self._count_pending_observations()
             if self.recovered_inbound:
                 # Counting is not recovering. Without re-arming the batch for
@@ -547,6 +565,10 @@ class GroupAgent:
         if self.autonomy is not None:
             # `run_turns()` is the autonomous pass; it must not also run the
             # legacy turn path or there would be two participation models.
+            # Sends prepared before the upgrade still need to be resumed, and
+            # they go through the same atomic claim as any other send.
+            for work in self._take_recovery(TickStats(), sends_only=True):
+                self._schedule(work)
             self._schedule(self._autonomous_pass())
             return
         for work in self._take_recovery(TickStats()):
@@ -581,9 +603,11 @@ class GroupAgent:
             async with self._worker_limit:
                 return await self._process_turn(turn, tick)
 
-    def _take_recovery(self, tick: TickStats) -> list[Any]:
+    def _take_recovery(self, tick: TickStats, *, sends_only: bool = False) -> list[Any]:
         sends, self._recovered_sends = self._recovered_sends, []
-        decisions, self._recovered_decisions = self._recovered_decisions, []
+        decisions = []
+        if not sends_only:
+            decisions, self._recovered_decisions = self._recovered_decisions, []
         work = []
         for record in sends:
             rows = self.store._query(
@@ -719,6 +743,7 @@ class GroupAgent:
 
     async def run_turns(self, tick: TickStats | None = None) -> list[Decision]:
         if self.autonomy is not None:
+            await asyncio.gather(*self._take_recovery(tick or TickStats(), sends_only=True))
             await self._autonomous_pass()
             # Live mode wants the non-blocking dispatch; an explicit
             # `run_turns()` call means "do the work now", so wait for it.

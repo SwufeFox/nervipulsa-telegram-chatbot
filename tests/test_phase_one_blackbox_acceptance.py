@@ -629,6 +629,45 @@ def seed_send(db, status="pending", stale=False):
     store.close()
 
 
+def test_default_mode_recovers_legacy_pending_after_hard_exit(tmp_path):
+    db = tmp_path / "legacy.sqlite3"
+    code = """from app.store import Store
+import os, sys
+s = Store(sys.argv[1])
+s.open_turn(turn_id='t', chat_id=-1001234567890, topic_id=10, first_message=1, last_message=1, trigger='mention')
+s.record_decision(decision_id='d', chat_id=-1001234567890, topic_id=10, turn_id='t', outcome='reply', reason='mention', detail={}, trigger='mention')
+s.prepare_send(decision_id='d', chat_id=-1001234567890, topic_id=10, reply_to=1, text='saved reply')
+os._exit(76)
+"""
+    # Use the fixture's actual chat identifier, which is also the allowlist.
+    code = code.replace('-1001234567890', str(fixtures.TEST_CHAT))
+    child = subprocess.run([sys.executable, '-c', code, str(db)], cwd=ROOT, timeout=20)
+    assert child.returncode == 76
+
+    async def restart():
+        transport = FakeTransport()
+        store = Store(db)
+        config = AppConfig(bot_name='Alma', bot_username='alma_bot',
+                           allowed_chat_ids=(fixtures.TEST_CHAT,), dry_run=False,
+                           workspace=str(tmp_path), model='scripted')
+        bot = GroupAgent(config=config, store=store, client=TelegramClient(transport),
+                         system_prompt=load_default_profile(),
+                         agent_factory=lambda spec: ScriptedAgent(lambda prompt: 'unused'),
+                         bot_user_id=fixtures.ALMA)
+        try:
+            await bot.start()
+            bot.schedule_turns()
+            await asyncio.gather(*list(bot._workers))
+            assert [send['text'] for send in transport.sends] == ['saved reply']
+            assert store.get_send('d').status == 'sent'
+            await bot.run_turns()
+            assert len(transport.sends) == 1
+        finally:
+            await bot.stop()
+            store.close()
+    asyncio.run(restart())
+
+
 def test_recovery_delivers_fresh_pending_and_records_confirmed_history(tmp_path):
     db = tmp_path / "pending.sqlite3"
     seed_send(db)
