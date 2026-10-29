@@ -297,6 +297,16 @@ class GroupAgent:
                                         self.chat_kinds.get(chat_id)),
                          episode["episode_id"],
                          len(self.store.episode_activations(str(episode["episode_id"]))))
+            # A restart should answer what it missed, not what ended hours ago.
+            # Skipping happens before re-arming, because re-arming is what
+            # makes the scope get looked at.
+            expired = self.store.expire_stale_observations(
+                older_than=self.config.stale_observation_seconds)
+            for chat_id, topic_id, skipped in expired:
+                log.warning("skipped %d observation(s) older than %.0fs in %s",
+                            skipped, self.config.stale_observation_seconds,
+                            logwatch.scope(chat_id, topic_id,
+                                           self.chat_kinds.get(chat_id)))
             self.recovered_inbound = self._count_pending_observations()
             if self.recovered_inbound:
                 # Counting is not recovering. Without re-arming the batch for
@@ -374,7 +384,18 @@ class GroupAgent:
                 timeout=self.config.poll_timeout,
             )
         except Exception as exc:
-            log.warning("getUpdates failed (error_type=%s)", type(exc).__name__)
+            # The class name alone cannot tell these apart, and they need
+            # different responses: a 409 means another instance is polling with
+            # the same token (stop one of them), while a timeout or network
+            # error is retried. `TransportError` already carries that
+            # classification - dropping it turned a diagnosable failure into a
+            # repeated "TransportError".
+            category = getattr(exc, "category", None)
+            status = getattr(exc, "status", None)
+            detail = str(getattr(exc, "detail", "") or "")[:300]
+            log.warning("getUpdates failed (error_type=%s category=%s status=%s)%s",
+                        type(exc).__name__, category or "unknown", status,
+                        f": {detail}" if detail else "")
             tick.errors += 1
             self.stats.absorb(tick)
             return offset, tick

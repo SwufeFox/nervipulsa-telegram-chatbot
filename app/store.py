@@ -645,6 +645,69 @@ class Store:
         )
         return int(rows[0]["latest"]) if rows and rows[0]["latest"] is not None else 0
 
+    def expire_stale_observations(
+        self, *, older_than: float, chat_id: int | None = None,
+    ) -> list[tuple[int, int | None, int]]:
+        """Advance the cursor past observations too old to answer, per scope.
+
+        Replaying unprocessed observations is right for a restart: a message
+        received just before a crash should still be considered. It is wrong for
+        a backlog measured in hours. The agent would reason about a conversation
+        that ended long ago and then speak into the present one, which is both
+        useless and visibly wrong to everyone in the chat.
+
+        Advancing the cursor - rather than deleting rows - keeps the audit trail:
+        the observations stay in the table and stop being pending. It returns
+        (chat_id, topic_id, skipped_count) so the start-up log can say what was
+        dropped instead of dropping it silently.
+        """
+        cutoff = self._now() - older_than
+        with self._write(immediate=True) as conn:
+            scopes = conn.execute(
+                "SELECT DISTINCT o.chat_id, o.topic_id FROM observation_events o"
+                " LEFT JOIN observation_cursors c"
+                "   ON c.chat_id = o.chat_id AND c.topic_id IS o.topic_id"
+                " WHERE o.sequence > COALESCE(c.last_processed, 0)"
+                "   AND o.received_at < ?"
+                + (" AND o.chat_id = ?" if chat_id is not None else ""),
+                (cutoff, chat_id) if chat_id is not None else (cutoff,),
+            ).fetchall()
+            skipped: list[tuple[int, int | None, int]] = []
+            for scope in scopes:
+                cid, tid = int(scope["chat_id"]), scope["topic_id"]
+                # Only the stale prefix: a stale message must not pull the cursor
+                # past a fresh one that still needs answering.
+                newest_stale = conn.execute(
+                    "SELECT MAX(sequence) AS seq FROM observation_events"
+                    " WHERE chat_id = ? AND topic_id IS ? AND sequence >"
+                    "   COALESCE((SELECT MAX(last_processed) FROM observation_cursors"
+                    "     WHERE chat_id = ? AND topic_id IS ?), 0)"
+                    "   AND received_at < ?",
+                    (cid, tid, cid, tid, cutoff),
+                ).fetchone()["seq"]
+                if newest_stale is None:
+                    continue
+                count = conn.execute(
+                    "SELECT COUNT(*) AS n FROM observation_events"
+                    " WHERE chat_id = ? AND topic_id IS ? AND sequence >"
+                    "   COALESCE((SELECT MAX(last_processed) FROM observation_cursors"
+                    "     WHERE chat_id = ? AND topic_id IS ?), 0)"
+                    "   AND sequence <= ?",
+                    (cid, tid, cid, tid, newest_stale),
+                ).fetchone()["n"]
+                conn.execute(
+                    "INSERT INTO observation_cursors"
+                    " (chat_id, topic_id, last_processed, updated_at)"
+                    " VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(scope_key) DO UPDATE SET"
+                    "   last_processed = MAX(observation_cursors.last_processed,"
+                    "                         excluded.last_processed),"
+                    "   updated_at = excluded.updated_at",
+                    (cid, tid, int(newest_stale), self._now()),
+                )
+                skipped.append((cid, tid, int(count)))
+        return skipped
+
     def open_episode(
         self, *, episode_id: str, chat_id: int, topic_id: int | None,
     ) -> sqlite3.Row:

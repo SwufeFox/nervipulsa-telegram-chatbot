@@ -95,6 +95,13 @@ class AppConfig:
     idle_seconds: float = 2.0
     max_batch_seconds: float = 15.0
     max_batch_observations: int = 24
+    # How old a never-processed observation may be before it is considered a
+    # different conversation. After a long stop the backlog can hold hours of
+    # chat; answering it now would mean replying to a conversation that has
+    # already ended, in front of the people having the current one. Those
+    # observations are marked read at start-up instead of being replayed.
+    # Generous by default: a brief restart should still answer what it missed.
+    stale_observation_seconds: float = 3600.0
     # Resource limits, not social judgements: they bound how often the model
     # may be asked to look and how often the bot may speak. Exhausting one
     # defers the turn (the observations stay queued); it never becomes a
@@ -187,6 +194,7 @@ class AppConfig:
             "idle_seconds": self.idle_seconds,
             "max_batch_seconds": self.max_batch_seconds,
             "max_batch_observations": self.max_batch_observations,
+            "stale_observation_seconds": self.stale_observation_seconds,
             "max_activations_per_hour": self.max_activations_per_hour,
             "max_actions_per_hour": self.max_actions_per_hour,
             "min_action_interval_seconds": self.min_action_interval_seconds,
@@ -233,6 +241,7 @@ def load_config(
         # an operator actually needs to tune cost and disturbance, so they
         # must be readable from the file rather than only from Python.
         "idle_seconds", "max_batch_seconds", "max_batch_observations",
+        "stale_observation_seconds",
         "max_activations_per_hour", "max_actions_per_hour",
         "min_action_interval_seconds",
     )
