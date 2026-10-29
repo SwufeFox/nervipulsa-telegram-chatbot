@@ -69,6 +69,9 @@ class WorkflowResult:
     waits: list[str] = field(default_factory=list)
     states: list[str] = field(default_factory=list)
     detail: dict[str, Any] = field(default_factory=dict)
+    # The durable logical work this activation belonged to. Two results with
+    # the same episode are the same job continuing, not two separate turns.
+    episode_id: str | None = None
 
 
 @dataclass
@@ -256,6 +259,10 @@ class AutonomousLoop:
         # Timers first: `_wake_due` writes the wake as an observation, so a
         # later pass would have to exist before the agent could act on its own
         # reminder.
+        # Goals lapse on their own schedule and must be reported, not silently
+        # dropped: a context still holding an expired plan is worse than no plan.
+        for expired in self.store.expire_intents(self._clock()):
+            self._report_intent_expiry(expired)
         fired: list[tuple[int, int | None]] = []
         for wait in self.store.due_waits(self._clock()):
             key = self._wake_due(wait)
@@ -270,6 +277,8 @@ class AutonomousLoop:
         # window (idle == 0), which the debounce would reject, costing an extra
         # pass. Dispatch these scopes now.
         for key in fired:
+            if not force and now < self._retry_after.get(key, 0.0):
+                continue
             if key not in ready and self.store.pending_observations(
                     key[0], key[1], limit=1):
                 ready.append(key)
@@ -299,7 +308,8 @@ class AutonomousLoop:
             self._active_topics[key] = task
 
             def _finished(finished: asyncio.Task, scope: tuple[int, int | None] = key) -> None:
-                self._active_topics.pop(scope, None)
+                if self._active_topics.get(scope) is finished:
+                    self._active_topics.pop(scope, None)
                 self._wake.set()
 
             task.add_done_callback(_finished)
@@ -461,7 +471,8 @@ class AutonomousLoop:
         evaporated.
         """
         return not (handler.actions or handler.waits or handler.states
-                    or handler.outcome)
+                    or handler.outcome or getattr(handler, "intent_set", None)
+                    or getattr(handler, "intent_resolved", None))
 
     def _decision_reminder(self, payload: dict[str, Any], result: Any) -> dict[str, Any]:
         """One explicit second chance to decide, carrying what went wrong.
@@ -528,12 +539,25 @@ class AutonomousLoop:
             )
 
         observations = [_row_to_observation(row) for row in rows]
+        # The logical work this activation belongs to. Reading first is what
+        # tells a continuation apart from a fresh start: an episode already
+        # open here means this wake is the same job carrying on.
+        existing_episode = self.store.current_episode(chat_id, topic_id)
+        episode_id = str(existing_episode["episode_id"]) if existing_episode else None
+        continuation = episode_id is not None
+        episode = self.store.open_episode(
+            episode_id=_new_id("ep"), chat_id=chat_id, topic_id=topic_id,
+        )
+        # `str(None)` is the literal "None", which would look like a real id and
+        # merge unrelated work into it. Treat a missing id as "no episode".
+        episode_id = str(episode["episode_id"]) if episode["episode_id"] else None
         workflow_id = self.store.open_workflow(
             chat_id=chat_id,
             topic_id=topic_id,
             first_sequence=observations[0].sequence,
             last_sequence=observations[-1].sequence,
             workflow_id=_new_id("wf"),
+            episode_id=episode_id,
         )
         self._batch_started.pop((chat_id, topic_id), None)
         self._last_activity.pop((chat_id, topic_id), None)
@@ -560,10 +584,10 @@ class AutonomousLoop:
             (chat_id, topic_id, observations[-1].sequence,
              self.max_batch_observations),
         ))
-        log.info("batch activated %s workflow=%s observations=%s seq=%s-%s "
-                 "oldest_lag=%.0fs backlog_after=%s",
-                 _label(self.chat_kinds, chat_id, topic_id), workflow_id,
-                 len(observations), observations[0].sequence,
+        log.info("batch activated %s workflow=%s episode=%s continuation=%s "
+                 "observations=%s seq=%s-%s oldest_lag=%.0fs backlog_after=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), workflow_id, episode_id,
+                 continuation, len(observations), observations[0].sequence,
                  observations[-1].sequence, lag, remaining)
 
         # Mark any wait that this batch structurally satisfies. The agent is
@@ -583,8 +607,11 @@ class AutonomousLoop:
 
         handler = _ActionHandler(self, chat_id=chat_id, topic_id=topic_id,
                                 workflow_id=workflow_id,
-                                observed_through=observations[-1].sequence)
-        observation_payload = self._render(observations, chat_id, topic_id)
+                                observed_through=observations[-1].sequence,
+                                episode_id=episode_id)
+        observation_payload = self._render(observations, chat_id, topic_id,
+                                           episode_id=episode_id,
+                                           continuation=continuation)
 
         started = time.monotonic()
         log.info("agent call started %s workflow=%s",
@@ -690,8 +717,10 @@ class AutonomousLoop:
         self.waits_created += len(handler.waits)
 
         detail = {"activation": getattr(result, "detail", {}),
-                  "observations": [o.sequence for o in observations]}
+                  "observations": [o.sequence for o in observations],
+                  "episode_id": episode_id, "continuation": continuation}
         self.store.close_workflow(workflow_id, "completed", outcome=outcome, detail=detail)
+        self._settle_episode(chat_id, topic_id, episode_id, outcome=outcome)
 
         # Only now, with every intent already durable AND the cursor advanced,
         # may effects run. Executing before the close would compare the action
@@ -709,11 +738,12 @@ class AutonomousLoop:
         return WorkflowResult(
             workflow_id=workflow_id, state="completed", outcome=outcome,
             actions=list(handler.actions), waits=list(handler.waits),
-            states=list(handler.states), detail=detail,
+            states=list(handler.states), detail=detail, episode_id=episode_id,
         )
 
     def _render(self, observations: Sequence[Observation], chat_id: int,
-                topic_id: int | None) -> dict[str, Any]:
+                topic_id: int | None, *, episode_id: str | None = None,
+                continuation: bool = False) -> dict[str, Any]:
         """Structured, not a fake user prompt.
 
         The agent gets event ids and provenance so it can reason about what it
@@ -721,6 +751,34 @@ class AutonomousLoop:
         observations, not a request to reply.
         """
         state = self.store.get_state(chat_id, topic_id)
+        # The scope's unfinished goal, if there is one. This is what makes a
+        # wake a continuation rather than a fresh decision task: without it the
+        # agent sees new events plus some key/value notes and has to guess why
+        # it is being called. Read on every turn, not only after a wait, since
+        # an intent outlives any particular wait.
+        intent = self.store.current_intent(chat_id, topic_id)
+        intent_payload = None
+        if intent is not None:
+            intent_payload = {
+                "intent_id": str(intent["intent_id"]),
+                "goal": str(intent["goal"]),
+                "opened_at": float(intent["created_at"]),
+                "expires_at": intent["expires_at"],
+            }
+        # The logical work this scope is already in the middle of. This is the
+        # difference between "you were woken" and "you were woken to continue
+        # what you were doing": an activation opens a fresh decision task, an
+        # episode carries the reason across them.
+        episode_payload = None
+        if episode_id is not None:
+            row = self.store.current_episode(chat_id, topic_id)
+            if row is not None:
+                episode_payload = {
+                    "episode_id": episode_id,
+                    "opened_at": float(row["opened_at"]),
+                    "activations": len(self.store.episode_activations(episode_id)),
+                    "continuation": continuation,
+                }
         waits = [
             {"wait_id": str(row["wait_id"]), "kind": str(row["kind"]),
              "purpose": str(row["purpose"])}
@@ -730,6 +788,7 @@ class AutonomousLoop:
             "kind": "group_observations",
             "chat_id": chat_id,
             "topic_id": topic_id,
+            "episode": episode_payload,
             "observations": [
                 {"sequence": o.sequence, "type": o.kind, "received_at": o.received_at,
                  "payload": o.payload}
@@ -737,6 +796,7 @@ class AutonomousLoop:
             ],
             "state": state,
             "active_waits": waits,
+            "open_intent": intent_payload,
             "note": (
                 "These are group observations, not an instruction to reply. "
                 "Decide whether to act; finish_silently is a valid outcome."
@@ -857,6 +917,9 @@ class AutonomousLoop:
                                          telegram_message_id=telegram_id,
                                          sender_label=self.bot_name, sender_id=self.bot_user_id)
                 self._report_result(row, action_id, "sent", None)
+                # The message landed, so a goal it claimed is now complete. Done
+                # after delivery for the reason in `_close_intent_for_action`.
+                self._close_intent_for_action(action_id)
             elif name == "unknown":
                 self.store.finish_action(action_id, "unknown", error=error)
                 self._report_result(row, action_id, "unknown", error)
@@ -866,6 +929,101 @@ class AutonomousLoop:
             else:
                 self.store.finish_action(action_id, "unknown", error=error or "unrecognized transport outcome")
                 self._report_result(row, action_id, "unknown", error or "unrecognized transport outcome")
+
+    def _settle_episode(self, chat_id: int, topic_id: int | None,
+                        episode_id: str | None, *, outcome: str) -> None:
+        """Decide whether the logical work is finished, or still owed a wake.
+
+        An episode that stays open is a promise that a later activation belongs
+        to it, so leaving one open with nothing that could ever wake it is a
+        leak, and closing one that is still waiting throws away the thread. The
+        rule is therefore narrow: it stays open only while the agent has said
+        something specific it still owes - an open goal, or a wait it registered.
+
+        Pending observations deliberately do NOT count. New messages are new
+        conversation, not this job carrying on; and in a busy group they are
+        always present, so treating them as a reason would keep one episode open
+        for days and make "continuation" meaningless again.
+        """
+        if not episode_id:
+            return
+        if self.store.current_intent(chat_id, topic_id) is not None:
+            return
+        if self.store.active_waits(chat_id, topic_id):
+            return
+        if self.store.close_episode(episode_id, reason=outcome):
+            log.info("episode closed %s episode=%s reason=%s",
+                     _label(self.chat_kinds, chat_id, topic_id), episode_id, outcome)
+
+    def _close_intent_for_action(self, action_id: str) -> None:
+        """Close the goal a message said it completes - but only once it landed.
+
+        The model marks the message with `resolves_intent`; the goal closes
+        here, not at tool time. A reply can still be dropped as stale, and
+        closing on acceptance would mark a goal done for a sentence nobody saw,
+        leaving nothing to revisit it.
+        """
+        try:
+            rows = self.store._query(
+                "SELECT intent_id FROM actions WHERE action_id = ?", (action_id,))
+        except Exception as exc:
+            # Storage trouble must not take down the sender, but staying silent
+            # about it is how a goal ends up stranded.
+            log.error("could not read the intent for action %s (error_type=%s)",
+                      action_id, type(exc).__name__)
+            return
+        intent_id = str(rows[0]["intent_id"]) if rows and rows[0]["intent_id"] else None
+        if not intent_id:
+            return
+        # `finish_action` closes the goal in the same transaction as the status
+        # change, so this call is usually a no-op - and that is exactly why the
+        # episode settlement cannot be nested inside the "did I close it" branch.
+        # Once the goal is closed, nothing keeps the episode alive.
+        if self.store.resolve_intent(intent_id, how="send_message"):
+            log.info("intent closed action_id=%s intent_id=%s", action_id, intent_id)
+        if self.store.intent_is_open(intent_id):
+            return
+        scope = self.store._query(
+            "SELECT chat_id, topic_id FROM actions WHERE action_id = ?", (action_id,))
+        if not scope:
+            return
+        episode = self.store.current_episode(
+            int(scope[0]["chat_id"]), scope[0]["topic_id"])
+        if episode is not None:
+            self._settle_episode(
+                int(scope[0]["chat_id"]), scope[0]["topic_id"],
+                str(episode["episode_id"]), outcome="delivered",
+            )
+
+    def _report_intent_expiry(self, intent: Any) -> None:
+        """Announce that a goal lapsed, as a durable observation.
+
+        Expiry is not a failure, but it is not nothing: the goal is closed now,
+        and a turn that still believed it open would keep reasoning towards
+        something already given up. An observation survives a restart; a log
+        line does not.
+        """
+        chat_id, topic_id = int(intent["chat_id"]), intent["topic_id"]
+        try:
+            self.store.append_synthetic_observation(
+                dedupe_key=f"intent-expired:{intent['intent_id']}",
+                chat_id=chat_id, topic_id=topic_id, kind="intent_expired",
+                payload={
+                    "intent_id": str(intent["intent_id"]),
+                    "goal": str(intent["goal"]),
+                    "note": (
+                        "This goal reached its deadline and is closed. You do not "
+                        "have to act on it; if it still matters, set it again."
+                    ),
+                },
+            )
+        except Exception as exc:
+            log.error("could not record the expiry of intent %s (error_type=%s)",
+                      intent["intent_id"], type(exc).__name__)
+            return
+        log.info("intent expired %s intent_id=%s",
+                 _label(self.chat_kinds, chat_id, topic_id), intent["intent_id"])
+        self.note_activity(chat_id, topic_id)
 
     def _report_result(self, row: Any, action_id: str, status: str,
                        error: str | None) -> None:
@@ -913,15 +1071,24 @@ class _ActionHandler:
     """Bridges model tool calls to durable intent. No Telegram here."""
 
     def __init__(self, loop: AutonomousLoop, *, chat_id: int, topic_id: int | None,
-                 workflow_id: str, observed_through: int) -> None:
+                 workflow_id: str, observed_through: int,
+                 episode_id: str | None = None) -> None:
         self._loop = loop
         self.chat_id = chat_id
         self.topic_id = topic_id
         self.workflow_id = workflow_id
+        self.episode_id = episode_id
         self.observed_through = observed_through
         self.actions: list[str] = []
         self.waits: list[str] = []
         self.states: list[str] = []
+        # Intent bookkeeping for this turn. Kept separate from `states`: an
+        # intent is a goal that survives the turn, `update_state` is a note.
+        self.intent_set: str | None = None
+        self.intent_resolved: str | None = None
+        # The goal `send_message` was told to complete with this message. Kept
+        # on the handler too so a turn can report it without re-reading storage.
+        self.pending_intent_resolution: str | None = None
         self.outcome: str | None = None
 
     async def __call__(self, name: str, arguments: dict[str, Any], context: Any,
@@ -938,6 +1105,10 @@ class _ActionHandler:
             return self._wait_until(arguments)
         if name == "update_state":
             return self._update_state(arguments)
+        if name == "set_intent":
+            return self._set_intent(arguments)
+        if name == "resolve_intent":
+            return self._resolve_intent(arguments)
         return ({"status": "rejected", "reason": "unknown_tool",
                  "executed": False}, "rejected")
 
@@ -972,6 +1143,19 @@ class _ActionHandler:
             expires_at = self._loop._clock() + self._loop.bounded_action_ttl
         else:
             expires_at = None
+        # Read the goal *before* recording the action: the id is stored with
+        # the action so a crash after delivery can still close it. Read after,
+        # and a message marked `resolves_intent` would carry nothing.
+        intent_to_close: str | None = None
+        if arguments.get("resolves_intent") is True:
+            current = self._loop.store.current_intent(self.chat_id, self.topic_id)
+            if current is not None:
+                intent_to_close = str(current["intent_id"])
+        self.pending_intent_resolution = intent_to_close
+        if intent_to_close is not None and self.episode_id:
+            # Tie the goal to the episode that produced it, so "what was I in
+            # the middle of" and "what am I trying to do" name one thing.
+            self._loop.store.attach_episode_intent(self.episode_id, intent_to_close)
         created = self._loop.store.prepare_action(
             action_id=action_id,
             workflow_id=self.workflow_id,
@@ -983,12 +1167,16 @@ class _ActionHandler:
             freshness=freshness,
             max_unobserved=cap,
             expires_at=expires_at,
+            intent_id=intent_to_close,
         )
         self.actions.append(action_id)
         self.outcome = self.outcome or "speak"
-        # "accepted" means the intent is durable. Delivery is not implied.
+        # Closing the goal is conditional on the message actually going out:
+        # recording it here would mark the goal done for a reply that may still
+        # be discarded as stale, and then nothing would try again.
         return ({"status": "accepted", "action_id": action_id,
                  "executed": False, "delivery": "pending",
+                 "resolves_intent": intent_to_close is not None,
                  "detail": ("recorded" if created else "already recorded")}, "accepted")
 
     def _wait_event(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -998,6 +1186,7 @@ class _ActionHandler:
             wait_id=wait_id, chat_id=self.chat_id, topic_id=self.topic_id,
             kind="event", purpose=str(arguments["purpose"]),
             event_types=arguments.get("event_types"), expires_at=expires_at,
+            episode_id=self.episode_id,
         )
         self.waits.append(wait_id)
         self.outcome = self.outcome or "waiting"
@@ -1011,12 +1200,45 @@ class _ActionHandler:
         self._loop.store.add_wait(
             wait_id=wait_id, chat_id=self.chat_id, topic_id=self.topic_id,
             kind="until", purpose=str(arguments.get("purpose") or "reconsider"),
-            due_at=due_at, expires_at=expires_at,
+            due_at=due_at, expires_at=expires_at, episode_id=self.episode_id,
         )
         self.waits.append(wait_id)
         self.outcome = self.outcome or "waiting"
         return ({"status": "accepted", "wait_id": wait_id,
                  "executed": False}, "accepted")
+
+    def _set_intent(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        store = self._loop.store
+        goal = str(arguments["goal"]).strip()
+        expires_at = _seconds_from_iso(arguments.get("expires_at"))
+        intent_id = _new_id("int")
+        store.replace_intent(intent_id=intent_id, chat_id=self.chat_id,
+                             topic_id=self.topic_id, goal=goal, expires_at=expires_at)
+        if self.episode_id:
+            store.attach_episode_intent(self.episode_id, intent_id)
+        self.intent_set = intent_id
+        return ({"status": "accepted", "intent_id": intent_id,
+                 "executed": False,
+                 "detail": "this goal is shown to you on every later wake"},
+                "accepted")
+
+    def _resolve_intent(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        store = self._loop.store
+        current = store.current_intent(self.chat_id, self.topic_id)
+        if current is None:
+            # Nothing open is not an error worth failing a turn over, but it
+            # must not be reported as "closed" either.
+            return ({"status": "accepted", "executed": False,
+                     "detail": "no open goal"}, "accepted")
+        status = "abandoned" if arguments.get("abandoned") is True else "resolved"
+        closed = store.resolve_intent(
+            str(current["intent_id"]),
+            how=str(arguments.get("reason") or "agent"), status=status,
+        )
+        if closed:
+            self.intent_resolved = str(current["intent_id"])
+        return ({"status": "accepted", "executed": False, "closed": closed,
+                 "detail": "goal closed; nobody was told"}, "accepted")
 
     def _update_state(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
         expires_at = _seconds_from_iso(arguments.get("expires_at"))

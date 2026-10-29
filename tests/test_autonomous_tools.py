@@ -50,6 +50,7 @@ def test_catalog_exposes_only_the_scoped_tools():
     assert catalog.names == CATALOG_TOOL_NAMES
     assert set(name for name in catalog.names) == {
         "send_message", "finish_silently", "wait_for_event", "wait_until", "update_state",
+        "set_intent", "resolve_intent",
     }
     # python_exec and friends must never leak in through this catalog.
     assert catalog.get("python_exec") is None

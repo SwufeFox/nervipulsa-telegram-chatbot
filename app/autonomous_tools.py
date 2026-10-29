@@ -14,6 +14,9 @@ The tool set is deliberately small and closed:
   wait_for_event   end this turn and be woken by a future event
   wait_until       end this turn and be woken at a wall-clock time
   update_state     remember something for later turns
+  set_intent       record what this turn is trying to accomplish, and stay
+                   on it across wakes
+  resolve_intent   close that goal, because it is done with
 
 Only `send_message` can create an outbound action, and only the application
 can turn an accepted action into a Telegram request. Ordinary assistant text
@@ -43,6 +46,8 @@ CATALOG_TOOL_NAMES = (
     "wait_for_event",
     "wait_until",
     "update_state",
+    "set_intent",
+    "resolve_intent",
 )
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:\-]{1,%d}$" % MAX_EVENT_TYPE_CHARS)
@@ -184,13 +189,25 @@ class _SendMessage(_BaseTool):
                         "before this reply is dropped. Ignored otherwise."
                     ),
                 },
+                "resolves_intent": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true when this message is the thing you were waiting to "
+                        "say, so the open goal is closed with it. Leave false if the "
+                        "goal continues after saying this."
+                    ),
+                },
             },
             "required": ["text"],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"text", "reply_to", "freshness", "max_unobserved_events"}:
+        if set(arguments) - {"text", "reply_to", "freshness", "max_unobserved_events",
+                             "resolves_intent"}:
+            return "invalid_payload"
+        if "resolves_intent" in arguments and not isinstance(
+                arguments["resolves_intent"], bool):
             return "invalid_payload"
         if _nonempty(arguments.get("text"), MAX_MESSAGE_CHARS) is None:
             return "invalid_payload"
@@ -343,6 +360,78 @@ class _UpdateState(_BaseTool):
         return None
 
 
+class _SetIntent(_BaseTool):
+    """Record what you are trying to accomplish here, so a later wake continues it.
+
+    A wake is not a fresh conversation: you are the same participant, and this
+    is how that survives the gap. Write the goal as something you could act on
+    when you are woken - what you are waiting for, and what you would do about
+    it - not as a status report.
+
+    One goal per chat (or per topic). Calling this again replaces the current
+    goal rather than adding a second one.
+    """
+
+    name = "set_intent"
+
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "minLength": 1, "maxLength": 1000,
+                         "description": "What you are trying to accomplish."},
+                "expires_at": {"type": "string", "maxLength": 64,
+                               "description": "ISO-8601 with timezone. Optional."},
+            },
+            "required": ["goal"],
+            "additionalProperties": False,
+        }
+
+    def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
+        if set(arguments) - {"goal", "expires_at"}:
+            return "invalid_payload"
+        if _nonempty(arguments.get("goal"), 1000) is None:
+            return "invalid_payload"
+        if "expires_at" in arguments and _aware_timestamp(arguments["expires_at"]) is None:
+            return "invalid_payload"
+        return None
+
+
+class _ResolveIntent(_BaseTool):
+    """Close the current goal. Use when it is genuinely finished, or dropped.
+
+    Closing is not a report to anyone: nobody is told. Say so with
+    `send_message` if the chat should know.
+    """
+
+    name = "resolve_intent"
+
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "maxLength": MAX_REASON_CHARS},
+                "abandoned": {
+                    "type": "boolean",
+                    "description": (
+                        "True if you are dropping the goal rather than completing it. "
+                        "The difference is recorded, nothing else changes."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        }
+
+    def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
+        if set(arguments) - {"reason", "abandoned"}:
+            return "invalid_payload"
+        if "reason" in arguments and _nonempty(arguments["reason"], MAX_REASON_CHARS) is None:
+            return "invalid_payload"
+        if "abandoned" in arguments and not isinstance(arguments["abandoned"], bool):
+            return "invalid_payload"
+        return None
+
+
 class AutonomousToolCatalog:
     """Exposes only the scoped action tools above.
 
@@ -356,7 +445,8 @@ class AutonomousToolCatalog:
         self._tools: dict[str, _BaseTool] = {
             tool.name: tool
             for tool in (_SendMessage(self), _FinishSilently(self), _WaitForEvent(self),
-                         _WaitUntil(self), _UpdateState(self))
+                         _WaitUntil(self), _UpdateState(self), _SetIntent(self),
+                         _ResolveIntent(self))
         }
 
     def bind(self, handler: ToolHandler) -> None:

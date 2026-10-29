@@ -125,7 +125,7 @@ def test_unmentioned_message_reaches_the_model_and_its_tool_sends(tmp_path):
             assert "leaking memory" in json.dumps(request, ensure_ascii=False)
             names = [s["function"]["name"] for s in agent.runtime.actor.tools]
             assert set(names) == {"send_message", "finish_silently", "wait_for_event",
-                                  "wait_until", "update_state"}
+                                  "wait_until", "update_state", "set_intent", "resolve_intent"}
             assert [s["text"] for s in transport.sends] == ["Check the heap"]
             assert send_rows(tmp_path / "app.db") == [("sent", "Check the heap")]
         finally:
