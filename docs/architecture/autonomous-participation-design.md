@@ -118,6 +118,101 @@ Agent 不仅可以在未被 @ 时发现未解的问题并补充有效信息，�
 
 **刷新与过期：** 默认只依据序号、事件类型和时间等机械事实判断是否需要刷新，不判断消息“值不值得回复”。发言意图记录 Agent 已观察到的序号、有效期及其选择的新鲜度要求；先以严格模式为默认：同话题有未观察事件就暂不领取发送，返回 `needs_refresh` 并把增量交还 Agent。Agent 也可以明确选择有界模式，接受有限时间或事件数的未观察窗口；执行器施加系统硬上限，字段缺失或无效时回到严格模式。两种模式都在同一事务里检查版本和领取状态，事务完成之后到达的新事件不能追溯性改变已经领取的行动。严格模式在高流量下可能一直冲突；有界模式可能错过刚到的解决信息，不能保证完全避免过时发言。每个工作单元以最多两次刷新作为实验起点；上限或预算耗尽时记录 `deferred_refresh`，保留输入并让出队列，由后续公平调度重试，不能记成主动沉默。该参数和有界模式上限须通过真实延迟、打扰和成本实验确定。
 
+## 逻辑工作单元的延续（continuation）
+
+**状态：已实现（2026-10-29）。** 之前只有 intent：跨激活保存的目标数据，每次唤醒仍然
+新建一个 workflow，数据里没有任何东西说明"这两次激活是同一件事"。现在补上了
+`workflow_episodes`——逻辑工作单元的持久身份，详见下面的"实现记录"与
+`docs/evaluations/continuation-investigation-2026-10-29.md`。
+
+**问题。** 一次 workflow 等于一次模型激活。`wait_for_event` / `wait_until` 只登记了一个
+唤醒条件，没有留下"我当时正在做什么"。于是每次唤醒都是重新构造一个短暂的决策任务：
+Agent 看到的是新观察 + 一堆状态键，而不是一个持有未完成意图的执行上下文。表现上是
+"每隔一段时间被叫醒、重新决定是否说话"，而不是"一直在参与同一场对话"。
+
+**不追求的东西。** 不是让模型常驻运行，也不是无限消耗 token。事件唤醒推理本身是合理的。
+要改的只是：唤醒的是**同一个持续存在的逻辑 Agent**。
+
+**最小模型。** 每个 `(chat_id, topic_id)` 至多一条 *active intent*：
+
+```
+agent_intents(
+  intent_id, chat_id, topic_id,
+  goal,            -- 她自己写的："等林贴出日志，看是否还报 Code 62"
+  status,          -- open | resolved | abandoned
+  opened_at, updated_at,
+  expires_at,      -- 兜底，防止陈旧意图永久污染上下文
+  resolved_by      -- send_message / wait_satisfied / explicit / expired
+)
+```
+
+与现有结构的区别：
+
+| | 现在 | 加入 intent 之后 |
+| --- | --- | --- |
+| 唤醒时看到 | 新观察 + `agent_state` 键值 | 上面这些 **加上** 未完成意图全文 |
+| workflow 之间 | 彼此独立 | workflow 记录它运行时的 `intent_id`，可回溯同一逻辑线程 |
+| 等待到期 | 只发 timer 事件 | timer 事件带上意图，明确"你上次在等这个" |
+| 结束 | workflow 关闭即结束 | 意图可以跨多个 workflow 存活，直到显式解除或过期 |
+
+**不假装它是持久进程。** intent 是**数据**，不是活着的协程。它保证唤醒时上下文连续，
+不保证事件顺序之外的任何执行连续性。这一点必须写在实现里，否则又会变成"看起来像
+Agent、其实是状态机"。
+
+**解除方式**（都要可观测，不能静默）：
+
+- `resolve_intent`：她自己判断已经不需要继续了；
+- `send_message` 里带 `resolves_intent: true`：说完就算完成；
+- 到期：记为 `expired`，并在下一次渲染中明确告知，不留悬空；
+- 工作单元失败不解除意图——没做成不等于不想做。
+
+**与 `wait_*` 的关系。** 等待回答的是"什么时候再叫我"，intent 回答的是"叫醒我之后我还
+在干什么"。两者独立：可以不等待而有未完成意图，也可以等待而无意图。把两者混成一个
+字段会让"我只是想晚点看"和"我有件事没做完"无法区分。
+
+### 实现记录：`workflow_episodes`（2026-10-29）
+
+intent 解决了"目标跨激活可见"，但没有解决**身份**：`workflows` 每次都是新的一行，
+数据里没有东西说"这两次激活是同一件事"。补的是这一层。
+
+```
+workflow_episodes(
+  episode_id, chat_id, topic_id,
+  state,      -- open | closed
+  reason,     -- 关闭原因
+  intent_id,  -- 这一轮工作自己声明的目标（可为空）
+  opened_at, updated_at, closed_at
+)
+workflows.episode_id  → 每次激活归属于哪个逻辑工作单元
+agent_waits.episode_id → 这次等待是在为哪个工作单元等
+```
+
+- **开启/加入是同一个操作**（`open_episode`）。部分唯一索引保证每个 scope 至多一个
+  open episode；并发的第二次调用会**采用**赢家的身份，而不是另造一个。
+- **模型能看到这是延续。** 渲染的 payload 增加 `episode: {episode_id, opened_at,
+  activations, continuation}`；`continuation: true` 表示这次唤醒属于同一件事，而不是
+  重新开始判断。日志同样打印 `episode=` 与 `continuation=`。
+- **关闭条件是窄的**：只有当没有未完成意图、也没有活跃等待时才关闭。新消息**不算**
+  理由——在热闹的群里新消息永远存在，把它当理由会让一个 episode 开好几天，
+  "延续"就又失去意义。
+- **重启恢复**：`running_workflows` 照旧标记为中断，但 episode **故意保留**。启动时
+  先用持久事实核对一遍（还有 open goal 或 active wait 才留下），再打印每个仍在的
+  episode 及其已有激活数，这样"中断后继续"和"全新开始"可区分。
+- **投递后才关闭目标**：`send_message` 带 `resolves_intent` 时，目标只在这条消息真的
+  送达后关闭；并被丢弃的回复不会替她说"已经说完了"。
+
+**仍然只是数据，不是常驻进程。** episode 保证唤醒时身份与上下文连续，不保证事件顺序
+之外的执行连续性。
+
+**验证。** `tests/test_episode_continuation.py`（9 项）覆盖：等待/定时器唤醒加入同一
+episode、首次激活不是延续、无事可做时关闭、并发开启采用赢家、NULL topic 下唯一性、
+送达后关闭目标与 episode、重启后 episode 保留、旧库迁移补列。
+`tests/test_episode_restart_leak.py` 补的是**崩在两次写之间**的边界：投递已关掉目标、
+episode 还没关，重启后这一行看着像「还在等」。旧实现在这个状态下会把话题里下一句无关的
+话渲染成 `continuation`；现在启动时按「是否还有 open goal 或 active wait」重新推导，
+无事可做的 episode 直接关闭，再让新观察进来。App 全量 406 passed，跑在本地 Core
+`5f65658` 上；`pyproject.toml` 固定的是 `7618bd0`，二者不同，见下文。
+
 ## Core 与 Telegram 应用的边界
 
 **Nervipulsa Core 的通用能力候选：**
