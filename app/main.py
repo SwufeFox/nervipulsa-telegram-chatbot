@@ -405,6 +405,24 @@ async def run_live(config: AppConfig, system_prompt: str, *,
             await asyncio.gather(stop_task, return_exceptions=True)
             offset, tick = await poll_task
             consecutive_failures = 0
+
+            # Draining a backlog: Telegram hands back a partial batch and, with
+            # a long poll still active, the next request would sit waiting for
+            # that window to expire even though more updates are already
+            # queued. Asking again immediately is what keeps a restart from
+            # spending minutes ingesting history. The loop is bounded so a
+            # flood cannot starve the scheduler or the stop signal.
+            drained = 0
+            while (not stop.is_set() and tick.updates and drained < 64
+                   and tick.errors == 0):
+                drained += 1
+                offset, extra = await bot.poll_once(offset=offset, background=True,
+                                                    timeout=0)
+                tick.updates += extra.updates
+                tick.errors += extra.errors
+                if not extra.updates:
+                    break
+                log_poll_ingress(extra, paused=bot.stats.paused)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

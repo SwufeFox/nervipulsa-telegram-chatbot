@@ -375,13 +375,19 @@ class GroupAgent:
 
     # -- one poll cycle ----------------------------------------------------
 
-    async def poll_once(self, *, offset: int | None, background: bool = False) -> tuple[int | None, TickStats]:
-        """Fetch one batch, ingest it durably, then close and answer turns."""
+    async def poll_once(self, *, offset: int | None, background: bool = False,
+                        timeout: int | None = None) -> tuple[int | None, TickStats]:
+        """Fetch one batch, ingest it durably, then close and answer turns.
+
+        `timeout` overrides the long-poll window. A caller draining a backlog
+        passes 0: there is already work queued, so waiting would only delay the
+        next batch.
+        """
         tick = TickStats()
         try:
             updates = await self.client.get_updates(
                 offset=offset,
-                timeout=self.config.poll_timeout,
+                timeout=self.config.poll_timeout if timeout is None else timeout,
             )
         except Exception as exc:
             # The class name alone cannot tell these apart, and they need
