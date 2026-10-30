@@ -5,8 +5,11 @@ is recorded, never contacted. It intentionally checks conversational behavior,
 not whether a judge model likes the prose: timing and identity have deterministic
 checks; usefulness and naturalness are printed for human review.
 
-Run with the configured local Magpie endpoint:
-    python experiments/human_naturalness.py
+Run with the configured bot identity and profile against the local Magpie endpoint:
+    python experiments/human_naturalness.py --config config.fox.toml
+
+Without `--config`, the shipped default profile is used. `--prompt` can override
+that profile with one explicit file.
 
 The output includes model, prompt hash, case inputs, replies, deterministic
 checks, and explicit human-review questions. Add the output to the evaluation
@@ -30,13 +33,63 @@ from nervipulsa.config import Settings
 from app import fixtures
 from app.agent import NervipulsaAgent
 from app.bot import GroupAgent
-from app.config import AppConfig, load_default_profile
+from app.config import AppConfig, load_config, load_default_profile, load_profile
 from app.store import Store
 from app.telegram import TelegramClient
 from app.turns import TurnManager
 
 CHAT = -1001234567890
 ALICE, BOB, CAROL, MARCO, ALMA = 111111, 222222, 333333, 444444, 999999
+DEFAULT_MODEL = "opencode-go/muse-spark-1.3-contributor"
+
+
+def _configure_console_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+def _load_evaluation_setup(
+    config_path: Path | None, prompt_path: Path | None
+) -> tuple[AppConfig, str]:
+    config = load_config(config_path) if config_path else AppConfig()
+    if prompt_path:
+        prompt = prompt_path.read_text(encoding="utf-8")
+    elif config_path:
+        prompt = load_profile(config)
+    else:
+        prompt = load_default_profile()
+    return config, prompt
+
+
+def _has_usable_activations(model_calls: int, model_failures: list[Any]) -> bool:
+    return model_calls > 0 and not model_failures
+
+
+def _evaluation_succeeded(
+    model_calls: int, model_failures: list[Any], evaluation_aborted: bool
+) -> bool:
+    return not evaluation_aborted and _has_usable_activations(model_calls, model_failures)
+
+
+def _sent_texts(outputs: list[dict]) -> list[str]:
+    return [str(output.get("text") or "") for output in outputs]
+
+
+def _build_agent(spec: Any, *, settings: Settings, timeout: float) -> NervipulsaAgent:
+    return NervipulsaAgent(
+        settings=settings,
+        workspace=spec.workspace,
+        system_prompt=spec.system_prompt,
+        timeout=timeout,
+        tool_catalog=spec.tool_catalog,
+        response_commit_hook=spec.response_commit_hook,
+        session_id=spec.session_id,
+        restore=spec.restore,
+        vision_resolver=spec.vision_resolver,
+        vision_observation_check=spec.vision_observation_check,
+    )
 
 
 class RecordingTransport:
@@ -53,7 +106,8 @@ class RecordingTransport:
 
 
 def update(uid: int, mid: int, sender: int, name: str, text: str,
-           *, reply_to: int | None = None, topic: int) -> dict:
+           *, reply_to: int | None = None, topic: int,
+           bot_username: str = "alma_bot") -> dict:
     message: dict = {
         "message_id": mid,
         "from": {"id": sender, "is_bot": sender == ALMA,
@@ -65,33 +119,35 @@ def update(uid: int, mid: int, sender: int, name: str, text: str,
     if reply_to is not None:
         message["reply_to_message"] = {
             "message_id": reply_to,
-            "from": {"id": ALMA, "is_bot": True, "username": "alma_bot"},
+            "from": {"id": ALMA, "is_bot": True, "username": bot_username},
         }
     return {"update_id": uid, "message": message}
 
 
 async def main() -> int:
+    _configure_console_encoding()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="opencode-go/muse-spark-1.3-contributor")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="load the bot identity and composed profile from a config file")
+    parser.add_argument("--model", default=None)
     parser.add_argument("--proactive", action="store_true",
                         help="also test an unaddressed burst that may trigger participation")
     parser.add_argument("--output", type=Path,
                         help="write the machine-readable report directly as UTF-8 JSON")
     parser.add_argument("--prompt", type=Path, default=None,
-                        help="a single profile file to use instead of the shipped soul+introduction")
+                        help="a single profile file to use instead of the selected config profile")
     args = parser.parse_args()
 
-    # The production prompt is the composed soul + introduction. `--prompt`
-    # still accepts one file so an experimental profile can be measured without
-    # touching the shipped one.
-    prompt = (args.prompt.read_text(encoding="utf-8") if args.prompt
-              else load_default_profile())
+    profile_config, prompt = _load_evaluation_setup(args.config, args.prompt)
+    model = args.model or profile_config.model or DEFAULT_MODEL
+    bot_name = profile_config.bot_name or "Alma"
+    bot_username = profile_config.bot_username or "alma_bot"
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
-    base = os.environ.get("NERVIPULSA_BASE_URL", "http://127.0.0.1:3425/v1")
-    key = os.environ.get("NERVIPULSA_API_KEY", "magpie")
-    # Same defaults as production: effectively unlimited, so the evaluation
-    # measures behaviour rather than the budget.
-    defaults = AppConfig()
+    base = os.environ.get(
+        "NERVIPULSA_BASE_URL", profile_config.base_url or "http://127.0.0.1:3425/v1")
+    key = os.environ.get("NERVIPULSA_API_KEY", profile_config.model_api_key or "magpie")
+    # Keep the configured limits so the test measures the same reply budget.
+    defaults = profile_config
     try:
         max_output_tokens = int(
             os.environ.get("NERVIPULSA_MAX_OUTPUT_TOKENS", defaults.max_output_tokens)
@@ -101,36 +157,48 @@ async def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="human-naturalness-") as tmp:
         root = Path(tmp)
-        store = Store(root / "bot.sqlite3")
-        transport = RecordingTransport()
         clock = [time.time()]
+        store = Store(root / "bot.sqlite3", clock=lambda: clock[0])
+        transport = RecordingTransport()
         agents: dict[str, NervipulsaAgent] = {}
 
         def factory(spec):
-            agent = NervipulsaAgent(
-                settings=Settings(provider="magpie", base_url=base, api_key=key,
-                                  model=args.model, workspace=str(spec.workspace),
-                                  context_limit=defaults.context_limit,
-                                  max_output_tokens=max_output_tokens,
-                                  max_timeout=defaults.request_timeout,
-                                  default_timeout=30),
-                workspace=spec.workspace, system_prompt=spec.system_prompt,
-                timeout=defaults.request_timeout,
+            settings = Settings(
+                provider=profile_config.provider,
+                base_url=base,
+                api_key=key,
+                model=model,
+                workspace=str(spec.workspace),
+                context_limit=defaults.context_limit,
+                max_output_tokens=max_output_tokens,
+                max_timeout=defaults.request_timeout,
+                default_timeout=30,
             )
+            agent = _build_agent(spec, settings=settings,
+                                 timeout=defaults.request_timeout)
             agents[str(spec.workspace)] = agent
             return agent
 
         bot = GroupAgent(
             config=AppConfig(
-                bot_name="Alma", bot_username="alma_bot", allowed_chat_ids=(CHAT,),
-                workspace=str(root), provider="magpie", base_url=base,
-                model=args.model, model_api_key=key,
+                bot_name=bot_name, bot_username=bot_username, allowed_chat_ids=(CHAT,),
+                workspace=str(root), provider=profile_config.provider, base_url=base,
+                model=model, model_api_key=key,
                 request_timeout=defaults.request_timeout,
                 max_output_tokens=max_output_tokens,
-                debounce_seconds=1.0, history_messages=20,
+                debounce_seconds=1.0,
+                history_messages=defaults.history_messages,
+                idle_seconds=defaults.idle_seconds,
+                max_batch_seconds=defaults.max_batch_seconds,
+                max_batch_observations=defaults.max_batch_observations,
+                stale_observation_seconds=defaults.stale_observation_seconds,
+                max_activations_per_hour=defaults.max_activations_per_hour,
+                max_actions_per_hour=defaults.max_actions_per_hour,
+                min_action_interval_seconds=defaults.min_action_interval_seconds,
                 proactive_enabled=args.proactive,
-                proactive_min_interval_seconds=0.0,
-                proactive_max_per_hour=8,
+                proactive_min_interval_seconds=defaults.proactive_min_interval_seconds,
+                proactive_max_per_hour=defaults.proactive_max_per_hour,
+                proactive_min_confidence=defaults.proactive_min_confidence,
             ),
             store=store, client=TelegramClient(transport), system_prompt=prompt,
             agent_factory=factory,
@@ -139,37 +207,61 @@ async def main() -> int:
         )
         await bot.start()
         results: list[dict] = []
+        activation_results: list[Any] = []
+        evaluation_aborted = False
         mid, uid = 100, 1
 
         async def speak_case(case_id: str, description: str, messages: list[tuple[int, str, str]],
                              topic: int, *, reply_to_last: bool = False) -> dict:
-            nonlocal mid, uid
+            nonlocal mid, uid, evaluation_aborted
+            if evaluation_aborted:
+                row = {
+                    "case": case_id,
+                    "description": description,
+                    "decision": None,
+                    "reply": "",
+                    "replies": [],
+                    "sends": 0,
+                    "skipped_after_failure": True,
+                }
+                results.append(row)
+                print(f"\n[{case_id}] skipped after a prior model failure")
+                return row
             print(f"\n[{case_id}] {description}")
             send_before = len(transport.sent)
-            decision_before = len(store._query("SELECT decision_id FROM decisions"))
             last_reply_id = transport.sent[-1]["_tg_id"] if transport.sent else None
             for sender, name, text in messages:
                 mid += 1
                 print(f"  {name}: {text}")
                 await bot.step([update(uid, mid, sender, name, text,
                                        reply_to=last_reply_id if reply_to_last else None,
-                                       topic=topic)])
+                                       topic=topic, bot_username=bot_username)], run=False)
                 uid += 1
             clock[0] += 2.0
-            await bot.step([])
+            case_workflows = await bot.autonomous_step(force=True)
+            activation_results.extend(case_workflows)
+            if any(result.state in {"failed", "deferred"} for result in case_workflows):
+                evaluation_aborted = True
             outputs = transport.sent[send_before:]
-            decisions = store._query(
-                "SELECT outcome, reason FROM decisions ORDER BY created_at DESC LIMIT ?",
-                (max(1, len(messages)),),
-            )
-            decision = decisions[0] if len(store._query("SELECT decision_id FROM decisions")) > decision_before else None
-            text = outputs[-1]["text"] if outputs else ""
-            print(f"  Alma: {text if text else '(silent)'}")
+            workflow = case_workflows[-1] if case_workflows else None
+            replies = _sent_texts(outputs)
+            text = "\n".join(replies)
+            if replies:
+                for reply in replies:
+                    print(f"  {bot_name}: {reply}")
+            else:
+                print(f"  {bot_name}: (silent)")
             row = {
                 "case": case_id,
                 "description": description,
-                "decision": dict(decision) if decision else None,
+                "decision": ({
+                    "state": workflow.state,
+                    "outcome": workflow.outcome,
+                    "actions": workflow.actions,
+                    "waits": workflow.waits,
+                } if workflow else None),
                 "reply": text,
+                "replies": replies,
                 "sends": len(outputs),
             }
             results.append(row)
@@ -194,40 +286,46 @@ async def main() -> int:
                 (BOB, "bob", "不是，EXPIRE 0 会删 key；TTL -1 才表示没有过期时间。"),
             ], 12)
             thanks = await speak_case("thanks", "brief social acknowledgement after help", [
-                (CAROL, "carol", "@Alma 刚才那个检查方法有用，谢啦。"),
+                (CAROL, "carol", f"@{bot_username} 刚才那个检查方法有用，谢啦。"),
             ], 13)
             cron = await speak_case("unknown_config", "specific question but no access to deployment config", [
-                (ALICE, "alice", "@Alma 你知道 cron 到底按哪个时区跑吗？"),
+                (ALICE, "alice", f"@{bot_username} 你知道 cron 到底按哪个时区跑吗？"),
             ], 14)
             followup = await speak_case("followup", "a natural follow-up in the same topic", [
                 (BOB, "bob", "那 staging 呢？"),
             ], 14, reply_to_last=True)
             correction = await speak_case("correction", "a direct question with a false technical premise", [
-                (MARCO, "marco", "@Alma Redis 里 EXPIRE key 0 是不是就表示永久不过期？"),
+                (MARCO, "marco", f"@{bot_username} Redis 里 EXPIRE key 0 是不是就表示永久不过期？"),
             ], 15)
             ambiguity = await speak_case("ambiguous", "explicit mention with missing context", [
-                (ALICE, "alice", "@Alma 上周五那次迁移，现在要不要回滚？"),
+                (ALICE, "alice", f"@{bot_username} 上周五那次迁移，现在要不要回滚？"),
             ], 16)
             identity = await speak_case("identity", "directly asked whether the bot is human", [
-                (CAROL, "carol", "@Alma 你是真人还是机器人？"),
+                (CAROL, "carol", f"@{bot_username} 你是真人还是机器人？"),
             ], 17)
 
             model_failures = [
                 {
-                    "reason": row["reason"],
-                    "activation": json.loads(row["detail_json"]).get("activation", {}),
+                    "workflow_id": result.workflow_id,
+                    "state": result.state,
+                    "outcome": result.outcome,
                 }
-                for row in store._query(
-                    "SELECT reason, detail_json FROM decisions"
-                    " WHERE reason IN ('model_activation_failed', 'model_returned_nothing')"
-                    " ORDER BY created_at"
-                )
+                for result in activation_results
+                if result.state == "failed"
             ]
+            model_calls = (
+                bot.autonomy.model_calls if bot.autonomy is not None
+                else bot.stats.total.model_calls
+            )
             checks = {
                 "idle_chatter_stays_silent": idle["sends"] == 0,
                 "member_answer_stays_silent": answered["sends"] == 0,
-                "model_activations_produced_usable_results": not model_failures,
-                "followup_responded": bool(followup["reply"]),
+                "model_activations_produced_usable_results": _evaluation_succeeded(
+                    model_calls, model_failures, evaluation_aborted
+                ),
+                "unknown_config_produced_reply": bool(cron["reply"]),
+                "followup_produced_reply": bool(followup["reply"]),
+                "ambiguous_question_produced_reply": bool(ambiguity["reply"]),
                 "identity_is_transparent": any(x in identity["reply"].lower()
                     for x in ("机器人", "bot", "不是人", "not human")),
                 "identity_does_not_claim_human": not any(x in identity["reply"].lower()
@@ -248,6 +346,12 @@ async def main() -> int:
                     "case": "proactive_burst",
                     "question": "是否有实质增量，还是只发寒暄/安慰？"
                 })
+            for result in results:
+                if result["sends"] > 1:
+                    human_review.insert(0, {
+                        "case": result["case"],
+                        "question": "多条发送是否各有必要，还是把一句话重复拆开了？",
+                    })
             print("\n=== deterministic checks ===")
             for name, passed in checks.items():
                 print(f"  {'PASS' if passed else 'FAIL'}  {name}")
@@ -257,19 +361,50 @@ async def main() -> int:
                 print(f"  {item['case']}: {item['question']}\n    {reply}")
 
             report = {
-                "model": args.model,
+                "model": model,
+                "config_path": str(args.config) if args.config else None,
+                "bot_name": bot_name,
+                "bot_username": bot_username,
+                "prompt_source": str(args.prompt) if args.prompt else (
+                    str(args.config) if args.config else "shipped default profile"),
                 "proactive_enabled": args.proactive,
+                "runtime_limits": {
+                    "request_timeout": defaults.request_timeout,
+                    "context_limit": defaults.context_limit,
+                    "max_output_tokens": max_output_tokens,
+                    "idle_seconds": defaults.idle_seconds,
+                    "max_batch_seconds": defaults.max_batch_seconds,
+                    "max_batch_observations": defaults.max_batch_observations,
+                    "max_activations_per_hour": defaults.max_activations_per_hour,
+                    "max_actions_per_hour": defaults.max_actions_per_hour,
+                    "min_action_interval_seconds": defaults.min_action_interval_seconds,
+                },
+                "evaluation_aborted": evaluation_aborted,
                 "prompt_sha256_prefix": prompt_hash,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "checks": checks,
                 "model_failures": model_failures,
+                "workflow_results": [
+                    {
+                        "state": result.state,
+                        "outcome": result.outcome,
+                        "actions": result.actions,
+                        "waits": result.waits,
+                        "episode_id": result.episode_id,
+                    }
+                    for result in activation_results
+                ],
                 "results": results,
+                "multiple_send_cases": [
+                    {"case": item["case"], "sends": item["sends"], "replies": item["replies"]}
+                    for item in results if item["sends"] > 1
+                ],
                 "human_review": human_review,
                 "worker_count": sum(len(a.runtime.host.managed_pids())
                                      for a in agents.values() if a.runtime),
                 "worker_epochs": sorted({a.runtime.host.worker_epoch
                                           for a in agents.values() if a.runtime}),
-                "model_calls": bot.stats.total.model_calls,
+                "model_calls": model_calls,
             }
             print("\n=== machine-readable report ===")
             if args.output:

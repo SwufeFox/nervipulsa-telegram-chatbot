@@ -1,0 +1,238 @@
+{
+  "generated_at": "2026-10-30T19:44:51+0800",
+  "source_database": "E:\\Projects\\Magixyne\\nervipulsa-telegram-chatbot\\state\\fox\\bot.sqlite3",
+  "source_chat_id": -1004402809405,
+  "recorded_events": 60,
+  "usable_replayed_updates": 60,
+  "model": "from config",
+  "limit": 60,
+  "batch_size": 6,
+  "repeats": 1,
+  "plain": {
+    "name": "plain",
+    "activations": 4,
+    "activations_with_episode": 0,
+    "continuations": 0,
+    "episodes_opened": 0,
+    "sends": 0,
+    "silent": 4,
+    "undecided": 0,
+    "waits": 0,
+    "goals_set": 0,
+    "prompt_chars": 37076,
+    "usage_in": 20528,
+    "usage_out": 1446,
+    "usage_cached": 13779,
+    "usage_activations_without_usage": 0,
+    "usage_activations_without_cache_field": 0,
+    "elapsed_ms": 32969.9,
+    "interruptions": 0,
+    "reply_positions": [],
+    "inbound_seen": 60,
+    "replies": [],
+    "final_state": {
+      "workflows": 10,
+      "intents": 0,
+      "intents_open": 0,
+      "actions": 0,
+      "actions_sent": 0,
+      "waits": 0,
+      "observations": 60,
+      "episode_mechanism": false
+    },
+    "naturalness": {
+      "replies": 0,
+      "mean_chars": 0.0,
+      "max_chars": 0,
+      "empty": 0,
+      "note": "no delivered messages to judge"
+    }
+  },
+  "continuation": {
+    "name": "continuation",
+    "activations": 10,
+    "activations_with_episode": 10,
+    "continuations": 0,
+    "episodes_opened": 10,
+    "sends": 0,
+    "silent": 10,
+    "undecided": 0,
+    "waits": 0,
+    "goals_set": 0,
+    "prompt_chars": 178650,
+    "usage_in": 77764,
+    "usage_out": 4695,
+    "usage_cached": 64249,
+    "usage_activations_without_usage": 0,
+    "usage_activations_without_cache_field": 0,
+    "elapsed_ms": 34892.9,
+    "interruptions": 0,
+    "reply_positions": [],
+    "inbound_seen": 60,
+    "replies": [],
+    "final_state": {
+      "workflows": 10,
+      "intents": 0,
+      "intents_open": 0,
+      "actions": 0,
+      "actions_sent": 0,
+      "waits": 0,
+      "observations": 60,
+      "episode_mechanism": true,
+      "episodes": 10,
+      "episodes_open": 0,
+      "episode_activations": 10
+    },
+    "naturalness": {
+      "replies": 0,
+      "mean_chars": 0.0,
+      "max_chars": 0,
+      "empty": 0,
+      "note": "no delivered messages to judge"
+    }
+  },
+  "comparison": {
+    "activations": {
+      "plain": 4,
+      "continuation": 10,
+      "delta": 6
+    },
+    "continuations": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    },
+    "sends": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    },
+    "silent": {
+      "plain": 4,
+      "continuation": 10,
+      "delta": 6
+    },
+    "undecided": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    },
+    "waits": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    },
+    "goals_set": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    },
+    "prompt_chars": {
+      "plain": 37076,
+      "continuation": 178650,
+      "delta": 141574
+    },
+    "usage_in": {
+      "plain": 20528,
+      "continuation": 77764,
+      "delta": 57236
+    },
+    "usage_out": {
+      "plain": 1446,
+      "continuation": 4695,
+      "delta": 3249
+    },
+    "usage_cached": {
+      "plain": 13779,
+      "continuation": 64249,
+      "delta": 50470
+    },
+    "elapsed_ms": {
+      "plain": 32969.885200000135,
+      "continuation": 34892.94289999998,
+      "delta": 1923.0576999998448
+    },
+    "usage_missing": {
+      "plain": 0,
+      "continuation": 0
+    },
+    "usage_cache_unknown": {
+      "plain": 0,
+      "continuation": 0
+    },
+    "interruptions": {
+      "plain": 0,
+      "continuation": 0,
+      "delta": 0
+    }
+  },
+  "run_to_run": {
+    "plain": {
+      "sends": {
+        "values": [
+          0
+        ],
+        "min": 0,
+        "max": 0,
+        "spread": 0
+      },
+      "continuations": {
+        "values": [
+          0
+        ],
+        "min": 0,
+        "max": 0,
+        "spread": 0
+      },
+      "activations": {
+        "values": [
+          4
+        ],
+        "min": 4,
+        "max": 4,
+        "spread": 0
+      }
+    },
+    "continuation": {
+      "sends": {
+        "values": [
+          0
+        ],
+        "min": 0,
+        "max": 0,
+        "spread": 0
+      },
+      "continuations": {
+        "values": [
+          0
+        ],
+        "min": 0,
+        "max": 0,
+        "spread": 0
+      },
+      "activations": {
+        "values": [
+          10
+        ],
+        "min": 10,
+        "max": 10,
+        "spread": 0
+      }
+    }
+  },
+  "continuation_exercised": {
+    "plain": 0,
+    "continuation": 0,
+    "goals_set": 0,
+    "note": "Zero means the model never kept a goal or a wait open, so no activation ever continued another. The continuation mechanism was then not what produced any difference in this replay. A replay whose arms both arm nothing compares nothing: treat the deltas above as noise, not as a result about continuation."
+  },
+  "limits": [
+    "Messages are replayed from the recorded observation payloads; media is replayed by file_id reference only and never fetched.",
+    "Only message observations have an inbound update. Action results and edits are excluded.",
+    "Replying to the bot is replayed with a stand-in parent id: the recorded payload kept only a boolean, not the exact message it answered.",
+    "Batch size is fixed and artificial; the live scheduler batches on idle time, so activation boundaries here are not the production ones.",
+    "Token usage comes from the activation detail when the provider reports it; activations without usage are counted separately, not assumed zero.",
+    "Naturalness is measured structurally (length, empties). Whether a reply was socially appropriate still needs a human read.",
+    "Both arms replay into isolated databases; nothing is sent to Telegram."
+  ]
+}

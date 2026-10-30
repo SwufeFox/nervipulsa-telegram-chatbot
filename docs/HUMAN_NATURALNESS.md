@@ -6,7 +6,7 @@
 
 ## 每轮改动都跑同一组场景
 
-入口：`python experiments/human_naturalness.py`。默认使用 `opencode-go/muse-spark-1.3-contributor` 和本地 Magpie；Telegram 发送由记录式 transport 代替，不会发到真实群。报告记录模型、prompt 哈希、原始回复和确定性检查。
+入口：`python experiments/human_naturalness.py --config config.fox.toml --output docs/evaluations/human-naturalness-YYYY-MM-DD.json`。`--config` 会加载当前 bot 身份和组合后的 soul/introduction；省略时使用仓库自带的默认 profile。默认模型为 `opencode-go/muse-spark-1.3-contributor`，走本地 Magpie；Telegram 发送由记录式 transport 代替，不会发到真实群。报告记录模型、profile 哈希、原始回复和确定性检查。
 
 | 场景 | 期望 |
 | --- | --- |
@@ -51,3 +51,30 @@
 逐条看原句：时机和事实依据合格；感谢、纠错、澄清都简短自然；cron 和 staging 两轮有实用信息，也没有重复免责声明。我的结论是：**在这组固定被动场景里，它能表现得像个克制、会接话的群友；还不能据 6 次调用推断跨话题、长对话或主动插话都稳定自然。它仍应透明地作为机器人参与。** 本轮关闭了主动模式，所以主动插话质量尚无新的通过证据。
 
 输出额度故障也已在这次复跑中消失：之前追问激活在约 2008 个 completion tokens（其中 1993 个 reasoning tokens）后返回空内容；现由 Magpie 接收 `max_tokens=4096`，本轮 6 次调用均无模型错误。应用默认 1M（此前为 4096），可用 `NERVIPULSA_MAX_OUTPUT_TOKENS` 覆盖。
+
+## 2026-10-30 生产 profile 复评
+
+采用 `config.fox.toml` 的雾栖身份、组合 profile、Magpie endpoint 和生产 limits。初次 8 场景运行使用 profile 哈希 `895d8e7b95a0`，发现 cron 回答空泛、staging 追问没接住前文、直接问迁移却沉默，原始结果见[首次报告](evaluations/human-naturalness-muse-spark-2026-10-30.json)。随后只补充了“缺上下文时具体追问、同话题沿用前文、cron 先区分调度器”的说话规则。
+
+新 profile 哈希为 `2e7d5ba2b4bb`。复跑有 8 次自治激活、0 个失败、8 项确定性检查通过；生产运行 limits 和逐条输出见[完整复测报告](evaluations/human-naturalness-muse-spark-2026-10-30-v3.json)。其中闲聊和已获正确回答的场景都保持沉默。发送场景人工评阅如下：
+
+| 场景 | 实际回复 | 评阅 |
+| --- | --- | --- |
+| 感谢 | 嗯，有用就行。 | 简短自然 |
+| cron 时区 | 得看是哪种，你说的是 Linux 的 crontab 还是 K8s 的 CronJob？ | 先澄清调度器，没有编造当前部署事实 |
+| staging 追问 | staging 也一样，先看那边用的是 crontab 还是 CronJob？ | 接住上一轮问题，没有重复免责声明 |
+| Redis TTL 纠错 | 不是，0 是直接删掉。想永久用 PERSIST | 正确且简洁 |
+| 缺上下文的迁移 | 哪个迁移？现在是什么现象让你想回滚 | 问到能推进判断的信息 |
+| 身份 | 机器人，狐狸是顺带的 | 明确承认机器人，语气自然 |
+
+同一 profile 哈希的前一次复跑在 cron 场景产生 2 次发送；完整复测中每个回应场景各发送 1 次。报告分别保留在[前次复跑](evaluations/human-naturalness-muse-spark-2026-10-30-v2.json)和[完整复测](evaluations/human-naturalness-muse-spark-2026-10-30-v3.json)。两次结果显示存在输出波动；这个小样本不能估计多消息发送的频率。主动插话关闭，测试也不证明长对话或跨话题记忆稳定。
+
+## 2026-10-30 历史配对回放
+
+[三轮配对报告](evaluations/paired-replay-20261030-204810.json)使用生产 profile 和 limits，重放群聊序号 `625–641` 的 17 条消息。每组每轮都处理 17 条输入、完成 3 个 workflow、发送 1 条并沉默 2 次；数据库也确认六组 workflow 全部为 `completed`，续接组的 3 个 episode 均正常关闭。报告保留了六条原始回复和每轮耗时、token、缓存数据。
+
+第一次 60 条窗口尝试中，plain 组遇到 `response_unknown` 后暂停，只完成 4 次激活；续接组完成 10 次。两组都没有发送、goal 或 wait，激活数也不匹配，因此[初次报告](evaluations/paired-replay-20261030-194337.json)只作为失败记录留档，不用于比较。
+
+这个历史窗口没有设置 goal、等待事件或触发 continuation，两组 continuation 数均为 0。因此它只能说明在这个普通群聊窗口中，episode 开关没有改变激活与发送次数，不能验证跨激活续接是否有效。每轮报告的缓存 token 都是 10,835，缺失或未知计数为 0。三组配对耗时差分别为 +0.08、+1.50、+2.92 秒；波动大于首轮差异，且续接机制未被触发，不能把平均 +1.50 秒归因于续接。
+
+六条回复都是单条短句，但措辞随运行变化；这组小样本不用于估计自然度或主动插话质量。对已筛选的 2,746 条群聊消息，尚未找到包含明确“等我补充/回复后继续”义务且适合配对测试的真实窗口，所以续接效果仍待有效样本。

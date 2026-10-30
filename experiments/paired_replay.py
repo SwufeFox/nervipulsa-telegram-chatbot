@@ -12,14 +12,16 @@ on, so any difference in what she says is attributable to it.
 
 Usage:
   python -m experiments.paired_replay --limit 60
+  python -m experiments.paired_replay --limit 17 --through-sequence 641
 
-Writes a JSON report under docs/evaluations/. The recorded database is opened
-read-only.
+The second form selects a historical window ending at sequence 641. Writes a JSON
+report under docs/evaluations/. The recorded database is opened read-only.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import statistics
 import sys
@@ -98,8 +100,8 @@ class RecordedEvent:
         return {"update_id": int(p["message_id"]), "message": message}
 
 
-def load_recorded(db_path: Path, *, limit: int, chat_id: int = GROUP_CHAT
-                  ) -> list[RecordedEvent]:
+def load_recorded(db_path: Path, *, limit: int, chat_id: int = GROUP_CHAT,
+                  through_sequence: int | None = None) -> list[RecordedEvent]:
     import sqlite3
 
     if not db_path.exists():
@@ -107,10 +109,17 @@ def load_recorded(db_path: Path, *, limit: int, chat_id: int = GROUP_CHAT
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
+        query = (
             "SELECT sequence, kind, received_at, payload_json FROM observation_events"
             " WHERE chat_id = ? AND kind IN ('message', 'bot_message')"
-            " ORDER BY sequence DESC LIMIT ?", (chat_id, limit)).fetchall()
+        )
+        params: list[int] = [chat_id]
+        if through_sequence is not None:
+            query += " AND sequence <= ?"
+            params.append(through_sequence)
+        query += " ORDER BY sequence DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
     finally:
         conn.close()
     return [RecordedEvent(int(r["sequence"]), str(r["kind"]), float(r["received_at"]),
@@ -179,6 +188,7 @@ class RunMetrics:
     # Reply index -> how many replayed inbound messages had arrived before it.
     reply_positions: list[int] = field(default_factory=list)
     inbound_seen: int = 0
+    workflow_states: dict[str, int] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -202,6 +212,7 @@ class RunMetrics:
             "interruptions": self.interruptions,
             "reply_positions": self.reply_positions,
             "inbound_seen": self.inbound_seen,
+            "workflow_states": dict(self.workflow_states),
             "replies": self.replies,
         }
 
@@ -373,7 +384,11 @@ def _note_positions(metrics: RunMetrics, transport: "RecordingTransport",
 
 def _absorb(metrics: RunMetrics, results: list[Any], store: Any) -> None:
     for result in results:
-        if result is None or getattr(result, "state", "") != "completed":
+        if result is None:
+            continue
+        state = str(getattr(result, "state", "unknown"))
+        metrics.workflow_states[state] = metrics.workflow_states.get(state, 0) + 1
+        if state != "completed":
             continue
         metrics.activations += 1
         detail = getattr(result, "detail", {}) or {}
@@ -450,6 +465,12 @@ def _final_state(store: Any, with_episodes: bool) -> dict[str, Any]:
         "observations": _count(store, "SELECT COUNT(*) FROM observation_events"),
         "episode_mechanism": with_episodes,
     }
+    state["workflow_states"] = {
+        str(row["state"]): int(row["count"])
+        for row in store._query(
+            "SELECT state, COUNT(*) AS count FROM workflows GROUP BY state ORDER BY state"
+        )
+    }
     if with_episodes:
         state["episodes"] = _count(store, "SELECT COUNT(*) FROM workflow_episodes")
         state["episodes_open"] = _count(
@@ -498,9 +519,21 @@ def compare(plain: RunOutcome, cont: RunOutcome) -> dict[str, Any]:
     return out
 
 
+def _load_profile_details(config_path: Path) -> tuple[Any, str, str]:
+    from app.config import load_config, load_default_profile, load_profile
+
+    config = load_config(config_path)
+    profile = (load_profile(config) if (
+        config.soul_path or config.introduction_path or config.system_prompt_path
+    ) else load_default_profile())
+    digest = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:12]
+    return config, profile, digest
+
+
 async def main_async(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
-    events = load_recorded(db_path, limit=args.limit)
+    events = load_recorded(db_path, limit=args.limit,
+                           through_sequence=args.through_sequence)
     if not events:
         raise SystemExit("no recorded message observations found")
     usable = sum(1 for e in events if e.as_update() is not None)
@@ -509,6 +542,7 @@ async def main_async(args: argparse.Namespace) -> int:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     base = out_dir / f"paired-replay-{stamp}"
     config_path = Path(args.config)
+    runtime_config, _, profile_hash = _load_profile_details(config_path)
 
     print(f"recorded events: {len(events)} (usable updates: {usable})")
     print(f"model: {args.model or 'from config'}  repeats: {args.repeat}")
@@ -540,14 +574,43 @@ async def main_async(args: argparse.Namespace) -> int:
                 "max": max(values) if values else 0,
                 "spread": (max(values) - min(values)) if values else 0}
 
+    def paired_summary(key: str) -> dict[str, Any]:
+        plain_values = [getattr(run.metrics, key) for run in plain_runs]
+        continuation_values = [getattr(run.metrics, key) for run in cont_runs]
+        deltas = [right - left for left, right in zip(plain_values, continuation_values)]
+        return {
+            "plain_mean": round(statistics.fmean(plain_values), 1),
+            "continuation_mean": round(statistics.fmean(continuation_values), 1),
+            "paired_delta_mean": round(statistics.fmean(deltas), 1),
+            "paired_deltas": [round(delta, 1) for delta in deltas],
+        }
+
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "source_database": str(db_path),
         "source_chat_id": GROUP_CHAT,
+        "config_path": str(config_path),
+        "prompt_sha256_prefix": profile_hash,
+        "runtime_limits": {
+            "request_timeout": runtime_config.request_timeout,
+            "context_limit": runtime_config.context_limit,
+            "max_output_tokens": runtime_config.max_output_tokens,
+            "history_messages": runtime_config.history_messages,
+            "max_activations_per_hour": runtime_config.max_activations_per_hour,
+            "max_actions_per_hour": runtime_config.max_actions_per_hour,
+            "min_action_interval_seconds": runtime_config.min_action_interval_seconds,
+            "proactive_enabled": runtime_config.proactive_enabled,
+        },
+        "replay_overrides": {"idle_seconds": 0.0, "batch_size": BATCH},
         "recorded_events": len(events),
         "usable_replayed_updates": usable,
         "model": args.model or "from config",
         "limit": args.limit,
+        "through_sequence": args.through_sequence,
+        "sequence_window": {
+            "first": events[0].sequence,
+            "last": events[-1].sequence,
+        },
         "batch_size": BATCH,
         "repeats": args.repeat,
         "plain": {**plain.metrics.as_dict(),
@@ -560,8 +623,41 @@ async def main_async(args: argparse.Namespace) -> int:
         # Whether the observed difference exceeds run-to-run noise. Without this
         # a single pair invites exactly the wrong conclusion.
         "run_to_run": {
-            "plain": {k: spread(plain_runs, k) for k in ("sends", "continuations", "activations")},
-            "continuation": {k: spread(cont_runs, k) for k in ("sends", "continuations", "activations")},
+            "plain": {k: spread(plain_runs, k) for k in (
+                "activations", "sends", "continuations", "elapsed_ms", "prompt_chars",
+                "usage_in", "usage_out", "usage_cached", "usage_missing",
+                "usage_cache_unknown",
+            )},
+            "continuation": {k: spread(cont_runs, k) for k in (
+                "activations", "sends", "continuations", "elapsed_ms", "prompt_chars",
+                "usage_in", "usage_out", "usage_cached", "usage_missing",
+                "usage_cache_unknown",
+            )},
+        },
+        "paired_repeat_summary": {
+            key: paired_summary(key) for key in (
+                "activations", "sends", "continuations", "elapsed_ms", "prompt_chars",
+                "usage_in", "usage_out", "usage_cached",
+            )
+        },
+        "workflow_state_runs": {
+            "plain": [dict(run.metrics.workflow_states) for run in plain_runs],
+            "continuation": [dict(run.metrics.workflow_states) for run in cont_runs],
+        },
+        "completion_checks": {
+            "all_inputs_replayed": all(
+                run.metrics.inbound_seen == len(events)
+                for run in plain_runs + cont_runs
+            ),
+            "no_failed_or_deferred_workflows": all(
+                not any(state in {"failed", "deferred"}
+                        for state in run.metrics.workflow_states)
+                for run in plain_runs + cont_runs
+            ),
+        },
+        "reply_runs": {
+            "plain": [run.metrics.replies for run in plain_runs],
+            "continuation": [run.metrics.replies for run in cont_runs],
         },
         "continuation_exercised": {
             "plain": sum(r.metrics.continuations for r in plain_runs),
@@ -602,6 +698,8 @@ def main() -> int:
     parser.add_argument("--config", default=str(ROOT / "config.fox.toml"))
     parser.add_argument("--out", default=str(ROOT / "docs" / "evaluations"))
     parser.add_argument("--limit", type=int, default=60)
+    parser.add_argument("--through-sequence", type=int, default=None,
+                        help="replay the latest messages at or before this sequence")
     parser.add_argument("--repeat", type=int, default=1,
                         help="runs per arm; >1 exposes run-to-run noise")
     parser.add_argument("--model", default=None)
