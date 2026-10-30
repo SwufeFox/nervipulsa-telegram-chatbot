@@ -1,20 +1,25 @@
-"""Live console: inspect one conversation, or the whole bot, while it runs.
+"""The interactive front end: a fixed prompt, completion, and a log that cannot
+eat what you are typing.
 
-Why in-process rather than a separate query tool: the interesting state is
-split between SQLite (durable queue, cursors, actions) and memory (in-flight
-turns, agent failures, whether it is paused). A second process could read the
-database but not the part that matters when something looks stuck.
+Why this exists rather than a bare `input()` loop: a running bot writes logs
+constantly, and a plain `readline()` shares its line with them. The prompt is
+redrawn wherever the last log line stopped, half-typed text gets interleaved
+with a status block, and there is no way to discover a command's name or its
+arguments without reading the source. That is a worse experience than not
+having a console at all - which is why half of what this module contains is not
+about commands.
 
-Design constraints that shaped this:
+Design:
 
-* It must never become a second scheduler. Every command is read-only except
-  `pause`, `resume` and `quit`, and those only flip a flag or set the stop
-  event. Nothing here sends to Telegram, so a typo cannot post to a group.
-* stdin is read in a worker thread. A blocking `readline()` on the event loop
-  would freeze polling, ingestion and the model calls it is meant to observe.
-* The live feed is a `logging.Handler`, not a parallel event path. Nothing in
-  the bot has to know the console exists, so no code path can behave
-  differently just because somebody is watching.
+* `Console` still owns every command and stays synchronous, so it is testable
+  without a terminal (that is what the existing tests drive).
+* `InteractiveConsole` is the terminal layer: prompt_toolkit draws the prompt at
+  the bottom, reserves the lines it needs, and repaints after each log line.
+  Logs are written through `prompt_toolkit`'s own output, never with `print`,
+  so they cannot land in the middle of the input line.
+* Completion is generated from the same tables the dispatcher uses, so a
+  command that exists is a command that completes. Argument completion is
+  offered where the value is finite (on/off, known chat ids).
 """
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ import logging
 import re
 import sys
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from . import logwatch
 
@@ -85,15 +90,18 @@ class LiveFeed(logging.Handler):
                 # Quiet mode keeps the status blocks and startup lines and
                 # drops per-conversation chatter.
                 return
-            self._console.write(
-                f"{_DIM}{time.strftime('%H:%M:%S')}{_RESET} {message}",
-            )
+            sink = console._live_writer
+            text = f"{_DIM}{time.strftime('%H:%M:%S')}{_RESET} {message}"
+            if sink is not None:
+                sink(text)
+            else:
+                self._console.write(text)
         except Exception:  # a broken feed must not kill logging
             self.handleError(record)
 
 
 class Console:
-    """A tiny REPL bound to the running bot.
+    """A REPL bound to the running bot.
 
     `bot` needs `store`, `chat_kinds`, `stats`, `config`, and optionally
     `pause`/`resume`/`diagnostics`; anything missing degrades to a message
@@ -101,6 +109,7 @@ class Console:
     """
 
     HELP = [
+        ("help", "list every command"),
         ("status", "whole-bot snapshot: backlog, in-flight turns, budget usage"),
         ("chats", "every known conversation, with pending and delivered counts"),
         ("watch <chat> [topic]", "show only that conversation's live events"),
@@ -112,7 +121,8 @@ class Console:
         ("turns", "workflow turns still running"),
         ("waits", "agent waits that are armed or expired"),
         ("stats", "counters since start"),
-        ("pause / resume", "stop or resume replying (ingestion continues)"),
+        ("pause", "stop replying (ingestion continues)"),
+        ("resume", "start replying again"),
         ("quit", "shut down cleanly"),
     ]
 
@@ -130,6 +140,7 @@ class Console:
         self._muted: list[tuple[logging.Handler, int]] = []
         self._closed = False
         self._stop: asyncio.Event | None = None
+        self._live_writer: Callable[[str], None] | None = None
         self._colour = self._supports_colour()
 
     # -- output ------------------------------------------------------------
@@ -181,30 +192,48 @@ class Console:
     async def run(self, stop: asyncio.Event) -> None:
         """Read commands until EOF or `quit`.
 
-        Each read happens in a thread so a quiet console costs the event loop
-        nothing: polling, ingestion and model calls keep running.
+        A real terminal gets prompt_toolkit's fixed prompt, completion and
+        repaint-safe logs. A pipe or test gets the plain reader so redirected
+        stdin keeps its existing behavior.
         """
         self._stop = stop
         self.attach()
-        self.write(f"{_BOLD}console ready{_RESET} — 'help' for commands, "
-                   "'watch <chat_id>' to follow one conversation")
-        while not stop.is_set():
-            try:
-                line = await asyncio.to_thread(sys.stdin.readline)
-            except (OSError, ValueError):
-                break
-            if line == "":  # EOF: no interactive terminal
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                self.handle(line)
-            except Exception as exc:  # never let a typo kill the bot
-                self.write(f"error: {type(exc).__name__}: {exc}")
-            if stop.is_set():
-                break
-        self.detach()
+        try:
+            if self._interactive():
+                self.write(f"{_BOLD}console ready{_RESET} — Tab completes, Up/Down recalls,"
+                           " 'help' lists commands")
+                await _run_interactive(self, stop)
+                return
+            self.write(f"{_BOLD}console ready{_RESET} — 'help' for commands, "
+                       "'watch <chat_id>' to follow one conversation")
+            while not stop.is_set():
+                try:
+                    line = await asyncio.to_thread(sys.stdin.readline)
+                except (OSError, ValueError):
+                    break
+                if line == "":  # EOF: no interactive terminal
+                    break
+                self.dispatch(line)
+                if stop.is_set():
+                    break
+        finally:
+            self.detach()
+
+    def _interactive(self) -> bool:
+        try:
+            return bool(sys.stdin.isatty() and self.stream.isatty())
+        except Exception:
+            return False
+
+    def dispatch(self, line: str) -> None:
+        """Run one input line, reporting errors instead of raising."""
+        line = line.strip()
+        if not line:
+            return
+        try:
+            self.handle(line)
+        except Exception as exc:  # never let a typo kill the bot
+            self.write(f"error: {type(exc).__name__}: {exc}")
 
     def handle(self, line: str) -> None:
         """Dispatch one command. Kept synchronous so tests can call it."""
@@ -220,6 +249,32 @@ class Console:
             return
         for row in output:
             self.write(row)
+
+    # -- completion --------------------------------------------------------
+
+    def command_names(self) -> list[str]:
+        """Every dispatchable command, from the dispatcher itself.
+
+        Derived rather than listed twice: a `HELP` entry that no longer has a
+        `cmd_*` (or a `cmd_*` missing from HELP) would otherwise complete into
+        an error or be undiscoverable.
+        """
+        return sorted(name[4:] for name in dir(self)
+                      if name.startswith("cmd_") and callable(getattr(self, name)))
+
+    def argument_choices(self, command: str) -> list[str]:
+        """Finite argument values worth completing, for one command."""
+        if command == "quiet":
+            return ["on", "off"]
+        if command == "watch":
+            return [str(chat_id) for chat_id in self._kinds()]
+        return []
+
+    def help_for(self, command: str) -> str:
+        for name, description in self.HELP:
+            if name.split()[0] == command:
+                return description
+        return ""
 
     # -- helpers -----------------------------------------------------------
 
@@ -457,3 +512,142 @@ class Console:
         if self._stop is not None:
             self._stop.set()
         return ["shutting down"]
+
+# -- terminal layer ----------------------------------------------------------
+#
+# Everything below needs a real terminal. It is deliberately kept out of
+# `Console` so the command objects stay import-safe and testable without one.
+#
+# Threading note, because it is the whole difficulty here: a bot writes logs
+# from its own thread while the user types. The naive fix - `input()` in a
+# worker thread plus `print()` for logs - is what this replaces, and it fails
+# because both write to the same line. `prompt_toolkit` solves it, but only if
+# the prompt runs on the *same* event loop that does the logging: its stdout
+# proxy schedules writes onto the loop that was active when it was created, so
+# building it in another thread would send terminal writes to a loop nobody is
+# running. So the prompt is an asyncio task on the bot's loop, and log lines are
+# handed to the prompt application's own output.
+
+
+async def _run_interactive(console: "Console", stop: asyncio.Event) -> None:
+    """Run the prompt as a task on the caller's loop, not in a thread."""
+    await _PromptDriver(console).run(stop)
+
+
+class _PromptDriver:
+    """Owns the prompt session and the log sink while it is active.
+
+    Threading is the whole difficulty here. Log records arrive from the bot's
+    worker threads while the user is typing, and both write to one terminal
+    line. `StdoutProxy` solves it - it prints above the prompt and asks the
+    renderer to redraw the input - but only when writes are scheduled onto the
+    loop the prompt is running on. So the prompt is a task on the bot's own
+    loop, and log output goes through a proxy created on that same loop.
+    """
+
+    def __init__(self, console: "Console") -> None:
+        self.console = console
+
+    async def run(self, stop: asyncio.Event) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        history = _history_path()
+        history.parent.mkdir(parents=True, exist_ok=True)
+        session: Any = PromptSession(
+            completer=_completer(self.console),
+            history=FileHistory(str(history)),
+            complete_while_typing=False,
+            enable_history_search=True,
+        )
+        self.console._live_writer = self.write
+
+        async def pump() -> None:
+            while not stop.is_set():
+                try:
+                    line = await session.prompt_async(
+                        ANSI(f"{_BOLD}>{_RESET} "),
+                        bottom_toolbar=_toolbar(self.console))
+                except (EOFError, KeyboardInterrupt):
+                    stop.set()
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A terminal that cannot be driven (no console handle, a
+                    # pty that closed) must not take the bot down with it.
+                    self.console.write(f"console disabled: {type(exc).__name__}")
+                    return
+                self.console.dispatch(line)
+
+        prompt_task = asyncio.create_task(pump())
+        stop_task = asyncio.create_task(stop.wait())
+        try:
+            # patch_stdout's proxy is documented as safe to write from other
+            # threads. It schedules output onto this loop and redraws the prompt.
+            with patch_stdout(raw=True):
+                await asyncio.wait(
+                    (prompt_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (prompt_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(prompt_task, stop_task, return_exceptions=True)
+            self.console._live_writer = None
+
+    def write(self, text: str) -> None:
+        """Write through prompt_toolkit's thread-safe stdout proxy."""
+        if not self.console._colour:
+            text = text.replace(_DIM, "").replace(_BOLD, "").replace(_RESET, "")
+        try:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+def _completer(console: "Console") -> Any:
+    from prompt_toolkit.completion import Completer, Completion
+
+    class CommandCompleter(Completer):
+        """Completes commands, then their arguments, from the live state."""
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            parts = text.split(" ")
+            if len(parts) == 1:
+                stem = parts[0].lstrip("/").lower()
+                for name in console.command_names():
+                    if name.startswith(stem):
+                        yield Completion(name, start_position=-len(parts[0]),
+                                         display_meta=console.help_for(name))
+                return
+            command = parts[0].lstrip("/").lower()
+            stem = parts[-1]
+            for value in console.argument_choices(command):
+                if value.startswith(stem):
+                    yield Completion(value, start_position=-len(stem))
+
+    return CommandCompleter()
+
+
+def _toolbar(console: "Console") -> Any:
+    """A one-line state strip under the prompt: what you are watching, paused."""
+    def render() -> str:
+        parts = [f"watching={console._watching_label()}"]
+        paused = getattr(getattr(console.bot, "stats", None), "paused", None)
+        if paused is not None:
+            parts.append("PAUSED" if paused else "live")
+        if console.quiet_unfocused:
+            parts.append("quiet")
+        parts.append("Tab: complete  \u2191\u2193: history  Ctrl+D: quit")
+        return "  ".join(parts)
+    return render
+
+
+def _history_path() -> Any:
+    from pathlib import Path
+
+    return Path.home() / ".nervipulsa-console-history"

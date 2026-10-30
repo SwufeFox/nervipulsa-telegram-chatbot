@@ -248,19 +248,18 @@ def test_successful_delivery_is_recorded_without_waking_her(tmp_path):
     run(scenario())
 
 
-def test_own_delivery_does_not_satisfy_an_unfiltered_wait(tmp_path):
-    """Waiting for the group is not satisfied by our own send receipt."""
+def test_unfiltered_event_wait_ignores_receipt_but_matches_inbound_message(tmp_path):
+    """A default wait means a new inbound message, never the agent's receipt."""
     store = Store(tmp_path / "w.db")
     try:
         store.add_wait(wait_id="w1", chat_id=fixtures.TEST_CHAT,
                        topic_id=fixtures.TOPIC_A, kind="event",
                        purpose="等群友回答", event_types=None)
-        # Her own receipt must not count.
         assert store.satisfy_event_waits(
             fixtures.TEST_CHAT, fixtures.TOPIC_A, "action_result", 100.0) == []
-        # A real message still does.
         assert store.satisfy_event_waits(
             fixtures.TEST_CHAT, fixtures.TOPIC_A, "message", 101.0) == ["w1"]
+        assert store.active_waits(fixtures.TEST_CHAT, fixtures.TOPIC_A) == []
     finally:
         store.close()
 

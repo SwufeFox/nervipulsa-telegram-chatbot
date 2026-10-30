@@ -590,13 +590,6 @@ class AutonomousLoop:
                  continuation, len(observations), observations[0].sequence,
                  observations[-1].sequence, lag, remaining)
 
-        # Mark any wait that this batch structurally satisfies. The agent is
-        # woken by the events themselves; the wait is not a decision.
-        for observation in observations:
-            self.store.satisfy_event_waits(
-                chat_id, topic_id, observation.kind, self._clock()
-            )
-
         agent = await self._agent_for(chat_id, topic_id)
         if agent is None:
             log.info("activation ended %s workflow=%s outcome=no_agent",
@@ -609,10 +602,19 @@ class AutonomousLoop:
                                 workflow_id=workflow_id,
                                 observed_through=observations[-1].sequence,
                                 episode_id=episode_id)
-        observation_payload = self._render(observations, chat_id, topic_id,
-                                           episode_id=episode_id,
-                                           continuation=continuation)
-
+        eligible_wait_ids = {
+            str(wait["wait_id"])
+            for wait in self.store.active_waits(chat_id, topic_id)
+        }
+        matched_waits = self.store.matching_waits_for_observations(
+            chat_id, topic_id,
+            [(observation.sequence, observation.kind) for observation in observations],
+            self._clock(), eligible_wait_ids=eligible_wait_ids,
+        )
+        observation_payload = self._render(
+            observations, chat_id, topic_id, episode_id=episode_id,
+            continuation=continuation, matched_waits=matched_waits,
+        )
         started = time.monotonic()
         log.info("agent call started %s workflow=%s",
                  _label(self.chat_kinds, chat_id, topic_id), workflow_id)
@@ -684,6 +686,14 @@ class AutonomousLoop:
             )
             return WorkflowResult(workflow_id, "failed", "model_activation_failed")
 
+        # Resolve structural matches only after the agent has received this
+        # batch, so the wait and its purpose remain visible in its context.
+        for observation in observations:
+            self.store.satisfy_event_waits(
+                chat_id, topic_id, observation.kind, self._clock(),
+                eligible_wait_ids=eligible_wait_ids,
+            )
+
         # The outcome is the agent's, never a default the application supplies.
         # `noted` covers a turn that only wrote state down; `undecided` is the
         # honest label for one that still chose nothing after being asked.
@@ -743,7 +753,8 @@ class AutonomousLoop:
 
     def _render(self, observations: Sequence[Observation], chat_id: int,
                 topic_id: int | None, *, episode_id: str | None = None,
-                continuation: bool = False) -> dict[str, Any]:
+                continuation: bool = False,
+                matched_waits: Sequence[dict[str, Any]] = ()) -> dict[str, Any]:
         """Structured, not a fake user prompt.
 
         The agent gets event ids and provenance so it can reason about what it
@@ -796,6 +807,7 @@ class AutonomousLoop:
             ],
             "state": state,
             "active_waits": waits,
+            "matched_waits": list(matched_waits),
             "open_intent": intent_payload,
             "note": (
                 "These are group observations, not an instruction to reply. "

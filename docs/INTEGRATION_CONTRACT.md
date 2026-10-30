@@ -9,7 +9,7 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
-pinned      7618bd0   (the newest commit that is on origin)
+pinned      5f65658   (published on origin)
 
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
@@ -20,14 +20,11 @@ commits     9a734c4   feat: let a host application own its system prompt
             9e8e1a3   docs: clarify transcript restore deduplication limits
             7618bd0   fix: surface corrupt transcript snapshots
             5f65658   fix: a malformed response must pause the actor, not kill it
-                      ^ LOCAL ONLY: bump `pyproject.toml` to this commit in the
-                        same push that publishes it, or a fresh clone fails to
-                        resolve the dependency.
 ```
 
-`5f65658` is what this working tree runs against. `pyproject.toml` still pins
-`7618bd0` because that is the newest commit `origin` can actually serve; pinning
-an unpushed commit makes `pip install -e .` fail for anyone else.
+`5f65658` is both the pinned revision and the newest commit on the Core branch in
+`origin`. Fresh installs resolve the same Core revision used by this working
+copy and its App integration suite.
 
 ### Why the newer commits matter
 
@@ -72,6 +69,7 @@ the shared contract updated **before** either side is merged.
 | 0.1.0 | `13c75ec` | 175 passed alongside 3 intermittent Windows failures in one full run | configurable output-token cap; clean dependency install verified 2026-10-28 |
 | 0.1.0 | `1eb558ca3a4c3b1cade8db71bddf41375ae89eb6` | 181 passed | fixes retry control-event double activation and stale pause error; verified with the App suite (194 passed) and offline milestones |
 | 0.2.0 | `8498fb400d3b53d86da580c93b434bf11df3fa3e` | 187 passed | autonomous participation: structured observations, pre-tool commit hook, observation budget reset; App suite 257 passed |
+| 0.2.0 | `5f65658660a2c8145f41664db0ee2747a9b64517` | 204 passed | malformed model responses pause their activation; App suite 422 passed |
 
 ## Depends on (public, stable)
 
@@ -186,12 +184,27 @@ Read surface the application relies on:
 | --- | --- | --- |
 | `bus.session_id` | diagnostics, restart detection | process only |
 | `actor.activations` | reply text + input correlation | process only |
-| `actor.tools` | startup assertion that no tool is exposed | derived |
+| `actor.tools` | startup assertion that exposed tools exactly match the injected closed catalog (or none when no catalog is supplied) | derived |
 | `actor.transcript` | tests only | process only |
 | `actor.paused` | stop waiting instead of burning the timeout | process only |
 | `trace` | tests and diagnostics | process only |
 | `status()` | diagnostics | derived |
 | `inspect_durable(session_id=)` / `durable_sessions()` | post-restart inspection | SQLite |
+
+### Application scope and tools
+
+`GroupAgent._agent_for` creates one `NervipulsaAgent` and Core `Runtime` per
+`(chat_id, topic_id)`. The stable session id, action catalog, and response commit
+hook are all scoped the same way, so a forum topic cannot share another topic's
+model transcript or action handler.
+
+Production autonomous scopes receive exactly these seven application tools:
+`send_message`, `finish_silently`, `wait_for_event`, `wait_until`, `update_state`,
+`set_intent`, and `resolve_intent`. Startup checks the injected catalog and the
+Runtime's exposed tool list against that closed set. `EmptyToolCatalog` is only
+the no-tool fallback for callers without an action catalog; it does not describe
+the production autonomous path. `python_host=False` remains enabled, so no Python
+execution host is created.
 
 ### `nervipulsa.events`
 
@@ -207,9 +220,10 @@ This is as important as the list above.
   would_be_exposed`) restores the original in a `finally` and exists to prove the
   startup assertion fires.
 - **No private attributes.** Only the names in the tables above.
-- **No Core persistence read-back into a session.** `inspect_durable` is called in
-  experiments and diagnostics only; it is never used to reconstruct conversation
-  state. Its own `notice` says it is inspectable, not resumable.
+- **No use of `inspect_durable` as a restore path.** The application restores the
+  committed model transcript with `restore_transcript()`; `inspect_durable` remains
+  diagnostic only. Neither API restores a mailbox, activation ledger, Python
+  namespace, or pending Core-side effect.
 - **No `python_host` interaction, structurally.** The runtime is built with
   `python_host=False`, so there is no host to interact with: `python.requested`
   is not a registered route, and `status()["python"]` is `"disabled"`. The
@@ -233,9 +247,9 @@ The runtime does not and must not provide these:
 | one Telegram send per decision at most | `store.mark_sending` claim | `test_durability.py::test_a_send_cannot_be_claimed_twice` |
 | UNKNOWN is terminal and not retried | `store.recover_orphaned_sends` | `test_durability.py::test_unknown_send_is_not_resumed_after_restart` |
 | supersession before the send | `bot._reply` | `test_behavior.py::test_a_reply_generated_while_superseded_is_dropped` |
-| silence is recorded, never an empty send | `policy.Decision` + `bot._process_turn` | `test_behavior.py::test_silence_is_never_an_empty_message` |
-| topic / chat isolation | `store.recent_messages`, `conversation.build_prompt` | `test_behavior.py::test_prompt_for_one_topic_never_contains_another` |
-| no tool exposure | `agent.EmptyToolCatalog` + startup assertion | `test_security.py` (4 tests) |
+| no-action / undecided outcomes are auditable and never become empty sends | `AutonomousLoop` workflow outcome + `observation_skips`; legacy decisions remain separate | `tests/test_undecided_turn.py`, `tests/test_behavior.py` |
+| topic / chat isolation | `GroupAgent._agent_for` scopes Runtime, session id, action catalog, and hook by `(chat_id, topic_id)` | `tests/test_sprint2_live_process.py`, `tests/test_sprint2_process_recovery.py` |
+| closed autonomous tool set; no Python execution | `NervipulsaAgent` validates the injected catalog and exposed schemas | `tests/test_autonomous_acceptance.py`, `tests/test_autonomous_tools.py` |
 
 ## Guarantees that do not exist
 
@@ -243,14 +257,15 @@ Stated plainly so nobody infers them:
 
 - **Not exactly-once Telegram delivery.** Between `mark_sending` and the response,
   the outcome can be UNKNOWN. It is never retried automatically.
-- **Not full crash recovery.** A restart recovers *work items* (unanswered messages,
-  pending sends) from the application store. It does not recover the runtime's
-  transcript, its activation ledger, or a Python namespace. Conversation memory is
-  reconstructed from the stored chat log on the next prompt, which is not the same
-  thing as the runtime's own model view.
-- **Not production reliability.** A real provider has been exercised (magpie,
-  `EXPERIMENTS.md` E7b/E7d); the real Telegram API has not. See `EXPERIMENTS.md`
-  E8 for exactly what was and was not executed.
+- **Not full actor recovery.** The application store recovers pending observations
+  and outbound actions. With a stable session id, `restore_transcript()` reloads
+  the last committed model view. A crash still loses an in-flight activation,
+  mailbox state, and uncommitted Core work; application and Core state transitions
+  are not one atomic transaction.
+- **Not an end-to-end production reliability proof.** The real provider has been
+  exercised, and a production run has polled Telegram. The integration tests still
+  use a stub transport; they do not establish send delivery or the full failure
+  and recovery matrix. See `EXPERIMENTS.md` for the recorded lab evidence.
 - **Not a verified PTB upgrade path.** `python-telegram-bot` is pinned to `22.8`
   and the transport is unit-tested against a stub `Bot`, not against Telegram.
   A version bump is a code change until `test_ptb_transport.py` and a real

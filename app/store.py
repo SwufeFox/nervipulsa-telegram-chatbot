@@ -1,16 +1,18 @@
-"""Durable application state: inbound updates, turns, decisions, outbound sends.
+"""Durable application state: inbound observations and Telegram side effects.
 
-The runtime persists evidence of what it was asked and answered, but it cannot
-resume a session (docs/architecture/runtime-integration.md §1). Everything that
-must survive a process restart therefore lives here, in the application's own
-SQLite file:
+Core can restore a committed model transcript, but it cannot resume an in-flight
+activation, the application's event cursor, or a pending Telegram action. The
+state that coordinates autonomous continuation and delivery therefore lives in
+this SQLite file:
 
-  updates     one row per accepted Telegram update, keyed by update_id
-  messages    the chat log, keyed by (chat_id, message_id)
-  turns       one debounce window of chat messages that produced a decision
-  decisions   one row per participation decision, including silence
-  sends       the outbound side effect log, one row per decision
-  cursors     the long-poll offset, advanced only after durable input
+  updates / messages        accepted Telegram input and chat history
+  observation_events       durable external and synthetic observations
+  observation_cursors      per-(chat, topic) progress through observations
+  workflows / episodes     activation and cross-activation work records
+  agent_intents / waits    declared goals and wake conditions
+  actions                  durable outbound effects and their outcomes
+
+Legacy turns, decisions, and sends remain for the previous reply path.
 
 Invariants this module enforces, and the tests that check them:
 
@@ -19,9 +21,8 @@ Invariants this module enforces, and the tests that check them:
 * A message row and its update row commit together; the poll cursor is a
   separate later step. So "cursor advanced" always implies "input is durable",
   never the reverse.
-* A `send` row is written with status PENDING before the Telegram request and
-  moved to SENDING, then to SENT (with the returned message id) or UNKNOWN.
-  UNKNOWN is terminal: `claim_unknown` never returns an UNKNOWN row for retry.
+* An outbound action is recorded before the Telegram request. UNKNOWN is
+  terminal and is never retried automatically.
 
 Telegram identity never leaves this module as anything but an integer or a
 string we wrote ourselves.
@@ -38,6 +39,11 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 SCHEMA_VERSION = 3
+
+# An event wait without an explicit filter means a new inbound Telegram message
+# in this scope. Synthetic scheduler and workflow observations need an explicit
+# event_types entry to satisfy it.
+_DEFAULT_EVENT_WAIT_KINDS = frozenset({"message", "message_edit"})
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -535,6 +541,10 @@ class Store:
                 conn.execute("DROP TABLE observation_cursors_old")
             if "temp.cursor_migration_source" in sources:
                 conn.execute("DROP TABLE temp.cursor_migration_source")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS observation_cursors_scope_lookup "
+                "ON observation_cursors (chat_id, topic_id, last_processed)"
+            )
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -1167,33 +1177,70 @@ class Store:
             )
             return cursor.rowcount == 1
 
+    @staticmethod
+    def _wait_matches_event(row: sqlite3.Row, kind: str) -> bool:
+        allowed = row["event_types_json"]
+        kinds = json.loads(allowed) if allowed else None
+        wait_kind = str(row["kind"])
+        if wait_kind == "event":
+            return kind in kinds if kinds is not None else kind in _DEFAULT_EVENT_WAIT_KINDS
+        if wait_kind == "until":
+            # Preserve the existing behavior where a new observation can
+            # interrupt a scheduled wait; only action receipts are ignored.
+            return kind in kinds if kinds is not None else kind != "action_result"
+        return False
+
+    def matching_waits_for_observations(
+        self, chat_id: int, topic_id: int | None,
+        observations: Sequence[tuple[int, str]], now: float,
+        *, eligible_wait_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Describe waits structurally triggered by this pending observation batch.
+
+        This is read-only. Failed activations leave waits active, so replaying
+        the same observations reconstructs the same wait-to-event explanation.
+        """
+        matched: dict[str, dict[str, Any]] = {}
+        for row in self.active_waits(chat_id, topic_id):
+            wait_id = str(row["wait_id"])
+            if eligible_wait_ids is not None and wait_id not in eligible_wait_ids:
+                continue
+            expires_at = row["expires_at"]
+            if expires_at is not None and float(expires_at) <= now:
+                continue
+            for sequence, kind in observations:
+                if self._wait_matches_event(row, kind):
+                    matched[wait_id] = {
+                        "wait_id": wait_id,
+                        "purpose": str(row["purpose"]),
+                        "wait_kind": str(row["kind"]),
+                        "event_kind": kind,
+                        "event_sequence": sequence,
+                    }
+                    break
+        return list(matched.values())
+
     def satisfy_event_waits(
         self, chat_id: int, topic_id: int | None, kind: str, now: float,
+        *, eligible_wait_ids: set[str] | None = None,
     ) -> list[str]:
-        """Resolve waits whose expiry passed and report ones this event matches.
+        """Resolve expired waits and report the waits this event matches.
 
-        Matching is structural only (topic + allowed kinds). Anything semantic
-        is left to the agent when it is woken again.
+        An unfiltered event wait means an inbound Telegram message or edit.
+        Synthetic observations remain opt-in through ``event_types``.
         """
         satisfied: list[str] = []
         for row in self.active_waits(chat_id, topic_id):
+            wait_id = str(row["wait_id"])
+            if eligible_wait_ids is not None and wait_id not in eligible_wait_ids:
+                continue
             expires_at = row["expires_at"]
             if expires_at is not None and float(expires_at) <= now:
-                self.resolve_wait(str(row["wait_id"]), "expired")
+                self.resolve_wait(wait_id, "expired")
                 continue
-            allowed = row["event_types_json"]
-            kinds = json.loads(allowed) if allowed else None
-            if kinds is not None and kind in kinds:
-                if self.resolve_wait(str(row["wait_id"]), "satisfied"):
-                    satisfied.append(str(row["wait_id"]))
-            elif kinds is None and kind != "action_result":
-                # An unfiltered wait means "something new from the group". The
-                # agent's own delivery receipt is not that: letting it satisfy
-                # the wait would mean a message she sent wakes the very wait
-                # that was meant to await someone else's answer. Asking for
-                # `action_result` explicitly still works.
-                if self.resolve_wait(str(row["wait_id"]), "satisfied"):
-                    satisfied.append(str(row["wait_id"]))
+            if self._wait_matches_event(row, kind):
+                if self.resolve_wait(wait_id, "satisfied"):
+                    satisfied.append(wait_id)
         return satisfied
 
     def set_state(

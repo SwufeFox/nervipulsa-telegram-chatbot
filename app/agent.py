@@ -1,25 +1,14 @@
-"""The only place that talks to Nervipulsa.
+"""The adapter between the application and Nervipulsa.
 
-One `Runtime` per chat. The runtime provides the event kernel, the activation
-ledger, the transcript, and the provider adapter; this module supplies the
-identity (system prompt), the input (one rendered prompt string), and the
-observation (the assistant message for a given activation).
+In production, ``GroupAgent._agent_for`` creates one ``NervipulsaAgent`` and
+Runtime per ``(chat_id, topic_id)``. That keeps the model transcript and tool
+binding inside a single chat/topic scope.
 
-Why one Runtime per chat rather than one global Runtime:
-
-* `Transcript` is append-only for the life of a Runtime. Two groups sharing one
-  Runtime would share a model view, and the runtime offers no way to partition
-  it. Separate Runtimes is the strongest isolation available.
-* `Runtime.submit_text` carries no chat identity, so a shared Runtime could not
-  attribute output to a chat even if the transcript were partitioned.
-
-Cost: one `Runtime.start()` per chat spawns a Python worker each (measured in
-docs/architecture/runtime-integration.md §3 G2). For a handful of authorized
-chats that is acceptable; `RUNTIME_GAPS.md` records the gap.
-
-Tools: this module constructs an `EmptyCatalog`. The model is never offered
-`python_exec` or `python_environment`, and a `python.requested` event can never
-be produced by a model response. The security tests assert this.
+The adapter accepts an injected tool catalog. Autonomous scopes receive the
+closed seven-tool action catalog from ``app.autonomous_tools``; callers without
+a catalog get ``EmptyToolCatalog`` and cannot act. Every Runtime has
+``python_host=False``, so Python execution tools and interpreters are never
+available.
 """
 from __future__ import annotations
 
@@ -38,7 +27,7 @@ log = logging.getLogger(__name__)
 
 
 class EmptyToolCatalog:
-    """Exposes no tools. This is the security boundary for this application."""
+    """Fallback catalog that exposes no tools when a caller has no action catalog."""
 
     def schemas(self, *, workspace: str | None = None) -> list[dict[str, Any]]:
         return []
@@ -181,11 +170,10 @@ class NervipulsaAgent:
             tool_catalog=self._tool_catalog or EmptyToolCatalog(),
             response_commit_hook=self._response_commit_hook,
             system_prompt=self._system_prompt,
-            # No tool is exposed, so nothing in this application can submit
-            # Python. Declining the host means no interpreter is spawned and
-            # `python.requested` is not even routable. This matters because the
-            # bot keeps one runtime per (chat, topic): with a host per runtime,
-            # ten forum topics meant ten resident interpreters.
+            # The injected catalog may expose bounded application actions, but
+            # Python execution remains disabled. With no Python host, this
+            # Runtime starts no interpreter; ten forum topics therefore do not
+            # mean ten resident Python workers.
             python_host=False,
             session_id=self._session_id,
         )
@@ -267,9 +255,8 @@ class NervipulsaAgent:
     async def _submit(self, payload: Any, *, tag: str, observation: bool) -> AgentResult:
         """Submit one input and wait for the activation it produced.
 
-        Serialized per chat: the runtime processes one activation at a time
-        anyway, and holding the lock makes "which activation answered me"
-        unambiguous.
+        Serialized per Runtime (one instance per chat/topic scope), so the
+        activation ledger lookup remains unambiguous.
         """
         if self._runtime is None:
             raise RuntimeError("agent not started")

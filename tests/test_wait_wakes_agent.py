@@ -33,8 +33,8 @@ from app.turns import TurnManager
 from conftest import FakeClock, FakeTransport, run
 
 
-def msg(uid, text, topic=None):
-    return fixtures.message(update_id=uid, message_id=uid, sender_id=fixtures.ALICE,
+def msg(uid, text, topic=None, message_id=None):
+    return fixtures.message(update_id=uid, message_id=message_id or uid, sender_id=fixtures.ALICE,
                             username="alice", topic_id=topic or fixtures.TOPIC_A,
                             text=text)
 
@@ -271,6 +271,81 @@ def test_a_fired_timer_is_not_debounced(tmp_path):
             assert len(calls) == before + 1, (
                 "a fired timer waited for the debounce window"
             )
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+def test_unfiltered_event_wait_only_matches_inbound_messages(tmp_path):
+    clock = FakeClock()
+    store = Store(tmp_path / "event-waits.db", clock=clock)
+    scope = (fixtures.TEST_CHAT, fixtures.TOPIC_A)
+    try:
+        store.add_wait(
+            wait_id="default", chat_id=scope[0], topic_id=scope[1], kind="event",
+            purpose="wait for a group message",
+        )
+        matches = store.matching_waits_for_observations(
+            *scope, [(1, "timer"), (2, "message")], clock())
+        assert matches == [{
+            "wait_id": "default", "purpose": "wait for a group message",
+            "wait_kind": "event", "event_kind": "message", "event_sequence": 2,
+        }]
+        for system_kind in ("timer", "intent_expired", "action_result"):
+            assert store.satisfy_event_waits(*scope, system_kind, clock()) == []
+            assert len(store.active_waits(*scope)) == 1
+
+        assert store.satisfy_event_waits(*scope, "message", clock()) == ["default"]
+        assert store.active_waits(*scope) == []
+
+        store.add_wait(
+            wait_id="edit", chat_id=scope[0], topic_id=scope[1], kind="event",
+            purpose="wait for an edit",
+        )
+        assert store.satisfy_event_waits(*scope, "message_edit", clock()) == ["edit"]
+
+        store.add_wait(
+            wait_id="explicit-timer", chat_id=scope[0], topic_id=scope[1], kind="event",
+            purpose="wait for an explicit timer event", event_types=["timer"],
+        )
+        assert store.matching_waits_for_observations(
+            *scope, [(3, "timer")], clock()) == [{
+                "wait_id": "explicit-timer",
+                "purpose": "wait for an explicit timer event",
+                "wait_kind": "event", "event_kind": "timer", "event_sequence": 3,
+            }]
+        assert store.satisfy_event_waits(*scope, "timer", clock()) == ["explicit-timer"]
+    finally:
+        store.close()
+
+
+
+def test_inbound_event_satisfies_matching_persistent_wait(tmp_path):
+    async def scenario():
+        bot, store, clock, _transport, seen = build(
+            tmp_path, lambda request: ModelResponse(content="No action.", model="scripted"))
+        await bot.start()
+        try:
+            store.add_wait(
+                wait_id="event-wait", chat_id=fixtures.TEST_CHAT,
+                topic_id=fixtures.TOPIC_A, kind="event", purpose="wait for edit",
+                event_types=["message_edit"],
+            )
+            await bot.step([msg(901, "first")], run=False)
+            await bot.autonomous_step(force=True)
+            assert store.active_waits(fixtures.TEST_CHAT, fixtures.TOPIC_A)
+            assert "wait for edit" in json.dumps(seen[-1].messages, ensure_ascii=False)
+            await bot.step([msg(902, "edited", message_id=901)], run=False)
+            await bot.autonomous_step(force=True)
+            matched_context = "\n".join(
+                json.dumps(request.messages, ensure_ascii=False) for request in seen)
+            assert "matched_waits" in matched_context
+            assert "event_kind" in matched_context and "message_edit" in matched_context
+            assert not store.active_waits(fixtures.TEST_CHAT, fixtures.TOPIC_A)
+            row = store._query(
+                "SELECT status FROM agent_waits WHERE wait_id = ?", ("event-wait",))
+            assert row[0]["status"] == "satisfied"
         finally:
             await bot.stop()
             store.close()

@@ -3,7 +3,9 @@
 Runs:
     python -m app.main --check              # validate config, print redacted report
     python -m app.main --replay fixtures/   # offline, scripted model, no network
-    python -m app.main                      # live long polling
+    python -m app.main                      # live long polling; TUI opens in a terminal
+    python -m app.main --console            # enable command input (TUI on a terminal)
+    python -m app.main --no-console         # logs only; never read stdin
 
 Live mode requires TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_CHAT_IDS, and a model
 key. `--dry-run` keeps the whole pipeline but never calls the Telegram send API,
@@ -61,8 +63,8 @@ def build_settings(config: AppConfig):
         max_output_tokens=config.max_output_tokens,
         # The model HTTP timeout has to follow the reply budget: an unlimited
         # reply can legitimately take minutes. `default_timeout` stays short
-        # because it bounds tool execution, and this application exposes no
-        # tools at all.
+        # because it bounds ordinary tool execution. This app exposes only its
+        # closed action tools, with no Python host for arbitrary code.
         max_timeout=config.request_timeout,
         default_timeout=min(30.0, config.request_timeout),
     )
@@ -381,11 +383,11 @@ async def run_live(config: AppConfig, system_prompt: str, *,
     # The console is opt-in at the call site (a real terminal), never inferred
     # inside the poll loop: a test or a redirected run must not end up waiting
     # on stdin.
-    console = None
+    console_task: asyncio.Task[None] | None = None
     if console_enabled:
         console = Console(bot=bot, config=config,
                           level=getattr(logging, config.log_level.upper(), logging.INFO))
-        asyncio.create_task(console.run(stop), name="console")
+        console_task = asyncio.create_task(console.run(stop), name="console")
 
     while not stop.is_set():
         if bot.stats.paused and not pause_logged:
@@ -442,6 +444,11 @@ async def run_live(config: AppConfig, system_prompt: str, *,
 
     timer.cancel()
     await asyncio.gather(timer, return_exceptions=True)
+    if console_task is not None:
+        try:
+            await console_task
+        except Exception as exc:
+            log.warning("console task failed (error_type=%s)", type(exc).__name__)
     # Close any open debounce window so a message that arrived in the last few
     # seconds is still decided rather than silently dropped on exit.
     pending = bot.hold_open_turns()
@@ -468,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="never call the send API")
     parser.add_argument("--proactive", action="store_true", help="enable proactive participation")
     parser.add_argument("--console", dest="console", action="store_true", default=None,
-                        help="force the interactive console on")
+                        help="enable command input (TUI on a terminal)")
     parser.add_argument("--no-console", dest="console", action="store_false",
                         help="never read stdin; logs only")
     args = parser.parse_args(argv)

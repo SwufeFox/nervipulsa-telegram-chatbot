@@ -43,6 +43,9 @@ def assert_recovered(path, expected):
             ).fetchone()[0] == 0
             info = store._conn.execute("PRAGMA table_xinfo(observation_cursors)").fetchall()
             assert any(row['name'] == 'scope_key' and row['hidden'] == 3 for row in info)
+            indexes = {row['name'] for row in store._conn.execute(
+                "PRAGMA index_list(observation_cursors)")}
+            assert "observation_cursors_scope_lookup" in indexes
         finally:
             store.close()
 

@@ -210,8 +210,9 @@ episode、首次激活不是延续、无事可做时关闭、并发开启采用�
 `tests/test_episode_restart_leak.py` 补的是**崩在两次写之间**的边界：投递已关掉目标、
 episode 还没关，重启后这一行看着像「还在等」。旧实现在这个状态下会把话题里下一句无关的
 话渲染成 `continuation`；现在启动时按「是否还有 open goal 或 active wait」重新推导，
-无事可做的 episode 直接关闭，再让新观察进来。App 全量 406 passed，跑在本地 Core
-`5f65658` 上；`pyproject.toml` 固定的是 `7618bd0`，二者不同，见下文。
+无事可做的 episode 直接关闭，再让新观察进来。App 全量 406 passed，运行时加载本地 Core
+`5f65658`；当时 `pyproject.toml` 仍固定 `7618bd0`。发布后已将 pin 同步至
+`5f65658`，当前依赖状态见 `docs/INTEGRATION_CONTRACT.md`。
 
 ## Core 与 Telegram 应用的边界
 
@@ -232,7 +233,7 @@ episode 还没关，重启后这一行看着像「还在等」。旧实现在这
 - 旧 `pending` 标记 `origin=legacy`，只按旧恢复协议完成已持久意图：授权有效、原意图未过期、同话题没有使其失效的新消息且版本检查通过时可领取，否则记录未执行原因并将结果提供给新 Agent。它不冒充新 Agent 的自主决策；新收到的事件不再进入旧策略。此选择保留先前已生成待发送意图的恢复行为，不是对新消息重启旧策略。
 - 旧决策尚未产生发送意图时，不自动把它转换成发言；其未决事件交给新工作单元自主重新观察。无法判明状态或归属的记录显式隔离，既不静默丢失，也不自动发送。迁移标记、旧新位点、行动 ID 及记录映射应幂等，重复重启不得重复迁移或发送。
 
-当前阶段一工作树尚未提交，测试结果也不能直接证明本设计已实现。
+写作时，阶段一仍在工作树中，尚未完成实施验收；后续实现与验证结果见本文末尾的“实现记录”。
 
 ## 具体行为示例
 
@@ -290,9 +291,11 @@ Agent：finish_silently()
 **App（本仓库）** — 自主循环：
 
 - `app/autonomy.py`：观察批次、`workflow_id`、游标推进、等待、状态、动作意图与 outbox。
-- `app/autonomous_tools.py`：仅暴露 `send_message`、`finish_silently`、`wait_for_event`、`wait_until`、`update_state`；工具只登记意图，不产生 Telegram 副作用。
-- `ParticipationPolicy` 与 `proactive_score` 不再是生产路径；显式 `legacy_policy=True` 只用于离线 replay 和既有回归。
-- 会话创建时向 Runtime 注入工具目录与 per-scope commit hook；启动检查拒绝任何未经授权的工具集合（包括 `python_exec`）。
+- `app/autonomous_tools.py`：仅暴露 `send_message`、`finish_silently`、`wait_for_event`、`wait_until`、`update_state`、`set_intent`、`resolve_intent` 七个闭合工具；工具只登记意图，不产生 Telegram 副作用。
+- 每个 `(chat_id, topic_id)` 有独立 Runtime、稳定 session id、工具目录与 response commit hook；启动检查拒绝未授权工具，包括 `python_exec`。
+- 未指定 `event_types` 的 `wait_for_event` 只由入站 `message` / `message_edit` 满足；`timer`、`intent_expired`、`action_result` 等合成观察需显式指定。
+- 结构化观察里的 `matched_waits` 显示命中的 wait id、purpose 和事件 kind/sequence；失败的模型激活不会消费等待，同一批观察重试时会重新计算匹配。
+- 若一轮没有工具调用，先追加一次明确要求决策的提醒；仍无工具时记录 `outcome=undecided` 与 observation skip，完成 workflow 并推进游标，不把它记成 `finish_silently`，也不自动重放造成循环。
 
 **测试与真实观测。** App 全量 257 passed；Core 全量 187 passed。真实模型
 `opencode-go/muse-spark-1.3-contributor`（本地 Magpie）经 `experiments/autonomous_live_probe.py`
