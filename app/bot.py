@@ -533,18 +533,13 @@ class GroupAgent:
             media_file_id=inbound.media_file_id,
             media_preview=inbound.media_preview,
         )
-        # Read before writing: `record_inbound_message` returns False both for
-        # an update id it has already seen and for a *new* update carrying an
-        # existing (chat, message) pair - an edit. Only the latter left a fresh
-        # observation behind that nothing would schedule.
-        known_update = self.store.has_update(inbound.update_id)
-        if not self.store.record_inbound_message(
+        status = self.store.record_inbound_message(
             message, update_id=inbound.update_id, payload=_minimal_payload(inbound)
-        ):
-            if known_update:
-                tick.duplicates += 1
-                return
-            # A new update for a message we already have: the new text is
+        )
+        if status == "duplicate_update":
+            tick.duplicates += 1
+            return
+        if status == "message_edit":
             # durable in `observation_events` as `message_edit`, so the topic
             # must be re-armed or it would never be looked at.
             effects = after_commit if after_commit is not None else []
@@ -563,7 +558,12 @@ class GroupAgent:
 
         tick.messages_stored += 1
         if inbound.chat_type:
-            self.chat_kinds[inbound.chat_id] = inbound.chat_type
+            chat_id, chat_type = inbound.chat_id, inbound.chat_type
+            remember_chat_type = lambda: self.chat_kinds.__setitem__(chat_id, chat_type)
+            if after_commit is None:
+                remember_chat_type()
+            else:
+                after_commit.append(remember_chat_type)
         preview = logwatch.summary(inbound.text, self.config.log_summary_chars)
         stored_log = lambda: log.info(
             "stored %s message_id=%s sender=%s kind=%s%s",
@@ -1245,23 +1245,33 @@ class GroupAgent:
             return True
 
         argument = text.split(maxsplit=1)[1].strip().lower() if len(text.split(maxsplit=1)) > 1 else ""
+        enabled = argument in {"on", "1", "true", "yes"}
         if head == "pause":
-            self.pause()
-            self._admin_note = "paused"
+            note = "paused"
         elif head == "resume":
-            self.resume()
-            self._admin_note = "resumed"
+            note = "resumed"
         elif head == "proactive":
-            enabled = argument in {"on", "1", "true", "yes"}
-            self.set_proactive(enabled)
-            self._admin_note = f"proactive {'on' if enabled else 'off'}"
+            note = f"proactive {'on' if enabled else 'off'}"
         elif head == "purge":
+            # Store changes join the poll transaction so a failed batch rolls them back.
             self.purge(message.chat_id)
-            self._admin_note = "purged this chat"
-        elif head == "stats":
-            self._admin_note = None
-        elif head == "help":
-            self._admin_note = None
+            note = "purged this chat"
+        else:  # stats and help
+            note = None
+
+        def apply_admin_state() -> None:
+            if head == "pause":
+                self.pause()
+            elif head == "resume":
+                self.resume()
+            elif head == "proactive":
+                self.set_proactive(enabled)
+            self._admin_note = note
+
+        if after_commit is None:
+            apply_admin_state()
+        else:
+            after_commit.append(apply_admin_state)
         tick.admin_commands += 1
         success_log = lambda: log.info(
             "admin command %r applied for chat %s", head, message.chat_id)

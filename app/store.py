@@ -36,7 +36,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Literal, Sequence
 
 SCHEMA_VERSION = 3
 
@@ -1610,28 +1610,37 @@ class Store:
 
     def record_inbound_message(
         self, message: StoredMessage, *, update_id: int, payload: dict[str, Any]
-    ) -> bool:
-        """Persist the deduplication key and message in one transaction."""
+    ) -> Literal["duplicate_update", "message", "message_edit"]:
+        """Persist an inbound receipt and message atomically.
+
+        Returns ``duplicate_update``, ``message``, or ``message_edit``.
+        """
         with self._write() as conn:
             update = conn.execute(
-                "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
-                " VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?) ON CONFLICT(update_id) DO NOTHING",
                 (update_id, message.chat_id, message.message_id, self._now(),
                  json.dumps(payload, ensure_ascii=False)),
             )
             if update.rowcount != 1:
-                return False
+                return "duplicate_update"
+            inserted = conn.execute(
+                "INSERT INTO messages (chat_id, message_id, topic_id, sender_id,"
+                " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(chat_id, message_id) DO NOTHING",
+                (message.chat_id, message.message_id, message.topic_id, message.sender_id,
+                 message.sender_label, int(message.is_bot), message.text, message.created_at,
+                 update_id, int(message.reply_to_bot)),
+            )
+            status = "message" if inserted.rowcount == 1 else "message_edit"
             conn.execute(
                 "INSERT INTO observation_events"
                 " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                (update_id, message.chat_id, message.topic_id,
-                 "message_edit" if conn.execute(
-                     "SELECT 1 FROM messages WHERE chat_id = ? AND message_id = ?",
-                     (message.chat_id, message.message_id),
-                 ).fetchone() else "message", self._now(), json.dumps({
-                     "message_id": message.message_id, "sender_id": message.sender_id,
-                     "sender_label": message.sender_label, "is_bot": message.is_bot,
+                (update_id, message.chat_id, message.topic_id, status, self._now(), json.dumps({
+                    "message_id": message.message_id, "sender_id": message.sender_id,
+                    "sender_label": message.sender_label, "is_bot": message.is_bot,
                     "text": message.text, "created_at": message.created_at,
                     "reply_to_bot": message.reply_to_bot,
                     # Only present when there was an attachment, so a plain
@@ -1643,15 +1652,7 @@ class Store:
                        if message.media_kind else {}),
                 }, ensure_ascii=False)),
             )
-            inserted = conn.execute(
-                "INSERT OR IGNORE INTO messages (chat_id, message_id, topic_id, sender_id,"
-                " sender_label, is_bot, text, created_at, update_id, reply_to_bot)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (message.chat_id, message.message_id, message.topic_id, message.sender_id,
-                 message.sender_label, int(message.is_bot), message.text, message.created_at,
-                 update_id, int(message.reply_to_bot)),
-            )
-            return inserted.rowcount == 1
+            return status
 
     def record_message(self, message: StoredMessage, *, update_id: int) -> bool:
         """Persist a chat message. Returns False if (chat_id, message_id) exists."""

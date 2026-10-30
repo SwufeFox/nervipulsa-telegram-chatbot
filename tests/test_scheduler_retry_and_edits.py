@@ -5,7 +5,7 @@
    look at them again until an unrelated message arrived or the process
    restarted.
 2. An edited message was recorded as a `message_edit` observation, but
-   `record_inbound_message` reports False for it (the message row already
+   `record_inbound_message` reported False for it (the message row already
    exists) and the ingest path read that as "duplicate", so the new text sat in
    the stream with nothing scheduled to read it.
 """

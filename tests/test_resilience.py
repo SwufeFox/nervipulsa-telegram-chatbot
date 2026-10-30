@@ -149,9 +149,68 @@ def test_poll_batch_rolls_back_input_and_cursor_on_ingest_failure(
         assert store.has_update(51) is False
         assert store.has_update(52) is False
         assert store.get_update_cursor() is None
+        assert bot.stats.paused is False
+        assert bot.diagnostics()["last_admin_action"] is None
+        assert bot.chat_kinds == {}
         messages = [record.getMessage() for record in caplog.records]
         assert not any(message.startswith("stored ") for message in messages)
         assert not any("admin command 'pause' applied" in message for message in messages)
+        await bot.stop()
+
+    run(body())
+
+
+def test_poll_batch_applies_admin_state_after_commit(
+    store, config, transport, clock, system_prompt
+) -> None:
+    bot, _ = make_bot(store, config, transport, clock, system_prompt)
+    transport.updates = [[topic_update(53, 503, 11, "/pause")]]
+
+    async def body() -> None:
+        await bot.start()
+        assert bot.stats.paused is False
+        offset, tick = await bot.poll_once(offset=53, background=True)
+        assert offset == 54
+        assert tick.admin_commands == 1
+        assert bot.stats.paused is True
+        assert bot.diagnostics()["last_admin_action"] == "paused"
+        assert bot.chat_kinds == {fixtures.TEST_CHAT: "supergroup"}
+        await bot.stop()
+
+    run(body())
+
+
+def test_poll_batch_rolls_back_purge_on_later_ingest_failure(
+    store, config, transport, clock, system_prompt
+) -> None:
+    bot, _ = make_bot(store, config, transport, clock, system_prompt)
+    transport.updates = [[
+        topic_update(51, 501, 11, "/purge"),
+        topic_update(52, 502, 11, "second"),
+    ]]
+    original = bot._ingest
+    calls = 0
+
+    def fail_second(update, tick, *, after_commit=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated ingest failure")
+        return original(update, tick, after_commit=after_commit)
+
+    bot._ingest = fail_second
+
+    async def body() -> None:
+        await bot.start()
+        await bot.step([topic_update(49, 499, 11, "preserve")])
+        assert store.stats()["messages"] == 1
+        with pytest.raises(RuntimeError, match="simulated ingest failure"):
+            await bot.poll_once(offset=50, background=True)
+        assert store.stats()["messages"] == 1
+        assert store.has_update(49) is True
+        assert store.has_update(51) is False
+        assert store.get_update_cursor() is None
+        assert bot.diagnostics()["last_admin_action"] is None
         await bot.stop()
 
     run(body())

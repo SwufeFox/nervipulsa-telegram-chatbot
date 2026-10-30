@@ -9,10 +9,10 @@ def test_observation_receipts_survive_restart_and_purge(tmp_path):
     def message(text):
         return StoredMessage(1, 10, 7, 42, "member", False, text, 100.0)
 
-    assert store.record_inbound_message(message("original"), update_id=1, payload={})
+    assert store.record_inbound_message(message("original"), update_id=1, payload={}) == "message"
     # A new Telegram update for the same message remains a distinct receipt.
-    assert not store.record_inbound_message(message("edited"), update_id=2, payload={})
-    assert not store.record_inbound_message(message("edited"), update_id=2, payload={})
+    assert store.record_inbound_message(message("edited"), update_id=2, payload={}) == "message_edit"
+    assert store.record_inbound_message(message("edited"), update_id=2, payload={}) == "duplicate_update"
     store.close()
     store = Store(path)
     rows = store._query("SELECT * FROM observation_events ORDER BY sequence")

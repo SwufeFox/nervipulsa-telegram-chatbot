@@ -162,7 +162,7 @@ def child(args):
             bot, store = make_bot(Path(db), FakeClock(), FakeTransport(), [])
             await bot.start()
             def trace(sql):
-                if sql.startswith('INSERT OR IGNORE INTO messages'):
+                if sql.startswith('INSERT INTO messages'):
                     os._exit(81)
             store._conn.set_trace_callback(trace)
             await bot.step([updates()[0]])
