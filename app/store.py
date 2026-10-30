@@ -426,6 +426,7 @@ class Store:
         # is reentrant because helpers like `_record_action_result` are called
         # from inside an existing write.
         self._lock = threading.RLock()
+        self._write_state = threading.local()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -559,16 +560,46 @@ class Store:
             self._conn.close()
 
     @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Commit a group of Store writes atomically with one SQLite commit."""
+        with self._lock:
+            depth = getattr(self._write_state, "batch_depth", 0)
+            if depth:
+                self._write_state.batch_depth = depth + 1
+                try:
+                    yield
+                finally:
+                    self._write_state.batch_depth = depth
+                return
+            self._write_state.batch_depth = 1
+            try:
+                with self._write(immediate=True):
+                    yield
+            finally:
+                self._write_state.batch_depth = 0
+
+    @contextmanager
     def _write(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            if getattr(self._write_state, "batch_depth", 0) and getattr(
+                self._write_state, "batch_write_active", False
+            ):
+                yield self._conn
+                return
+            in_batch = bool(getattr(self._write_state, "batch_depth", 0))
+            if in_batch:
+                self._write_state.batch_write_active = True
             try:
                 if immediate:
                     self._conn.execute("BEGIN IMMEDIATE")
                 yield self._conn
                 self._conn.commit()
-            except Exception:
+            except BaseException:
                 self._conn.rollback()
                 raise
+            finally:
+                if in_batch:
+                    self._write_state.batch_write_active = False
 
     def _query(self, sql: str, params: Sequence[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:

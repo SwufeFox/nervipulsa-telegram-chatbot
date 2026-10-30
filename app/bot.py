@@ -408,21 +408,27 @@ class GroupAgent:
 
         tick.updates = len(updates)
         highest: int | None = None
-        for update in updates:
-            update_id = update.get("update_id")
-            if isinstance(update_id, int):
-                highest = update_id if highest is None else max(highest, update_id)
-            reaction = parse_reaction_update(update)
-            if reaction is not None:
-                self._ingest_reaction(reaction, tick, update)
-                continue
-            self._ingest(update, tick)
-
-        # Advance the cursor only after durable ingestion of this batch.
+        after_commit: list[Callable[[], None]] = []
         new_offset = offset
-        if highest is not None:
-            new_offset = highest + 1
-            self.store.set_update_cursor(new_offset)
+        with self.store.batch():
+            for update in updates:
+                update_id = update.get("update_id")
+                if isinstance(update_id, int):
+                    highest = update_id if highest is None else max(highest, update_id)
+                reaction = parse_reaction_update(update)
+                if reaction is not None:
+                    self._ingest_reaction(reaction, tick, update)
+                    continue
+                self._ingest(update, tick, after_commit=after_commit)
+
+            # Keep the cursor in the same atomic batch as input. If any handler
+            # fails, neither the input rows nor the poll cursor are committed.
+            if highest is not None:
+                new_offset = highest + 1
+                self.store.set_update_cursor(new_offset)
+
+        for effect in after_commit:
+            effect()
 
         if background:
             self.schedule_turns()
@@ -494,7 +500,8 @@ class GroupAgent:
         else:
             tick.ignored += 1
 
-    def _ingest(self, update: dict[str, Any], tick: TickStats) -> None:
+    def _ingest(self, update: dict[str, Any], tick: TickStats, *,
+                after_commit: list[Callable[[], None]] | None = None) -> None:
         inbound = _parse(update)
         if inbound is None:
             tick.ignored += 1
@@ -540,10 +547,16 @@ class GroupAgent:
             # A new update for a message we already have: the new text is
             # durable in `observation_events` as `message_edit`, so the topic
             # must be re-armed or it would never be looked at.
-            log.info("edited message chat_id=%s message_id=%s queued for review",
-                     inbound.chat_id, inbound.message_id)
+            effects = after_commit if after_commit is not None else []
+            effects.append(lambda: log.info(
+                "edited message chat_id=%s message_id=%s queued for review",
+                inbound.chat_id, inbound.message_id))
             if self.autonomy is not None:
-                self.autonomy.note_activity(inbound.chat_id, inbound.topic_id)
+                effects.append(lambda: self.autonomy.note_activity(
+                    inbound.chat_id, inbound.topic_id))
+            if after_commit is None:
+                for effect in effects:
+                    effect()
             else:
                 tick.duplicates += 1
             return
@@ -552,11 +565,15 @@ class GroupAgent:
         if inbound.chat_type:
             self.chat_kinds[inbound.chat_id] = inbound.chat_type
         preview = logwatch.summary(inbound.text, self.config.log_summary_chars)
-        log.info("stored %s message_id=%s sender=%s kind=%s%s",
-                 logwatch.scope(inbound.chat_id, inbound.topic_id, inbound.chat_type),
-                 inbound.message_id, inbound.sender_label,
-                 inbound.media_kind or "text",
-                 f' text="{preview}"' if preview else "")
+        stored_log = lambda: log.info(
+            "stored %s message_id=%s sender=%s kind=%s%s",
+            logwatch.scope(inbound.chat_id, inbound.topic_id, inbound.chat_type),
+            inbound.message_id, inbound.sender_label, inbound.media_kind or "text",
+            f' text="{preview}"' if preview else "")
+        if after_commit is None:
+            stored_log()
+        else:
+            after_commit.append(stored_log)
 
         # Our own message echoed back by the API: keep it in the log for context,
         # but never open a turn on it.
@@ -564,21 +581,29 @@ class GroupAgent:
             return
 
         # Admin commands are handled here and never become model input.
-        if self._handle_admin(message, tick):
+        if self._handle_admin(message, tick, after_commit=after_commit):
             return
 
         if self.autonomy is not None:
-            # The observation is already durable. Scheduling decides *when*
-            # the agent gets to look; it never decides whether it may think.
-            self.autonomy.note_activity(message.chat_id, message.topic_id)
+            # Wake only after the batch transaction commits.
+            if after_commit is None:
+                self.autonomy.note_activity(message.chat_id, message.topic_id)
+            else:
+                after_commit.append(lambda: self.autonomy.note_activity(
+                    message.chat_id, message.topic_id))
             return
+        def observe_message() -> None:
+            full = self.turns.observe(message)
+            if full is not None:
+                tick.turns_closed += 1
+                # Turns closed by the size cap are processed by run_turns via
+                # the queue below; ready() only returns time-closed turns.
+                self._pending_turns.append(full)
 
-        full = self.turns.observe(message)
-        if full is not None:
-            tick.turns_closed += 1
-            # Turns closed by the size cap are processed by run_turns via the
-            # queue below; ready() only returns time-closed turns.
-            self._pending_turns.append(full)
+        if after_commit is None:
+            observe_message()
+        else:
+            after_commit.append(observe_message)
 
     # -- turn processing ---------------------------------------------------
 
@@ -1198,7 +1223,8 @@ class GroupAgent:
         text = message.text.strip()
         return bool(text.startswith("/") and text.split(maxsplit=1)[0].lstrip("/").split("@")[0].lower() in cls.ADMIN_COMMANDS)
 
-    def _handle_admin(self, message: StoredMessage, tick: TickStats) -> bool:
+    def _handle_admin(self, message: StoredMessage, tick: TickStats, *,
+                      after_commit: list[Callable[[], None]] | None = None) -> bool:
         """Handle an admin command. Returns True if the message was consumed.
 
         Only a configured admin, only in an authorized chat, and only a bare
@@ -1237,7 +1263,12 @@ class GroupAgent:
         elif head == "help":
             self._admin_note = None
         tick.admin_commands += 1
-        log.info("admin command %r applied for chat %s", head, message.chat_id)
+        success_log = lambda: log.info(
+            "admin command %r applied for chat %s", head, message.chat_id)
+        if after_commit is None:
+            success_log()
+        else:
+            after_commit.append(success_log)
         return True
 
     def pause(self) -> None:

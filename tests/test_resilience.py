@@ -122,6 +122,72 @@ def test_poll_once_survives_a_failing_turn(store, config, transport, clock,
     run(body())
 
 
+def test_poll_batch_rolls_back_input_and_cursor_on_ingest_failure(
+    store, config, transport, clock, system_prompt, caplog
+) -> None:
+    bot, _ = make_bot(store, config, transport, clock, system_prompt)
+    transport.updates = [[
+        topic_update(51, 501, 11, "/pause"),
+        topic_update(52, 502, 11, "second"),
+    ]]
+    original = bot._ingest
+    calls = 0
+
+    def fail_second(update, tick, *, after_commit=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated ingest failure")
+        return original(update, tick, after_commit=after_commit)
+
+    bot._ingest = fail_second
+
+    async def body() -> None:
+        await bot.start()
+        with pytest.raises(RuntimeError, match="simulated ingest failure"):
+            await bot.poll_once(offset=50, background=True)
+        assert store.has_update(51) is False
+        assert store.has_update(52) is False
+        assert store.get_update_cursor() is None
+        messages = [record.getMessage() for record in caplog.records]
+        assert not any(message.startswith("stored ") for message in messages)
+        assert not any("admin command 'pause' applied" in message for message in messages)
+        await bot.stop()
+
+    run(body())
+
+
+def test_poll_batch_distinguishes_message_edit_from_duplicate_update_id(
+    store, config, transport, clock, system_prompt
+) -> None:
+    bot, _ = make_bot(store, config, transport, clock, system_prompt)
+    transport.updates = [[
+        topic_update(61, 601, 11, "original"),
+        topic_update(62, 601, 11, "edited"),
+        topic_update(62, 602, 11, "must be duplicate"),
+    ]]
+
+    async def body() -> None:
+        await bot.start()
+        offset, tick = await bot.poll_once(offset=61, background=True)
+        assert offset == 63
+        assert tick.messages_stored == 1
+        assert tick.duplicates == 2
+        assert store.has_update(61)
+        assert store.has_update(62)
+        events = store._query(
+            "SELECT update_id, kind, payload_json FROM observation_events ORDER BY sequence"
+        )
+        assert [(row["update_id"], row["kind"]) for row in events] == [
+            (61, "message"), (62, "message_edit")
+        ]
+        assert '"text": "edited"' in events[1]["payload_json"]
+        assert store.get_update_cursor() == 63
+        await bot.stop()
+
+    run(body())
+
+
 def test_poll_once_survives_a_transport_failure(store, config, clock,
                                                 system_prompt) -> None:
     class FlakyTransport(FakeTransport):
