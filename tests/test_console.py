@@ -18,8 +18,8 @@ from app.config import AppConfig
 from app.console import Console, LiveFeed, parse_scope
 from app.store import Store, StoredMessage
 
-GROUP = -1004402809405
-DM = 8283457993
+GROUP = -1001234567890
+DM = 123456789
 
 
 class FakeBot:
@@ -55,7 +55,7 @@ def seed(store, *, chat_id, topic_id=None, count=3, text="消息", age=60.0):
                 "INSERT INTO observation_events (sequence, update_id, chat_id, topic_id,"
                 " kind, received_at, payload_json) VALUES (?, ?, ?, ?, 'message', ?, ?)",
                 (sequence, sequence, chat_id, topic_id, now - age,
-                 json.dumps({"text": f"{text}{index}", "sender_label": "林",
+                 json.dumps({"text": f"{text}{index}", "sender_label": "test_user",
                              "created_at": now - age}, ensure_ascii=False)),
             )
     return now
@@ -87,9 +87,9 @@ def output(console, line):
 
 
 def test_parse_scope_reads_the_rendered_label():
-    assert parse_scope("stored chat:-1004402809405(supergroup) message_id=1") == \
+    assert parse_scope("stored chat:-1001234567890(supergroup) message_id=1") == \
         (GROUP, None, "supergroup")
-    assert parse_scope("chat:8283457993(private)/topic:7 pending=1") == \
+    assert parse_scope("chat:123456789(private)/topic:7 pending=1") == \
         (DM, 7, "private")
     assert parse_scope("no scope in this line") is None
 
@@ -122,11 +122,11 @@ def test_status_and_chats_report_both_conversations():
         console, _, _ = make(store)
         text = output(console, "status")
         assert "status: pending=4" in text
-        assert "chat:-1004402809405(supergroup)" in text
-        assert "chat:8283457993(private)" in text
+        assert "chat:-1001234567890(supergroup)" in text
+        assert "chat:123456789(private)" in text
 
         chats = output(console, "chats")
-        assert "chat:8283457993(private) pending=0" in chats
+        assert "chat:123456789(private) pending=0" in chats
     finally:
         store.close()
 
@@ -139,7 +139,7 @@ def test_queue_shows_oldest_pending_with_age_and_sender():
         text = output(console, "queue 5")
         assert "seq=1" in text and "seq=2" in text
         assert "2m" in text
-        assert "林" in text
+        assert "test_user" in text
         assert "在吗0" in text
     finally:
         store.close()

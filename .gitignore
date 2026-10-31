@@ -26,3 +26,8 @@ htmlcov/
 
 # Runtime workspaces created by a live run
 chat_*/
+
+# Local production config and historical chat replay artifacts
+config.fox.toml
+docs/evaluations/paired-replay-*.json
+docs/evaluations/historical-replay-*.json

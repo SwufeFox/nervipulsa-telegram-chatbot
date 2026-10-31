@@ -10,10 +10,10 @@ from app.store import Store
 
 
 def test_scope_label_marks_chat_kind_and_topic():
-    assert logwatch.scope(8283457993) == "chat:8283457993(dm)"
-    assert logwatch.scope(-1004402809405) == "chat:-1004402809405(group)"
-    assert logwatch.scope(-1004402809405, None, "supergroup") == \
-        "chat:-1004402809405(supergroup)"
+    assert logwatch.scope(123456789) == "chat:123456789(dm)"
+    assert logwatch.scope(-1001234567890) == "chat:-1001234567890(group)"
+    assert logwatch.scope(-1001234567890, None, "supergroup") == \
+        "chat:-1001234567890(supergroup)"
     assert logwatch.scope(-100, 7) == "chat:-100(group)/topic:7"
 
 
