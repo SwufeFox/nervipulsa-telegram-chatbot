@@ -71,16 +71,73 @@
 
 ## 2026-10-30 历史配对回放
 
-[三轮配对报告](evaluations/paired-replay-20261030-204810.json)使用生产 profile 和 limits，重放群聊序号 `625–641` 的 17 条消息。每组每轮都处理 17 条输入、完成 3 个 workflow、发送 1 条并沉默 2 次；数据库也确认六组 workflow 全部为 `completed`，续接组的 3 个 episode 均正常关闭。报告保留了六条原始回复和每轮耗时、token、缓存数据。
+使用生产 profile 和 limits 对近期历史群聊窗口做了三轮配对模拟。每组处理 17 条输入并完成 3 个 workflow，最终各发送 1 条、沉默 2 次；数据库确认六组 workflow 均为 `completed`，续接组的 3 个 episode 正常关闭。逐条报告含历史群聊原文，只保留在本机，不纳入版本控制。
 
-第一次 60 条窗口尝试中，plain 组遇到 `response_unknown` 后暂停，只完成 4 次激活；续接组完成 10 次。两组都没有发送、goal 或 wait，激活数也不匹配，因此[初次报告](evaluations/paired-replay-20261030-194337.json)只作为失败记录留档，不用于比较。
+第一次 60 条窗口尝试中，plain 组遇到 `response_unknown` 后暂停，只完成 4 次激活；续接组完成 10 次。两组都没有发送、goal 或 wait，激活数也不匹配，因此不用于比较。
 
-这个历史窗口没有设置 goal、等待事件或触发 continuation，两组 continuation 数均为 0。因此它只能说明在这个普通群聊窗口中，episode 开关没有改变激活与发送次数，不能验证跨激活续接是否有效。每轮报告的缓存 token 都是 10,835，缺失或未知计数为 0。三组配对耗时差分别为 +0.08、+1.50、+2.92 秒；波动大于首轮差异，且续接机制未被触发，不能把平均 +1.50 秒归因于续接。
+这个窗口没有设置 goal、等待事件或触发 continuation，不能验证跨激活续接。每轮报告的缓存 token 都是 10,835，缺失或未知计数为 0。三组配对耗时差分别为 +0.08、+1.50、+2.92 秒；波动大于首轮差异，且续接机制未被触发，不能把平均 +1.50 秒归因于续接。
 
-六条回复都是单条短句，但措辞随运行变化；这组小样本不用于估计自然度或主动插话质量。对已筛选的 2,746 条群聊消息，尚未找到包含明确“等我补充/回复后继续”义务且适合配对测试的真实窗口，所以续接效果仍待有效样本。
+对筛选过的 2,746 条历史消息，尚未找到包含明确“等我补充/回复后继续”义务且适合配对测试的窗口，所以续接效果仍待有效样本。
 
 ### 生产群记录补查
 
-只读核对本机群聊数据库时，发现 6 条雾栖发送 action：1 条送达、5 条在发送前因 `needs_refresh: unobserved events` 取消。唯一送达的回复是 2026-10-28 23:08:50 的简短拼写纠正“少了个 i”；群友 6 秒后发了 ✅。这是一个真实行为样本，不等同于人工自然度评分，也不足以估计成功率。5 条取消都表示未发送；样本量太小，暂不据此判断 stale 检查是否过严。
+只读检查本机记录时发现 6 条雾栖发送 action：1 条送达、5 条因 `needs_refresh: unobserved events` 在发送前取消。当前群记录没有 `agent_intents` 或 `agent_waits`，因此不能证明跨 activation 的 goal/wait/continuation。另有一条未完成 workflow 和 open episode；启动恢复会将遗留 workflow 标记为 `interrupted_by_restart`，并关闭不再欠工作量的 episode。检查时本机没有 bot 进程；这不能确定远端部署状态。原始消息、时间与序号细节不纳入版本控制。
 
-该群的 `agent_intents` 和 `agent_waits` 都是 0；这条送达 action 也没有关联 intent。因此，生产记录同样没有证明跨 activation 的 goal/wait/continuation。数据库还留有一条创建于 2026-10-29 20:41:59 的 `running` workflow（序号 864–887）及其 open episode，没有对应 wait 或 intent；启动恢复会把遗留 workflow 标为 `interrupted_by_restart`，随后关闭不再欠工作量的 episode。检查时本机没有 bot 进程，远端部署状态无法从这份本地数据库判断。
+## 2026-10-30 历史数据 + 真实模型吞吐回放
+
+对本机历史群聊数据库做只读回放，取近期 36 条消息；使用 `config.fox.toml` 的模型 `opencode-go/muse-spark-1.3-contributor` 和生产 profile（哈希 `2e7d5ba2b4bb`）。每组输入按固定 6 条一批触发一次自治激活；两组状态库隔离，Telegram transport 只录制发送，不连接 Telegram。媒体仅保留引用，不下载。
+
+| 回放组 | 输入 | 完成激活 | 总耗时 | 入站速率 | 录制回复 | 缓存 prompt tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| plain | 36 | 6 | 13.76 s | 2.62 条/s | 0 | 25,397 / 34,844（72.9%） |
+| continuation | 36 | 6 | 15.47 s | 2.33 条/s | 1 | 29,350 / 35,667（82.3%） |
+
+两组各 6 个 workflow 全部完成，没有 failed/deferred，36 条输入均进入回放。模型报告的 completion tokens 分别为 1,315 和 1,719，按整轮墙钟折算约 95.6 / 111.1 tokens/s（含 reasoning token；耗时也包含 bot 启停和本地存储）。continuation 组的一条回复事实正确，但与前文信息重复、增量偏低；plain 组保持沉默。
+
+两组的 `goals_set`、`waits`、`continuations` 都是 0，因此这次不能检验跨激活续接；0 vs 1 条回复只是单次模型输出差异，不能归因于 episode 机制。2.33–2.62 条/s 是固定批次、顺序回放的本地端到端速率，包含真实 Magpie 调用，不含 Telegram 网络和生产调度等待；每组只跑一轮，不能作为稳定生产容量承诺。逐条输入和回复报告含历史群聊原文，只保留在本机，不纳入版本控制。
+
+缓存比例按 provider 报告的 cached prompt tokens / prompt tokens 计算；它反映输入前缀复用，不代表整个响应延迟或费用按同一比例下降。两臂还存在顺序混杂：脚本先跑 plain，再用同一个 Magpie endpoint 跑 continuation，网关缓存可能跨臂预热。因此 72.9% 与 82.3% 是本次观察值，不能据此认为 continuation 提升了缓存命中。
+
+### 2026-10-30 256 条真实模型历史回放
+
+单臂使用生产 continuation 路径，对本机最新 256 条历史消息观测按每批 6 条顺序触发 43 次真实模型激活。历史库只读；34 条媒体只传引用；Telegram 发送进入记录 transport，没有真实发送。43 个 workflow 全部完成，0 个 usage 缺失。
+
+| 输入 | 完成激活 | 总耗时 | 入站速率 | 模拟发送 / 沉默 | 缓存 prompt tokens |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 43 | 188.06 s | 1.36 条/s | 9 / 34 | 901,258 / 951,421（94.7%） |
+
+每次 `autonomous_step` 的中位耗时 3.67 s，p95 为 7.17 s，最大 10.24 s；provider 报告 26,759 completion tokens，按整轮墙钟折算 142.3 tokens/s（包含 reasoning token、启动和存储耗时）。未缓存输入为 50,163 tokens。此次只跑一臂，避免两组互相预热，但没有清空 Magpie 既有缓存，因此 94.7% 不是冷缓存数据。
+
+抽样评阅显示身份回答透明、一次追问有推进作用，也有一条在群友已回应后才补充的低增量回复。总体 43 次里 34 次保持沉默，9 次开口；这是固定批次的历史回放，不能直接推算生产打扰率。此轮仍没有 goal、wait 或 continuation，不能验证跨激活续接。逐条输入和回复报告含历史群聊原文，只保留在本机，不纳入版本控制。
+
+
+## 2026-10-31 缓存命中与模型请求延迟
+
+为确认 cached prompt tokens 是否让模型请求更快，用同一 Magpie 模型和约 15.6k-token 合成提示词做随机配对：warm 组重复完全相同的请求，unique-prefix 组每次只更换等长前缀；provider 计数确认 warm 每次缓存 15,217 / 15,659 tokens（97.2%），unique-prefix 每次为 0。输出上限从 32 降到 8 tokens 再复测，以压低生成长度差异。
+
+| 输出上限 | 配对数 | warm 中位耗时 | unique-prefix 中位耗时 | 配对节省中位数 | warm 更快 | 配对检验 |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 32 tokens | 12 | 2.91 s | 2.57 s | -0.375 s（-14.47%） | 3 / 12 | 双侧 sign test p=0.146；完成 token 中位绝对差 5 |
+| 8 tokens | 16 | 3.50 s | 3.25 s | -0.257 s（-8.18%） | 6 / 16 | 双侧 sign test p=0.454；95% bootstrap CI [-0.729, 0.093]；完成 token 中位绝对差 0 |
+
+两轮都没有显示缓存组更快；第二轮在命中已验证、输出长度差异压低后，缓存组的中位请求耗时仍略高，差异也不显著。完整请求时间包含 Magpie 网关、模型生成和返回过程，不能拆成纯 prefill 时间。报告保留逐请求耗时、token 用量和请求摘要，不保留提示词或鉴权值：[32-token 配对报告](evaluations/cache-speed-ab-20261030T160614Z-d11569cd.json)、[8-token 配对报告](evaluations/cache-speed-ab-20261030T160915Z-1d6ca024.json)；可复现实验脚本为 [`cache_speed_ab.py`](../experiments/cache_speed_ab.py)。
+
+因此，256 条真实历史回放中的 94.7% 缓存比例只证明 provider 报告了大量前缀复用，不能据此声称端到端变快。此前 20 次短提示突发探针的缓存都命中，但没有未命中对照；另有一次同请求复放从 13.16 s 变为 6.79 / 11.62 s，只有一个请求体和两次复放，波动较大。这些历史样本不足以推翻本轮配对结果，也不足以证明缓存带来稳定延迟收益。
+
+应用写入路径是另一件事：此前 Store 微基准在 300 条新消息、9 次交替测量中，中位耗时从 13.923 ms 降到 12.226 ms（快 12.2%），但只覆盖 SQLite Store 写入，不等于完整 bot 或真实模型回复变快。256 条真实模型回放的 1.36 条/s 没有同输入旧版本基线，不能单独证明整体吞吐提升。
+
+## 2026-10-31 真实模型续接与重复发送自测
+
+使用生产 `config.fox.toml`、完整 `GroupAgent + Nervipulsa Runtime` 路径和真实 Magpie 模型，Telegram transport 只录制发送，没有向群里发消息。续接场景要求雾栖等 Alice 提供 staging CronJob YAML，再报告 `spec.timeZone`。
+
+续接探针 v5 共 5 次模型调用：雾栖保存目标并等待；Bob 的普通消息匹配了 `message` 事件，模型没有作答而是重新等待；Alice 发来 YAML 后，新 wait 满足，雾栖在同一 episode 回复“嗯，staging 这个是 Asia/Shanghai”，intent 随送达关闭。见[续接自测 v5](evaluations/continuation-selfplay-20261031-fox-v5.json)。
+
+随后收紧探针，要求核对具体事件序号、正确答案、只发送一次，并检查 intent 是否跨过中间消息。v6 证明了 wait-only 路径，但没有创建 `agent_intent`，不足以证明 intent 续接；v7 则暴露探针的另一种误判：模型保留了 open intent，Bob 后安静结束，Alice 的普通消息随后触发同一 episode 继续处理，但旧断言错误地要求 Bob 后必须重新注册 wait。修正后的[v8 续接自测](evaluations/continuation-selfplay-20261031-fox-v8.json)通过：3 次模型调用，intent 在第一次激活后创建、Bob 后仍 open，Alice 的事件序号进入第三次激活，随后只发送一条包含 `Asia/Shanghai` 的回复，intent 在 episode `delivered` 后关闭。该次模型没有注册 event wait；持久 intent 已足以承接目标。
+
+这些运行验证了跨激活续接和模型对 Bob 内容的语义判断，没有验证 Alice 专属的硬过滤。若存在 event wait，它目前只按事件种类匹配；即使没有 event wait，普通群消息也会唤醒 agent，因此 Bob 仍会消耗一次模型调用。完全避免非目标发送者唤醒需要结构化发送者条件，并明确 Telegram observation 与持久 wait 的字段契约。
+
+简化续接规则后的自然度回归使用同一生产模型，9 次调用、0 次模型失败，8 项确定性检查全部通过；`multiple_send_cases` 为空。闲聊和已获回答的问题保持沉默；感谢、配置追问、上下文追问、纠错、信息不足追问和身份回答均各录到一条消息。身份场景明确回答“机器人，披着狐狸皮的那种”。具体输出见[自然度复测](evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-2156-simplified.json)。随后独立重跑同一场景集，8 次模型调用、0 次失败、8 项检查仍全部通过；重复发送仍为 0，配置问题和 follow-up 各输出一条回复，见[自然度重复复测](evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-final-repeat.json)。人工语气审阅仍需按报告中的问题逐条完成，自动门槛不能代替它。
+
+两次先前复测（`2131` 与旧 prompt 对照 `baseline-2145`）都复现了 `unknown_config` 场景的完全重复发送。现在 `_ActionHandler` 在同一激活内对相同文本、回复目标和待关闭 intent 复用已暂存 action；回归测试同时确认不同 `reply_to` 仍分别发送。另修正了仅设置 intent 被记为 `undecided` 的审计分类，并在 `wait_for_event` schema 中写清 Telegram 的 `message` / `message_edit` 事件种类。短 prompt 下，unknown-config 和 follow-up 场景恢复为各一条回复。
+
+本轮验证：`python -m pytest -vv --tb=short` 全量 **440 passed in 112.42 s**；修改模块通过 `py_compile`，`git diff --check` 无空白错误。全量测试只验证确定性回归；模型自然度结果仍受单次生成波动影响。

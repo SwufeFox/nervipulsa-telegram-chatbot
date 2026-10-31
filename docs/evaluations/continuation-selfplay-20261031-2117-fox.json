@@ -1,0 +1,98 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "2e7d5ba2b4bb",
+  "telegram_transport": "recording_only",
+  "first_workflow": [
+    {
+      "state": "completed",
+      "outcome": "undecided",
+      "actions": [],
+      "waits": []
+    }
+  ],
+  "intent_after_first": {
+    "intent_id": "int_d6e2f9e2720f4ebe",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，贴出来后告诉她 spec.timeZone 的值。现在先不回答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_first": [],
+  "sends_after_first": [],
+  "second_workflow": [
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_bb18eb3f5caa412e"
+      ],
+      "waits": [],
+      "episode_id": "ep_310cccd304894b68"
+    }
+  ],
+  "intent_after_second": null,
+  "waits_after_second": [],
+  "workflows": [
+    {
+      "workflow_id": "wf_a4e2b66b49e64b1e",
+      "episode_id": "ep_310cccd304894b68",
+      "state": "completed",
+      "outcome": "undecided"
+    },
+    {
+      "workflow_id": "wf_8754d0332d1f41d8",
+      "episode_id": "ep_310cccd304894b68",
+      "state": "completed",
+      "outcome": "speak"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "ep_310cccd304894b68",
+      "state": "closed",
+      "reason": "delivered",
+      "intent_id": "int_d6e2f9e2720f4ebe"
+    }
+  ],
+  "same_episode_continued": true,
+  "rendered_turns": [
+    {
+      "open_intent": null,
+      "episode_continuation": false
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_d6e2f9e2720f4ebe",
+        "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，贴出来后告诉她 spec.timeZone 的值。现在先不回答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "episode_continuation": true
+    }
+  ],
+  "all_sends": [
+    "bob 贴的这份里 spec.timeZone 是 Asia/Shanghai"
+  ],
+  "activations": [
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "set_intent"
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "send_message"
+      ]
+    }
+  ],
+  "model_calls": 2
+}

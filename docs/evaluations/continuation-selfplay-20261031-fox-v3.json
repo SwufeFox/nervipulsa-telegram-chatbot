@@ -1,0 +1,162 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "9c534c22bcc4",
+  "telegram_transport": "recording_only",
+  "first_workflow": [
+    {
+      "state": "completed",
+      "outcome": "undecided",
+      "actions": [],
+      "waits": []
+    }
+  ],
+  "intent_after_first": {
+    "intent_id": "int_7f0b214bb7e943f7",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone 的值；现在先不回答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_first": [],
+  "sends_after_first": [],
+  "second_workflow": [
+    {
+      "state": "completed",
+      "outcome": "waiting",
+      "actions": [],
+      "waits": [
+        "wait_1af5f36106214f06"
+      ],
+      "episode_id": "ep_0f40b8205e05412b"
+    }
+  ],
+  "intent_after_second": {
+    "intent_id": "int_7f0b214bb7e943f7",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone 的值；现在先不回答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_second": [
+    {
+      "wait_id": "wait_1af5f36106214f06",
+      "kind": "event",
+      "purpose": "等 alice(111111)贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone；bob的参考不是alice的YAML，继续等。",
+      "event_types_json": "[\"runtime.observation\"]",
+      "status": "active"
+    }
+  ],
+  "sends_after_second": [],
+  "third_workflow": [
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_ceee58055f51462a"
+      ],
+      "waits": [],
+      "episode_id": "ep_0f40b8205e05412b"
+    }
+  ],
+  "intent_after_third": null,
+  "waits_after_third": [
+    {
+      "wait_id": "wait_1af5f36106214f06",
+      "kind": "event",
+      "purpose": "等 alice(111111)贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone；bob的参考不是alice的YAML，继续等。",
+      "event_types_json": "[\"runtime.observation\"]",
+      "status": "active"
+    }
+  ],
+  "workflows": [
+    {
+      "workflow_id": "wf_509e9a545d8044cf",
+      "episode_id": "ep_0f40b8205e05412b",
+      "state": "completed",
+      "outcome": "undecided"
+    },
+    {
+      "workflow_id": "wf_9dc54675b9ad421b",
+      "episode_id": "ep_0f40b8205e05412b",
+      "state": "completed",
+      "outcome": "waiting"
+    },
+    {
+      "workflow_id": "wf_ee075b1ccbc840b9",
+      "episode_id": "ep_0f40b8205e05412b",
+      "state": "completed",
+      "outcome": "speak"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "ep_0f40b8205e05412b",
+      "state": "open",
+      "reason": null,
+      "intent_id": "int_7f0b214bb7e943f7"
+    }
+  ],
+  "same_episode_continued": true,
+  "continuation_completed": false,
+  "rendered_turns": [
+    {
+      "open_intent": null,
+      "episode_continuation": false
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_7f0b214bb7e943f7",
+        "goal": "等 alice 贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone 的值；现在先不回答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "episode_continuation": true
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_7f0b214bb7e943f7",
+        "goal": "等 alice 贴出 staging CronJob 的 YAML，再告诉她 spec.timeZone 的值；现在先不回答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "episode_continuation": true
+    }
+  ],
+  "all_sends": [
+    "staging 那个是 Asia/Shanghai。"
+  ],
+  "activations": [
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "set_intent"
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "wait_for_event"
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "send_message"
+      ]
+    }
+  ],
+  "model_calls": 3
+}

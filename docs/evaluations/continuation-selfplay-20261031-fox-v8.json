@@ -1,0 +1,188 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "acddec0686ab",
+  "telegram_transport": "recording_only",
+  "first_workflow": [
+    {
+      "state": "completed",
+      "outcome": "noted",
+      "actions": [],
+      "waits": []
+    }
+  ],
+  "intent_after_first": {
+    "intent_id": "int_9531308f01154eb2",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 把 staging CronJob 的 YAML 贴出来，再看 spec.timeZone 的值回复她；现在先不答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_first": [],
+  "sends_after_first": [],
+  "second_workflow": [
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_12d170f7615a439b"
+    }
+  ],
+  "intent_after_second": {
+    "intent_id": "int_9531308f01154eb2",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 把 staging CronJob 的 YAML 贴出来，再看 spec.timeZone 的值回复她；现在先不答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_second": [],
+  "sends_after_second": [],
+  "third_workflow": [
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_4a627ba73d9f4d4c"
+      ],
+      "waits": [],
+      "episode_id": "ep_12d170f7615a439b"
+    }
+  ],
+  "intent_after_third": null,
+  "waits_after_third": [],
+  "workflows": [
+    {
+      "workflow_id": "wf_6d0d11430bed439b",
+      "episode_id": "ep_12d170f7615a439b",
+      "state": "completed",
+      "outcome": "noted"
+    },
+    {
+      "workflow_id": "wf_4fd743d11758457d",
+      "episode_id": "ep_12d170f7615a439b",
+      "state": "completed",
+      "outcome": "silent"
+    },
+    {
+      "workflow_id": "wf_1bbdcf1634c74f36",
+      "episode_id": "ep_12d170f7615a439b",
+      "state": "completed",
+      "outcome": "speak"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "ep_12d170f7615a439b",
+      "state": "closed",
+      "reason": "delivered",
+      "intent_id": "int_9531308f01154eb2"
+    }
+  ],
+  "same_episode_continued": true,
+  "intent_persisted_after_first": true,
+  "open_intent_after_bob": true,
+  "new_wait_ids_after_bob": [],
+  "bob_event_sequence": 2,
+  "alice_event_sequence": 3,
+  "alice_matched_wait_ids": [],
+  "wait_satisfied_after_alice": false,
+  "alice_event_in_third_turn": true,
+  "intent_closed_after_delivery": true,
+  "no_premature_send_after_bob": true,
+  "single_final_send": true,
+  "answer_is_correct": true,
+  "continuation_completed": true,
+  "rendered_turns": [
+    {
+      "open_intent": null,
+      "observation_sequences": [
+        1
+      ],
+      "active_waits": [],
+      "matched_waits": [],
+      "episode_continuation": false
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_9531308f01154eb2",
+        "goal": "等 alice 把 staging CronJob 的 YAML 贴出来，再看 spec.timeZone 的值回复她；现在先不答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "observation_sequences": [
+        2
+      ],
+      "active_waits": [],
+      "matched_waits": [],
+      "episode_continuation": true
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_9531308f01154eb2",
+        "goal": "等 alice 把 staging CronJob 的 YAML 贴出来，再看 spec.timeZone 的值回复她；现在先不答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "observation_sequences": [
+        3
+      ],
+      "active_waits": [],
+      "matched_waits": [],
+      "episode_continuation": true
+    }
+  ],
+  "all_sends": [
+    "staging 这个是 Asia/Shanghai"
+  ],
+  "activations": [
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "set_intent",
+          "arguments": {
+            "goal": "等 alice 把 staging CronJob 的 YAML 贴出来，再看 spec.timeZone 的值回复她；现在先不答。"
+          }
+        }
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "finish_silently",
+          "arguments": {
+            "reason": "等 alice 的 staging YAML，bob 的参考不是目标，继续等待不发言"
+          }
+        }
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "send_message",
+          "arguments": {
+            "reply_to": 942,
+            "resolves_intent": true,
+            "text": "staging 这个是 Asia/Shanghai"
+          }
+        }
+      ]
+    }
+  ],
+  "model_calls": 3
+}

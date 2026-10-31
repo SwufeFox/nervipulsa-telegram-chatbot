@@ -1,0 +1,202 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "9c534c22bcc4",
+  "telegram_transport": "recording_only",
+  "first_workflow": [
+    {
+      "state": "completed",
+      "outcome": "noted",
+      "actions": [],
+      "waits": []
+    }
+  ],
+  "intent_after_first": {
+    "intent_id": "int_cc5cd13d2e504097",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，然后告诉她 spec.timeZone 的值；现在暂不回答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_first": [],
+  "sends_after_first": [],
+  "second_workflow": [
+    {
+      "state": "completed",
+      "outcome": "waiting",
+      "actions": [],
+      "waits": [
+        "wait_076eb523f7234a97"
+      ],
+      "episode_id": "ep_f2984f2be5454f79"
+    }
+  ],
+  "intent_after_second": {
+    "intent_id": "int_cc5cd13d2e504097",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，然后告诉她 spec.timeZone 的值；现在暂不回答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_second": [
+    {
+      "wait_id": "wait_076eb523f7234a97",
+      "kind": "event",
+      "purpose": "等 alice 贴出 staging CronJob YAML 后再回 spec.timeZone",
+      "event_types_json": "[\"message\", \"message_edit\"]",
+      "status": "active"
+    }
+  ],
+  "sends_after_second": [],
+  "third_workflow": [
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_0c58206cf5c0418c"
+      ],
+      "waits": [],
+      "episode_id": "ep_f2984f2be5454f79"
+    }
+  ],
+  "intent_after_third": null,
+  "waits_after_third": [
+    {
+      "wait_id": "wait_076eb523f7234a97",
+      "kind": "event",
+      "purpose": "等 alice 贴出 staging CronJob YAML 后再回 spec.timeZone",
+      "event_types_json": "[\"message\", \"message_edit\"]",
+      "status": "satisfied"
+    }
+  ],
+  "workflows": [
+    {
+      "workflow_id": "wf_8d5713c88fe64299",
+      "episode_id": "ep_f2984f2be5454f79",
+      "state": "completed",
+      "outcome": "noted"
+    },
+    {
+      "workflow_id": "wf_0f4e393ff38d469a",
+      "episode_id": "ep_f2984f2be5454f79",
+      "state": "completed",
+      "outcome": "waiting"
+    },
+    {
+      "workflow_id": "wf_ea7d7694aa50477f",
+      "episode_id": "ep_f2984f2be5454f79",
+      "state": "completed",
+      "outcome": "speak"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "ep_f2984f2be5454f79",
+      "state": "closed",
+      "reason": "delivered",
+      "intent_id": "int_cc5cd13d2e504097"
+    }
+  ],
+  "same_episode_continued": true,
+  "continuation_completed": true,
+  "rendered_turns": [
+    {
+      "open_intent": null,
+      "active_waits": [],
+      "matched_waits": [],
+      "episode_continuation": false
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_cc5cd13d2e504097",
+        "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，然后告诉她 spec.timeZone 的值；现在暂不回答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "active_waits": [],
+      "matched_waits": [],
+      "episode_continuation": true
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_cc5cd13d2e504097",
+        "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，然后告诉她 spec.timeZone 的值；现在暂不回答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "active_waits": [
+        {
+          "wait_id": "wait_076eb523f7234a97",
+          "kind": "event",
+          "purpose": "等 alice 贴出 staging CronJob YAML 后再回 spec.timeZone"
+        }
+      ],
+      "matched_waits": [
+        {
+          "wait_id": "wait_076eb523f7234a97",
+          "purpose": "等 alice 贴出 staging CronJob YAML 后再回 spec.timeZone",
+          "wait_kind": "event",
+          "event_kind": "message",
+          "event_sequence": 3
+        }
+      ],
+      "episode_continuation": true
+    }
+  ],
+  "all_sends": [
+    "staging 这份是 Asia/Shanghai"
+  ],
+  "activations": [
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "set_intent",
+          "arguments": {
+            "goal": "等 alice 贴出 staging 环境 CronJob 的 YAML，然后告诉她 spec.timeZone 的值；现在暂不回答。"
+          }
+        }
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "wait_for_event",
+          "arguments": {
+            "event_types": [
+              "message",
+              "message_edit"
+            ],
+            "purpose": "等 alice 贴出 staging CronJob YAML 后再回 spec.timeZone"
+          }
+        }
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        {
+          "name": "send_message",
+          "arguments": {
+            "resolves_intent": true,
+            "text": "staging 这份是 Asia/Shanghai"
+          }
+        }
+      ]
+    }
+  ],
+  "model_calls": 3
+}

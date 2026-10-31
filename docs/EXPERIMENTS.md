@@ -678,3 +678,81 @@ Nothing else in Core was modified. The other seven gaps are documented with
 evidence and left open, because each has a correct application-side workaround and
 the brief is explicit about not extending the framework without a failure that the
 workaround cannot cover.
+
+---
+
+## E10 — 2026-10-31 continuation and naturalness self-play
+
+The target was cross-activation continuation through the production app path, plus
+repeat checks for accidental duplicate sends. Tests use the local app store and a
+recording Telegram transport; real-model runs use `config.fox.toml` and the Magpie
+OpenAI-compatible endpoint. Nothing was sent to Telegram.
+
+### Deterministic fixes and regression coverage
+
+- `wait_for_event` now describes the actual Telegram event kinds (`message` and
+  `message_edit`) and warns that `runtime.observation` is a wrapper label.
+- An activation that only sets or resolves an intent is recorded as `noted`, rather
+  than an undecided skip.
+- Repeated `send_message` calls with the same normalized text, `reply_to`, and intent
+  reuse the first staged action. Different reply targets remain separate sends.
+- The introduction prompt keeps a short rule to check new messages and the open
+  intent after waking. A longer state-tool ending rule had caused a real-model run to
+  record state without producing a reply; simplifying it restored replies.
+
+Targeted regression tests: **34 passed in 5.20s**. Full application suite:
+`python -m pytest -vv --tb=short` → **440 passed in 112.42s**. Modified Python modules
+also passed `py_compile`; `git diff --check` reported no whitespace errors.
+
+### Real-model continuation probe
+
+`experiments/autonomous_wait_probe.py` ran the production `GroupAgent + Nervipulsa
+Runtime` path for a three-message scenario: the bot is asked to wait for Alice's
+staging CronJob YAML, Bob sends an intervening message, then Alice supplies the YAML.
+The v5 run used five model calls: it saved an intent, waited, re-waited after Bob,
+and answered after Alice. Its recorded event sequence shows the second wait matched
+Alice's message, with one correct send and the episode closed as `delivered`.
+
+Reviewing that report exposed a weak probe predicate: it required only any satisfied
+wait and any send. v6 showed a wait-only continuation without `agent_intent`, so it
+was not evidence for the intent path. The first stricter v7 predicate then rejected a
+valid model choice because it required a newly registered wait after Bob; the model
+had kept its open intent, finished silently, and continued when Alice's normal message
+arrived. The probe now checks the durable intent directly and records input event
+sequences, answer content, premature sends, and final send count.
+
+The v8 run passes those checks in **three model calls**: `set_intent` records the goal;
+Bob's message wakes the same episode and the model stays silent while the intent stays
+open; Alice's event appears in the next activation, which sends exactly one reply
+containing `Asia/Shanghai`. The intent is closed only with the episode's recorded
+`delivered` outcome. See `docs/evaluations/continuation-selfplay-20261031-fox-v8.json`.
+
+This establishes intent and episode continuation for this scenario. It does not prove
+an Alice-only wake filter: v8 had no active event wait after intent creation, yet Bob's
+ordinary group message still caused an activation. Event waits also match event kinds,
+while sender conditions remain in natural-language intent/purpose and are evaluated
+by the model. Avoiding that model call requires a structured sender condition on the
+ordinary observation path as well as a persisted wait contract; this remains a
+separate, currently unimplemented optimization.
+
+### Naturalness and duplicate-send results
+
+Two earlier real-model runs (the `2131` run and `baseline-2145`) produced duplicate
+identical messages in `unknown_config`. The new same-activation guard removed those
+repeats. The `2150-dedup` run then exposed a separate prompt issue: `unknown_config`
+and `followup` were silent. After simplifying the wake rule, the `2156-simplified`
+run passed all eight deterministic checks with nine model calls, zero model failures,
+and no `multiple_send_cases`. An independent repeat passed the same checks with eight
+calls; both cases again produced one message each. Reports:
+
+- `docs/evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-2131.json`
+- `docs/evaluations/human-naturalness-muse-spark-2026-10-31-baseline-2145.json`
+- `docs/evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-2150-dedup.json`
+- `docs/evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-2156-simplified.json`
+- `docs/evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-final-repeat.json`
+
+The six report-listed human-review questions remain open. Automated checks establish
+silence, identity transparency, usable replies, and absence of duplicate sends for
+these runs; they do not establish general conversational naturalness. The scenario
+also does not measure production Telegram delivery, long-term memory quality, or
+steady-state throughput.

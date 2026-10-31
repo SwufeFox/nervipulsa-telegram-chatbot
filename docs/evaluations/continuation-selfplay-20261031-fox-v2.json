@@ -1,0 +1,115 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "f2b7cf68e3b9",
+  "telegram_transport": "recording_only",
+  "first_workflow": [
+    {
+      "state": "completed",
+      "outcome": "undecided",
+      "actions": [],
+      "waits": []
+    }
+  ],
+  "intent_after_first": {
+    "intent_id": "int_39046d689ff94154",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 在群里贴出 staging CronJob 的 YAML，看到后告诉她 spec.timeZone 的值。现在按她说的先不答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_first": [],
+  "sends_after_first": [],
+  "second_workflow": [
+    {
+      "state": "completed",
+      "outcome": "waiting",
+      "actions": [],
+      "waits": [
+        "wait_b1c5691ddcaa42b9"
+      ],
+      "episode_id": "ep_a0e9eb6151a048f7"
+    }
+  ],
+  "intent_after_second": {
+    "intent_id": "int_39046d689ff94154",
+    "chat_id": -1001234567890,
+    "topic_id": null,
+    "goal": "等 alice 在群里贴出 staging CronJob 的 YAML，看到后告诉她 spec.timeZone 的值。现在按她说的先不答。",
+    "status": "open",
+    "created_at": 1700000005.0,
+    "updated_at": 1700000005.0,
+    "expires_at": null,
+    "resolved_by": null,
+    "resolved_at": null
+  },
+  "waits_after_second": [
+    {
+      "wait_id": "wait_b1c5691ddcaa42b9",
+      "kind": "event",
+      "purpose": "等 alice 本人贴出 staging CronJob 的 YAML，再回复 spec.timeZone；bob 的消息不算",
+      "event_types_json": "[\"runtime.observation\"]",
+      "status": "active"
+    }
+  ],
+  "workflows": [
+    {
+      "workflow_id": "wf_a1650cfcc8694fed",
+      "episode_id": "ep_a0e9eb6151a048f7",
+      "state": "completed",
+      "outcome": "undecided"
+    },
+    {
+      "workflow_id": "wf_63a99389cb4744af",
+      "episode_id": "ep_a0e9eb6151a048f7",
+      "state": "completed",
+      "outcome": "waiting"
+    }
+  ],
+  "episodes": [
+    {
+      "episode_id": "ep_a0e9eb6151a048f7",
+      "state": "open",
+      "reason": null,
+      "intent_id": "int_39046d689ff94154"
+    }
+  ],
+  "same_episode_continued": true,
+  "rendered_turns": [
+    {
+      "open_intent": null,
+      "episode_continuation": false
+    },
+    {
+      "open_intent": {
+        "intent_id": "int_39046d689ff94154",
+        "goal": "等 alice 在群里贴出 staging CronJob 的 YAML，看到后告诉她 spec.timeZone 的值。现在按她说的先不答。",
+        "opened_at": 1700000005.0,
+        "expires_at": null
+      },
+      "episode_continuation": true
+    }
+  ],
+  "all_sends": [],
+  "activations": [
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "set_intent"
+      ]
+    },
+    {
+      "status": "committed",
+      "error_kind": null,
+      "tool_calls": [
+        "wait_for_event"
+      ]
+    }
+  ],
+  "model_calls": 2
+}

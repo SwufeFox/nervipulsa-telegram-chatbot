@@ -1,0 +1,551 @@
+{
+  "schema_version": 1,
+  "status": "completed",
+  "started_at_utc": "2026-10-30T16:06:14.087923+00:00",
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "provider": "magpie",
+  "endpoint_base": "http://127.0.0.1:3425/v1",
+  "prompt_spec": {
+    "filler_repetitions": 600,
+    "max_tokens": 32,
+    "pairs_requested": 12,
+    "warm_condition": "same synthetic request body, warmed by three unmeasured calls",
+    "control_condition": "same-length unique first-token salt for each request; must report zero cached tokens",
+    "raw_prompt_saved": false,
+    "api_key_saved": false
+  },
+  "warmups": [
+    {
+      "condition": "warmup",
+      "pair_index": null,
+      "order_index": 1,
+      "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+      "request_bytes": 87908,
+      "status": "ok",
+      "http_status": 200,
+      "prompt_tokens": 15659,
+      "cached_tokens": 0,
+      "completion_tokens": 32,
+      "reasoning_tokens": 30,
+      "usage_present": true,
+      "elapsed_seconds": 3.3102
+    },
+    {
+      "condition": "warmup",
+      "pair_index": null,
+      "order_index": 2,
+      "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+      "request_bytes": 87908,
+      "status": "ok",
+      "http_status": 200,
+      "prompt_tokens": 15659,
+      "cached_tokens": 15217,
+      "completion_tokens": 22,
+      "reasoning_tokens": 12,
+      "usage_present": true,
+      "elapsed_seconds": 3.0642
+    },
+    {
+      "condition": "warmup",
+      "pair_index": null,
+      "order_index": 3,
+      "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+      "request_bytes": 87908,
+      "status": "ok",
+      "http_status": 200,
+      "prompt_tokens": 15659,
+      "cached_tokens": 15217,
+      "completion_tokens": 32,
+      "reasoning_tokens": 30,
+      "usage_present": true,
+      "elapsed_seconds": 2.0281
+    }
+  ],
+  "unique_prefix_probe": {
+    "condition": "control_probe",
+    "pair_index": null,
+    "order_index": 4,
+    "request_sha256": "11a4913ed8173f97ce41d45842a5fc2fba3abc2d4c4d1af9ce05f7e3cd9f51c4",
+    "request_bytes": 87908,
+    "status": "ok",
+    "http_status": 200,
+    "prompt_tokens": 15660,
+    "cached_tokens": 0,
+    "completion_tokens": 14,
+    "reasoning_tokens": 4,
+    "usage_present": true,
+    "elapsed_seconds": 2.376
+  },
+  "pairs": [
+    {
+      "pair_index": 1,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 1,
+        "order_index": 5,
+        "request_sha256": "2adbc68370f5e6c72a78af44c735ae3e3a2d0e397669206b72edf73bcaa3f8af",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.1254
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 1,
+        "order_index": 6,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 27,
+        "reasoning_tokens": 17,
+        "usage_present": true,
+        "elapsed_seconds": 3.5286
+      }
+    },
+    {
+      "pair_index": 2,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 2,
+        "order_index": 7,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.7116
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 2,
+        "order_index": 8,
+        "request_sha256": "839037453daa16860dc6edf2faa66c199dff87eb8101cd822879c5bf455593b2",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.3166
+      }
+    },
+    {
+      "pair_index": 3,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 3,
+        "order_index": 9,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 15,
+        "reasoning_tokens": 5,
+        "usage_present": true,
+        "elapsed_seconds": 2.6296
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 3,
+        "order_index": 10,
+        "request_sha256": "a167a66109bffe2ff205dc77ab73db44aaa6c30c4c677fa4eeee84b366517c9f",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15662,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.5224
+      }
+    },
+    {
+      "pair_index": 4,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 4,
+        "order_index": 11,
+        "request_sha256": "db17fc43b9852d47728282ad9a7ed43363af4091184d6371d5949933b7f61250",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15660,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 3.042
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 4,
+        "order_index": 12,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 4.9168
+      }
+    },
+    {
+      "pair_index": 5,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 5,
+        "order_index": 13,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 3.3359
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 5,
+        "order_index": 14,
+        "request_sha256": "9ceb2c582aea3dd124e82b9dbb03acaae2d96a4c94c43455df6114e12d728513",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15657,
+        "cached_tokens": 0,
+        "completion_tokens": 15,
+        "reasoning_tokens": 5,
+        "usage_present": true,
+        "elapsed_seconds": 2.9815
+      }
+    },
+    {
+      "pair_index": 6,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 6,
+        "order_index": 15,
+        "request_sha256": "238873bcfa3b2ba4667851e4093d211494aee936e0ff6765a8e823f3776d4fbb",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15661,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.9317
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 6,
+        "order_index": 16,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.8142
+      }
+    },
+    {
+      "pair_index": 7,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 7,
+        "order_index": 17,
+        "request_sha256": "291ee1e624cd6fc651ea64648168c364cb45ff29451bcbef0947de0020c4cae2",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15661,
+        "cached_tokens": 0,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.6627
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 7,
+        "order_index": 18,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 29,
+        "reasoning_tokens": 19,
+        "usage_present": true,
+        "elapsed_seconds": 2.2876
+      }
+    },
+    {
+      "pair_index": 8,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 8,
+        "order_index": 19,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 17,
+        "reasoning_tokens": 7,
+        "usage_present": true,
+        "elapsed_seconds": 2.9341
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 8,
+        "order_index": 20,
+        "request_sha256": "8e23ccab889dbb2545692f122787b4e12a5647dcfc33d03961b3bf9e60450404",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 0,
+        "completion_tokens": 20,
+        "reasoning_tokens": 10,
+        "usage_present": true,
+        "elapsed_seconds": 2.138
+      }
+    },
+    {
+      "pair_index": 9,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 9,
+        "order_index": 21,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 20,
+        "reasoning_tokens": 10,
+        "usage_present": true,
+        "elapsed_seconds": 4.9795
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 9,
+        "order_index": 22,
+        "request_sha256": "616bff6890edd9300ac9cf0948a9dba0f3ab5d9b6599c7763726bdfc8071c0ee",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15660,
+        "cached_tokens": 0,
+        "completion_tokens": 15,
+        "reasoning_tokens": 5,
+        "usage_present": true,
+        "elapsed_seconds": 2.5999
+      }
+    },
+    {
+      "pair_index": 10,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 10,
+        "order_index": 23,
+        "request_sha256": "1a1e98f6f6f05c58b5df2a6ce5aa2be3fe532a36f95712189310615f6f387e1e",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15657,
+        "cached_tokens": 0,
+        "completion_tokens": 20,
+        "reasoning_tokens": 10,
+        "usage_present": true,
+        "elapsed_seconds": 2.5499
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 10,
+        "order_index": 24,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.2431
+      }
+    },
+    {
+      "pair_index": 11,
+      "order": [
+        "warm",
+        "unique_prefix"
+      ],
+      "warm": {
+        "condition": "warm",
+        "pair_index": 11,
+        "order_index": 25,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 25,
+        "usage_present": true,
+        "elapsed_seconds": 3.3001
+      },
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 11,
+        "order_index": 26,
+        "request_sha256": "fbf79ce6a652da1a20f604308f901c00eef8540a812852767ee00899adb94381",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15658,
+        "cached_tokens": 0,
+        "completion_tokens": 20,
+        "reasoning_tokens": 10,
+        "usage_present": true,
+        "elapsed_seconds": 2.9789
+      }
+    },
+    {
+      "pair_index": 12,
+      "order": [
+        "unique_prefix",
+        "warm"
+      ],
+      "unique_prefix": {
+        "condition": "unique_prefix",
+        "pair_index": 12,
+        "order_index": 27,
+        "request_sha256": "77aa6d9fdc7bf9f1c26fd0f397a8e1a03f1c755532a1b5a9c0f033f398d3ace6",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 0,
+        "completion_tokens": 27,
+        "reasoning_tokens": 17,
+        "usage_present": true,
+        "elapsed_seconds": 2.4049
+      },
+      "warm": {
+        "condition": "warm",
+        "pair_index": 12,
+        "order_index": 28,
+        "request_sha256": "c2ef33ff9c51232af6c37fda2ea5991ff2c5daeea8e0b5b49155b507351abaff",
+        "request_bytes": 87908,
+        "status": "ok",
+        "http_status": 200,
+        "prompt_tokens": 15659,
+        "cached_tokens": 15217,
+        "completion_tokens": 32,
+        "reasoning_tokens": 30,
+        "usage_present": true,
+        "elapsed_seconds": 2.8936
+      }
+    }
+  ],
+  "analysis": {
+    "pairs_requested": 12,
+    "pairs_validated": 12,
+    "cache_controls_validated": true,
+    "warm_median_seconds": 2.9139,
+    "unique_prefix_median_seconds": 2.5749,
+    "median_paired_latency_saved_seconds": -0.3747,
+    "median_paired_latency_reduction_percent": -14.47,
+    "warm_faster_pairs": 3,
+    "unique_prefix_faster_pairs": 9,
+    "ties": 0,
+    "sign_test_two_sided_p": 0.145996,
+    "bootstrap_95pct_ci_median_saved_seconds": [
+      -1.0997,
+      0.0052
+    ],
+    "median_abs_prompt_token_difference": 1.0,
+    "median_abs_completion_token_difference": 5.0
+  },
+  "limitations": [
+    "Measures complete model endpoint round-trip, not application or Telegram latency.",
+    "The unique-prefix control changes a 32-character synthetic salt; cache miss must be confirmed by usage counters.",
+    "Output generation and gateway load can still affect latency; completion token counts are retained for comparison.",
+    "Results apply to this prompt size and endpoint, not all production conversations."
+  ],
+  "finished_at_utc": "2026-10-30T16:07:42.416821+00:00"
+}
