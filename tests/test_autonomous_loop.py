@@ -151,6 +151,47 @@ def test_mention_can_finish_without_speaking(tmp_path):
     run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("tool_arguments", "expected_sends"),
+    [
+        ([{"text": "Which scheduler?"}, {"text": "Which scheduler?"}], 1),
+        ([{"text": "Same text", "reply_to": 701},
+          {"text": "Same text", "reply_to": 702}], 2),
+    ],
+)
+def test_duplicate_send_calls_only_collapse_for_the_same_reply_target(
+    tmp_path, tool_arguments, expected_sends
+):
+    async def scenario():
+        def responder(_request):
+            return ModelResponse(
+                content="", model="scripted",
+                tool_calls=[
+                    ToolCall(id=f"call-{index}", name="send_message", arguments=arguments)
+                    for index, arguments in enumerate(tool_arguments, start=1)
+                ],
+            )
+
+        bot, store, clock, transport, agent = build(
+            tmp_path, responder, min_action_interval_seconds=0.0)
+        try:
+            await bot.start()
+            await bot.step([update(text="Which scheduler is it?")])
+            clock.advance(5)
+            results = await bot.autonomous_step(force=True)
+
+            assert results and len(results[0].actions) == expected_sends
+            assert len(transport.sends) == expected_sends
+            rows = send_rows(tmp_path / "app.db")
+            assert len(rows) == expected_sends
+            assert all(status == "sent" for status, _text in rows)
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
 def test_empty_model_response_is_an_error_not_silence(tmp_path):
     async def scenario():
         bot, store, clock, transport, agent = build(

@@ -250,7 +250,12 @@ class _FinishSilently(_BaseTool):
 
 
 class _WaitForEvent(_BaseTool):
-    """End this turn and wake up when a future event matches."""
+    """End this turn and wake when a future event kind matches.
+
+    Telegram messages use `message`; edits use `message_edit`. Omit
+    `event_types` to accept either kind. `runtime.observation` is a wrapper
+    label, not an observation kind.
+    """
 
     name = "wait_for_event"
 
@@ -260,6 +265,11 @@ class _WaitForEvent(_BaseTool):
             "properties": {
                 "purpose": {"type": "string", "minLength": 1, "maxLength": MAX_PURPOSE_CHARS},
                 "event_types": {
+                    "description": (
+                        "Optional observation-kind filter. Telegram messages use `message`; "
+                        "edits use `message_edit`. Omit this field to accept either. "
+                        "Do not use wrapper labels such as `runtime.observation`."
+                    ),
                     "type": "array", "minItems": 1, "maxItems": MAX_EVENT_TYPES,
                     "items": {"type": "string", "maxLength": MAX_EVENT_TYPE_CHARS},
                 },

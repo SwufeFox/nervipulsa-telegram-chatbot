@@ -189,6 +189,29 @@ def test_setting_a_goal_twice_replaces_it(tmp_path):
     run(scenario())
 
 
+def test_setting_a_goal_is_not_misreported_as_an_undecided_skip(tmp_path):
+    def answer(_index, _payload):
+        return call("set_intent", goal="等 Alice 贴出 CronJob YAML")
+
+    async def scenario():
+        bot, store, clock, transport, payloads = build(tmp_path, answer)
+        await bot.start()
+        try:
+            await bot.step([msg(351, "等我把 CronJob YAML 发来")])
+            clock.advance(5)
+            results = await bot.autonomous_step(force=True)
+
+            assert results and results[0].outcome == "noted"
+            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is not None
+            assert store._query("SELECT sequence FROM observation_skips") == []
+            assert transport.sends == []
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
 def test_a_goal_closes_only_after_the_message_is_delivered(tmp_path):
     """Closing on acceptance would end a goal for a reply that never landed."""
 

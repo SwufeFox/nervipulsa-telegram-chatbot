@@ -105,6 +105,18 @@ def test_wait_tools_require_timezone_aware_timestamps():
     assert len(calls) == 2
 
 
+def test_wait_for_event_schema_names_telegram_observation_kinds():
+    catalog, _ = build()
+    schema = next(
+        item for item in catalog.schemas(workspace="/tmp")
+        if item["function"]["name"] == "wait_for_event"
+    )
+    description = schema["function"]["parameters"]["properties"]["event_types"]["description"]
+    assert "message" in description
+    assert "message_edit" in description
+    assert "runtime.observation" in description
+
+
 def test_update_state_rejects_oversized_or_non_json_values():
     catalog, calls = build()
     assert invoke(catalog, "update_state", {"key": "topic", "value": {"a": [1, 2]}})[1] == "accepted"

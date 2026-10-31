@@ -697,7 +697,8 @@ class AutonomousLoop:
         # The outcome is the agent's, never a default the application supplies.
         # `noted` covers a turn that only wrote state down; `undecided` is the
         # honest label for one that still chose nothing after being asked.
-        outcome = handler.outcome or ("noted" if handler.states else "undecided")
+        state_changed = bool(handler.states or handler.intent_set or handler.intent_resolved)
+        outcome = handler.outcome or ("noted" if state_changed else "undecided")
         if outcome == "undecided":
             # Audit only - deliberately NOT a new observation. An observation
             # would immediately wake her again, and a model that answers in
@@ -1101,6 +1102,10 @@ class _ActionHandler:
         # The goal `send_message` was told to complete with this message. Kept
         # on the handler too so a turn can report it without re-reading storage.
         self.pending_intent_resolution: str | None = None
+        # A model response can contain repeated identical send_message calls.
+        # Reuse the first staged action within this activation so one decision
+        # cannot put the same reply into Telegram twice.
+        self._staged_messages: dict[tuple[str, int | None, str | None], str] = {}
         self.outcome: str | None = None
 
     async def __call__(self, name: str, arguments: dict[str, Any], context: Any,
@@ -1125,7 +1130,6 @@ class _ActionHandler:
                  "executed": False}, "rejected")
 
     def _send_message(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
-        action_id = _new_id("act")
         freshness = str(arguments.get("freshness") or "default")
         cap = int(arguments.get("max_unobserved_events") or 0)
         if freshness == "default":
@@ -1164,6 +1168,21 @@ class _ActionHandler:
             if current is not None:
                 intent_to_close = str(current["intent_id"])
         self.pending_intent_resolution = intent_to_close
+        message_text = str(arguments["text"])
+        reply_to = arguments.get("reply_to")
+        dedupe_key = (message_text.strip(), reply_to, intent_to_close)
+        existing_action = self._staged_messages.get(dedupe_key)
+        if existing_action is not None:
+            return ({
+                "status": "accepted",
+                "action_id": existing_action,
+                "executed": False,
+                "delivery": "pending",
+                "deduplicated": True,
+                "detail": "identical message already staged for this reply target and intent",
+            }, "accepted")
+
+        action_id = _new_id("act")
         if intent_to_close is not None and self.episode_id:
             # Tie the goal to the episode that produced it, so "what was I in
             # the middle of" and "what am I trying to do" name one thing.
@@ -1173,14 +1192,15 @@ class _ActionHandler:
             workflow_id=self.workflow_id,
             chat_id=self.chat_id,
             topic_id=self.topic_id,
-            text=str(arguments["text"]),
+            text=message_text,
             observed_through=self.observed_through,
-            reply_to=arguments.get("reply_to"),
+            reply_to=reply_to,
             freshness=freshness,
             max_unobserved=cap,
             expires_at=expires_at,
             intent_id=intent_to_close,
         )
+        self._staged_messages[dedupe_key] = action_id
         self.actions.append(action_id)
         self.outcome = self.outcome or "speak"
         # Closing the goal is conditional on the message actually going out:
