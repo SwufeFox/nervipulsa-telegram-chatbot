@@ -56,6 +56,14 @@ def test_soul_carries_the_limits_and_introduction_does_not() -> None:
         assert rule in intro_flat, f"introduction lost {rule!r}"
 
 
+def test_configuration_replies_prioritize_the_shortest_useful_check() -> None:
+    _, introduction = default_profile_paths()
+    intro_flat = " ".join(introduction.read_text(encoding="utf-8").lower().split())
+
+    assert "give the shortest useful check first" in intro_flat
+    assert "caveats only when they change what the person should do next" in intro_flat
+
+
 def test_a_missing_soul_file_is_an_error(tmp_path: Path) -> None:
     introduction = tmp_path / "introduction.md"
     introduction.write_text("be nice", encoding="utf-8")
