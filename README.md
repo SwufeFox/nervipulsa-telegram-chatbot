@@ -95,6 +95,10 @@ python -m app.main               # live
 anything. The model is still called, the decisions are still recorded, the sends
 are logged instead of performed.
 
+On a TTY, the console starts by default; `--no-console` keeps the run log-only,
+and `--console` forces command input. Type `help` for commands such as `status`,
+`chats`, and `watch`.
+
 **Secrets only ever come from the environment.** A token written into the config
 file is ignored on purpose — a token in a committed file ends up in every backup
 and screenshot.

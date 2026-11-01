@@ -362,8 +362,20 @@ class Console:
             return [f"not a chat id: {args[0]!r}"]
         topic_id = self._int(args[1]) if len(args) > 1 else None
         self.watching = (chat_id, topic_id)
-        return [f"watching {self._label(chat_id, topic_id)} — "
-                "'unwatch' to see everything again"]
+        output = [f"watching {self._label(chat_id, topic_id)} — "
+                  "'unwatch' to see everything again"]
+        if self.store is not None:
+            known_in_status = any(
+                int(scope["chat_id"]) == chat_id
+                for scope in logwatch.status_snapshot(self.store)["scopes"]
+            )
+            known_in_messages = bool(self.store._query(
+                "SELECT 1 FROM messages WHERE chat_id = ? LIMIT 1", (chat_id,)
+            ))
+            if not known_in_status and not known_in_messages:
+                output.append("no activity recorded yet for this chat; "
+                              "use 'chats' to see observed IDs")
+        return output
 
     def cmd_unwatch(self, args: Sequence[str]) -> Iterable[str]:
         self.watching = None

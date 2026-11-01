@@ -173,6 +173,49 @@ def test_actions_and_turns_and_waits_reflect_live_state():
         store.close()
 
 
+def test_watch_unknown_chat_reports_no_recorded_activity_and_keeps_scope():
+    store = Store(":memory:")
+    try:
+        console, _, _ = make(store)
+        output_text = output(console, f"watch {GROUP}")
+
+        assert "no activity recorded yet" in output_text
+        assert "'chats'" in output_text
+        assert console.watching == (GROUP, None)
+    finally:
+        store.close()
+
+
+def test_watch_known_chat_uses_durable_records_without_warning():
+    store = Store(":memory:")
+    try:
+        seed(store, chat_id=GROUP, count=1)
+        console, bot, _ = make(store)
+        bot.chat_kinds = {}
+
+        output_text = output(console, f"watch {GROUP}")
+
+        assert "watching chat:-1001234567890" in output_text
+        assert "no activity recorded yet" not in output_text
+        assert console.watching == (GROUP, None)
+    finally:
+        store.close()
+
+def test_watch_message_only_chat_does_not_report_no_activity():
+    store = Store(":memory:")
+    try:
+        store.record_message(stored(GROUP, 1, "legacy message"), update_id=1)
+        console, bot, _ = make(store)
+        bot.chat_kinds = {}
+
+        output_text = output(console, f"watch {GROUP}")
+
+        assert "no activity recorded yet" not in output_text
+        assert console.watching == (GROUP, None)
+    finally:
+        store.close()
+
+
 def test_tail_only_shows_the_watched_conversation():
     store = Store(":memory:")
     try:
