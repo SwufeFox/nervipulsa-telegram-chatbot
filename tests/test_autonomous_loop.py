@@ -43,9 +43,10 @@ from app.turns import TurnManager
 from conftest import FakeClock, FakeTransport, run
 
 
-def update(mid=701, topic=None, text="A deployment is leaking memory"):
+def update(mid=701, topic=None, text="A deployment is leaking memory",
+           sender_id=fixtures.ALICE, username="alice"):
     return fixtures.message(
-        update_id=mid, message_id=mid, sender_id=fixtures.ALICE, username="alice",
+        update_id=mid, message_id=mid, sender_id=sender_id, username=username,
         topic_id=fixtures.TOPIC_A if topic is None else topic, text=text,
     )
 
@@ -307,6 +308,47 @@ def test_wait_is_durable_and_wakes_on_a_matching_event(tmp_path):
                     "SELECT status FROM agent_waits").fetchall()
             assert waits == [("satisfied",)]
             assert [s["text"] for s in transport.sends] == ["saw the follow-up"]
+        finally:
+            await bot.stop()
+            store.close()
+    run(scenario())
+
+def test_sender_filtered_wait_ignores_bob_then_wakes_for_alice(tmp_path):
+    async def scenario():
+        calls = 0
+
+        def responder(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return tool_call("wait_for_event", purpose="wait for Alice's result",
+                                 event_types=["message"], sender_id=fixtures.ALICE)
+            if calls == 2:
+                return tool_call("finish_silently")
+            return tool_call("send_message", text="Alice's result arrived")
+
+        bot, store, clock, transport, agent = build(tmp_path, responder)
+        try:
+            await bot.start()
+            await bot.step([update(mid=701, text="Alice will check the result")])
+            clock.advance(5)
+            await bot.autonomous_step()
+
+            await bot.step([update(mid=702, text="Bob has another question",
+                                   sender_id=fixtures.BOB, username="bob")])
+            clock.advance(5)
+            await bot.autonomous_step()
+            assert store.active_waits(fixtures.TEST_CHAT, fixtures.TOPIC_A)
+            assert transport.sends == []
+
+            await bot.step([update(mid=703, text="Here is the result",
+                                   sender_id=fixtures.ALICE, username="alice")])
+            clock.advance(5)
+            await bot.autonomous_step()
+            assert store.active_waits(fixtures.TEST_CHAT, fixtures.TOPIC_A) == []
+            assert [sent["text"] for sent in transport.sends] == [
+                "Alice's result arrived"
+            ]
         finally:
             await bot.stop()
             store.close()

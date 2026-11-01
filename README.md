@@ -19,33 +19,28 @@ message → dedupe → durable inbox → debounce → should it speak?
 
 You add the bot to a group, give it a name, and mostly forget it is there. Then:
 
-- **Someone @-mentions it or replies to it.** It answers — one or two sentences,
-  in whatever language the group is using.
-- **It sees a factually wrong claim that would mislead people.** It corrects it.
-- **The group is chatting among themselves.** It says nothing. Not a typing
-  indicator, nothing.
-- **Someone thanks it or makes a joke.** It stays quiet unless the thanks was
-  clearly aimed at it.
-- **Someone says its name while talking to someone else** ("let's try what Alma
-  said") — it does not jump in. Being talked *about* is not being talked *to*.
+- **Someone @-mentions it or replies to it.** It considers the whole topic batch and may answer, wait, or stay silent — an address is a signal, not an obligation.
+- **It sees a factually wrong claim that could mislead people.** It may correct it if it has something grounded to add.
+- **The group is chatting among themselves.** It usually stays quiet; it can join when it has a perspective or curiosity worth adding and proactive participation is enabled.
+- **Someone thanks it or makes a joke.** It may reply briefly when that fits, or stay quiet.
+- **Someone says its name while talking to someone else** ("let's try what Alma said") — it does not treat that as an automatic summons.
 
 If it does not know something, it says which setting to check rather than
 inventing a value.
 
 ## How it actually works
 
-There is no keyword rule and no participation score. Every authorized message
-becomes a durable observation, and the model decides what to do with the batch
-it was given. Its tool set is small and closed:
+There is no keyword rule and no participation score. Parsed messages from allowed chats become durable observations. Admin commands and our own echoes are persisted but excluded from model input and model wake; unsupported update types, unauthorized chats, and duplicate update IDs do not enter the message observation stream. Reactions use a separate feedback path. For observations it does receive, the model decides what to do with each batch. Its tool set is small and closed:
 
 | tool | effect |
 | --- | --- |
 | `send_message` | put one message in the chat (durable outbox, then Telegram) |
 | `finish_silently` | end this turn without speaking |
-| `wait_for_event` | end now, be woken by a matching future event |
+| `wait_for_event` | end now, wake on a future observation matching optional event-kind and sender filters |
 | `wait_until` | end now, be woken at a wall-clock time |
 | `update_state` | remember a small note for later turns |
 
+Sender filters only control whether a durable wait is satisfied; they do not prevent otherwise model-eligible observations from waking the model or reduce model calls.
 Ordinary assistant text is never delivered — only `send_message` posts. A turn
 that calls no tool has not decided anything: it is asked once more, explicitly,
 and only then recorded as `undecided` rather than being counted as silence.

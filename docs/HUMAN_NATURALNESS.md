@@ -33,14 +33,11 @@
 
 ## 人工评阅标记
 
-每条发送检查四项：
-
-- **时机**：确实需要机器人开口吗？
-- **增量**：提供新信息、下一步、纠错或有效澄清了吗？
+- **时机**：回应这个事件确实有意义吗？直接提及也可以选择沉默。
+- **参与动机**：如果主动加入，是有自己的观点、好奇或相关联想吗？有没有为了维持聊天或显得有用而硬接话？
+- **增量**：提供新信息、下一步、纠错、有效澄清或有根据的视角了吗？
 - **依据**：有没有把没给出的环境细节说成事实？
 - **语气**：像简短群聊，还是客服模板/空泛安慰？
-
-结果写 `通过 / 未通过 / 不确定`，附上触发判断的原句。身份透明与注入防护是硬约束，不能用其他项目的好分抵消。
 
 ## 当前基线
 
@@ -134,10 +131,18 @@
 
 随后收紧探针，要求核对具体事件序号、正确答案、只发送一次，并检查 intent 是否跨过中间消息。v6 证明了 wait-only 路径，但没有创建 `agent_intent`，不足以证明 intent 续接；v7 则暴露探针的另一种误判：模型保留了 open intent，Bob 后安静结束，Alice 的普通消息随后触发同一 episode 继续处理，但旧断言错误地要求 Bob 后必须重新注册 wait。修正后的[v8 续接自测](evaluations/continuation-selfplay-20261031-fox-v8.json)通过：3 次模型调用，intent 在第一次激活后创建、Bob 后仍 open，Alice 的事件序号进入第三次激活，随后只发送一条包含 `Asia/Shanghai` 的回复，intent 在 episode `delivered` 后关闭。该次模型没有注册 event wait；持久 intent 已足以承接目标。
 
-这些运行验证了跨激活续接和模型对 Bob 内容的语义判断，没有验证 Alice 专属的硬过滤。若存在 event wait，它目前只按事件种类匹配；即使没有 event wait，普通群消息也会唤醒 agent，因此 Bob 仍会消耗一次模型调用。完全避免非目标发送者唤醒需要结构化发送者条件，并明确 Telegram observation 与持久 wait 的字段契约。
+这些运行验证了跨激活续接和模型对 Bob 内容的语义判断，没有验证 Alice 专属的硬过滤。后续 `wait_for_event` 增加了可选 `sender_id`；Alice/Bob 回归通过，确认 Bob 的消息不满足 Alice 的 wait、Alice 的消息可以满足。普通群消息仍会唤醒 agent，因此 sender filter 不会减少模型调用。
 
 简化续接规则后的自然度回归使用同一生产模型，9 次调用、0 次模型失败，8 项确定性检查全部通过；`multiple_send_cases` 为空。闲聊和已获回答的问题保持沉默；感谢、配置追问、上下文追问、纠错、信息不足追问和身份回答均各录到一条消息。身份场景明确回答“机器人，披着狐狸皮的那种”。具体输出见[自然度复测](evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-2156-simplified.json)。随后独立重跑同一场景集，8 次模型调用、0 次失败、8 项检查仍全部通过；重复发送仍为 0，配置问题和 follow-up 各输出一条回复，见[自然度重复复测](evaluations/human-naturalness-muse-spark-2026-10-31-selfplay-final-repeat.json)。人工语气审阅仍需按报告中的问题逐条完成，自动门槛不能代替它。
 
 两次先前复测（`2131` 与旧 prompt 对照 `baseline-2145`）都复现了 `unknown_config` 场景的完全重复发送。现在 `_ActionHandler` 在同一激活内对相同文本、回复目标和待关闭 intent 复用已暂存 action；回归测试同时确认不同 `reply_to` 仍分别发送。另修正了仅设置 intent 被记为 `undecided` 的审计分类，并在 `wait_for_event` schema 中写清 Telegram 的 `message` / `message_edit` 事件种类。短 prompt 下，unknown-config 和 follow-up 场景恢复为各一条回复。
 
 本轮验证：`python -m pytest -vv --tb=short` 全量 **440 passed in 112.42 s**；修改模块通过 `py_compile`，`git diff --check` 无空白错误。全量测试只验证确定性回归；模型自然度结果仍受单次生成波动影响。
+
+## 2026-11-01 当前 prompt 与发送者过滤补记
+
+上文 2026-10-31 的模型运行是旧 profile/prompt 的历史结果，不能作为当前 prompt 改动的语气或自然度验证。当前 prompt 的一次独立合成提问使用了正确的 `tool_catalog` 与 `response_commit_hook`、临时数据库和仅记录发送的 Telegram transport；结果为 1 次已提交 activation、1 次模型调用、workflow `completed` / `speak`，并记录了 1 次 `send_message`。回答提到检查 `CRON_TZ` / `spec.timeZone` 并询问平台；控制台在 emoji 位置显示替换字符，因此不逐字引用。这个单样本只证明运行路径可达，不代表新 voice 通过自然度或多场景评估。
+
+`wait_for_event` 现在支持可选 `sender_id`。Alice/Bob 回归通过：Bob 的普通观察不满足指定 Alice 的 wait，Alice 的观察可以满足；普通群观察仍会唤醒 agent 并触发模型调用。
+
+此前 `live_group_sim --scenario main` 因 factory 缺少工具目录和 response commit hook，出现 8 个 agent errors、0 次模型调用并以状态码 1 退出。修复 wiring 后，合成 main 场景完成 8 次 Core activation、8 个 autonomous workflow 和 8 次 `AutonomousLoop.model_calls`，8 条 activation 均有 provider usage 记录；recording transport 收到 2 条消息，脚本通过 guard 并以状态码 0 退出。摘要现在直接显示 autonomous workflow/model/action/silence 计数、消息数和 recorded sends；Core activation 与 provider usage 单独报告。证据在 shutdown 前采集，因为 `sim.stop()` 会关闭 agent 并清空 runtime。测试：`python -m pytest tests/test_live_group_sim.py -q`（2 passed）；`python experiments/live_group_sim.py --scenario main`（passed）。本次只用合成群聊输入和 recording-only transport。

@@ -344,7 +344,7 @@ async def main() -> int:
             if args.proactive:
                 human_review.insert(0, {
                     "case": "proactive_burst",
-                    "question": "是否有实质增量，还是只发寒暄/安慰？"
+                    "question": "是否因真实的观点、好奇或关联而加入，而不是为了维持聊天或显得有用？"
                 })
             for result in results:
                 if result["sends"] > 1:

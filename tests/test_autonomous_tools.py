@@ -105,6 +105,18 @@ def test_wait_tools_require_timezone_aware_timestamps():
     assert len(calls) == 2
 
 
+def test_wait_for_event_accepts_only_a_positive_integer_sender_id():
+    catalog, calls = build()
+    assert invoke(catalog, "wait_for_event", {
+        "purpose": "wait for Alice", "sender_id": 123,
+    })[1] == "accepted"
+    for sender_id in (0, -1, True, "123"):
+        assert invoke(catalog, "wait_for_event", {
+            "purpose": "wait for Alice", "sender_id": sender_id,
+        })[1] == "rejected"
+    assert len(calls) == 1
+
+
 def test_wait_for_event_schema_names_telegram_observation_kinds():
     catalog, _ = build()
     schema = next(

@@ -1055,17 +1055,22 @@ class Store:
     def add_wait(
         self, *, wait_id: str, chat_id: int, topic_id: int | None, kind: str,
         purpose: str, event_types: list[str] | None = None,
-        due_at: float | None = None, expires_at: float | None = None,
-        episode_id: str | None = None,
+        sender_id: int | None = None, due_at: float | None = None,
+        expires_at: float | None = None, episode_id: str | None = None,
     ) -> None:
+        event_filter = None
+        if event_types is not None or sender_id is not None:
+            event_filter = json.dumps(
+                {"event_types": event_types, "sender_id": sender_id},
+                ensure_ascii=False,
+            )
         with self._write() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO agent_waits (wait_id, chat_id, topic_id, kind,"
                 " purpose, event_types_json, due_at, expires_at, status, created_at,"
                 " resolved_at, episode_id)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?)",
-                (wait_id, chat_id, topic_id, kind, purpose,
-                 json.dumps(event_types, ensure_ascii=False) if event_types else None,
+                (wait_id, chat_id, topic_id, kind, purpose, event_filter,
                  due_at, expires_at, self._now(), episode_id),
             )
 
@@ -1209,9 +1214,19 @@ class Store:
             return cursor.rowcount == 1
 
     @staticmethod
-    def _wait_matches_event(row: sqlite3.Row, kind: str) -> bool:
+    def _wait_matches_event(
+        row: sqlite3.Row, kind: str, sender_id: int | None = None,
+    ) -> bool:
         allowed = row["event_types_json"]
-        kinds = json.loads(allowed) if allowed else None
+        filters = json.loads(allowed) if allowed else None
+        if isinstance(filters, dict):
+            kinds = filters.get("event_types")
+            expected_sender = filters.get("sender_id")
+        else:  # Existing rows stored only the optional event-kind list.
+            kinds = filters
+            expected_sender = None
+        if expected_sender is not None and sender_id != expected_sender:
+            return False
         wait_kind = str(row["kind"])
         if wait_kind == "event":
             return kind in kinds if kinds is not None else kind in _DEFAULT_EVENT_WAIT_KINDS
@@ -1223,7 +1238,7 @@ class Store:
 
     def matching_waits_for_observations(
         self, chat_id: int, topic_id: int | None,
-        observations: Sequence[tuple[int, str]], now: float,
+        observations: Sequence[tuple[int, str] | tuple[int, str, int | None]], now: float,
         *, eligible_wait_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Describe waits structurally triggered by this pending observation batch.
@@ -1239,8 +1254,10 @@ class Store:
             expires_at = row["expires_at"]
             if expires_at is not None and float(expires_at) <= now:
                 continue
-            for sequence, kind in observations:
-                if self._wait_matches_event(row, kind):
+            for observation in observations:
+                sequence, kind = observation[:2]
+                sender_id = observation[2] if len(observation) == 3 else None
+                if self._wait_matches_event(row, kind, sender_id):
                     matched[wait_id] = {
                         "wait_id": wait_id,
                         "purpose": str(row["purpose"]),
@@ -1248,12 +1265,15 @@ class Store:
                         "event_kind": kind,
                         "event_sequence": sequence,
                     }
+                    if sender_id is not None:
+                        matched[wait_id]["event_sender_id"] = sender_id
                     break
         return list(matched.values())
 
     def satisfy_event_waits(
         self, chat_id: int, topic_id: int | None, kind: str, now: float,
         *, eligible_wait_ids: set[str] | None = None,
+        sender_id: int | None = None,
     ) -> list[str]:
         """Resolve expired waits and report the waits this event matches.
 
@@ -1269,7 +1289,7 @@ class Store:
             if expires_at is not None and float(expires_at) <= now:
                 self.resolve_wait(wait_id, "expired")
                 continue
-            if self._wait_matches_event(row, kind):
+            if self._wait_matches_event(row, kind, sender_id):
                 if self.resolve_wait(wait_id, "satisfied"):
                     satisfied.append(wait_id)
         return satisfied

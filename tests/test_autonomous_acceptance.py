@@ -165,6 +165,52 @@ def test_empty_provider_response_is_error_not_no_action(tmp_path):
     asyncio.run(scenario())
 
 
+def test_open_goal_resumes_from_new_topic_event_and_closes_on_send(tmp_path):
+    activations = 0
+
+    def responder(request):
+        nonlocal activations
+        activations += 1
+        if activations == 1:
+            return ModelResponse(content='', model='scripted', tool_calls=[
+                ToolCall(id='set-goal', name='set_intent', arguments={
+                    'goal': 'wait for the deployment owner to share the heap result',
+                }),
+                ToolCall(id='wait-for-owner', name='wait_for_event', arguments={
+                    'purpose': 'wait for the deployment owner',
+                    'sender_id': fixtures.ALICE,
+                }),
+            ])
+        return call('send_message', text='The heap result points to the cache.',
+                    resolves_intent=True)
+
+    async def scenario():
+        bot, store, clock, transport, agent, backend = build(
+            tmp_path / 'app.db', responder)
+        try:
+            await bot.start()
+            await run_input(bot, clock, update(text='We need the heap result before deciding.'))
+            scope = (fixtures.TEST_CHAT, fixtures.TOPIC_A)
+            assert store.current_intent(*scope)['goal'].startswith('wait for the deployment owner')
+            assert store.active_waits(*scope)
+
+            await run_input(bot, clock, update(
+                702, text='The heap result points to the cache.'))
+            assert len(backend.requests) == 2
+            continuation = json.dumps(backend.requests[1].messages, ensure_ascii=False)
+            assert 'heap result' in continuation
+            assert store.current_intent(*scope) is None
+            assert store.active_waits(*scope) == []
+            assert [item['text'] for item in transport.sends] == [
+                'The heap result points to the cache.'
+            ]
+            assert send_rows(tmp_path / 'app.db') == [
+                ('sent', 'The heap result points to the cache.')
+            ]
+        finally:
+            await bot.stop()
+            store.close()
+    asyncio.run(scenario())
 def test_wait_survives_restart_and_new_event_reawakens(tmp_path):
     async def scenario():
         db = tmp_path / 'app.db'

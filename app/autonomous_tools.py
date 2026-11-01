@@ -250,11 +250,12 @@ class _FinishSilently(_BaseTool):
 
 
 class _WaitForEvent(_BaseTool):
-    """End this turn and wake when a future event kind matches.
+    """End this turn and wake when a future event filter matches.
 
     Telegram messages use `message`; edits use `message_edit`. Omit
-    `event_types` to accept either kind. `runtime.observation` is a wrapper
-    label, not an observation kind.
+    `event_types` to accept either kind. `sender_id` optionally narrows the
+    match to one Telegram user. `runtime.observation` is a wrapper label, not
+    an observation kind.
     """
 
     name = "wait_for_event"
@@ -273,6 +274,10 @@ class _WaitForEvent(_BaseTool):
                     "type": "array", "minItems": 1, "maxItems": MAX_EVENT_TYPES,
                     "items": {"type": "string", "maxLength": MAX_EVENT_TYPE_CHARS},
                 },
+                "sender_id": {
+                    "type": "integer", "minimum": 1,
+                    "description": "Optional Telegram user ID; only matching messages or edits satisfy the wait.",
+                },
                 "expires_at": {"type": "string", "maxLength": 64},
             },
             "required": ["purpose"],
@@ -280,7 +285,7 @@ class _WaitForEvent(_BaseTool):
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"purpose", "event_types", "expires_at"}:
+        if set(arguments) - {"purpose", "event_types", "sender_id", "expires_at"}:
             return "invalid_payload"
         if _nonempty(arguments.get("purpose"), MAX_PURPOSE_CHARS) is None:
             return "invalid_payload"
@@ -294,6 +299,9 @@ class _WaitForEvent(_BaseTool):
                 return "invalid_payload"
             if any(not _IDENTIFIER.match(item.strip()) for item in types):
                 return "invalid_payload"
+        sender_id = arguments.get("sender_id")
+        if sender_id is not None and (type(sender_id) is not int or sender_id < 1):
+            return "invalid_payload"
         if "expires_at" in arguments and _aware_timestamp(arguments["expires_at"]) is None:
             return "invalid_payload"
         return None

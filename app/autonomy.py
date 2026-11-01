@@ -608,7 +608,8 @@ class AutonomousLoop:
         }
         matched_waits = self.store.matching_waits_for_observations(
             chat_id, topic_id,
-            [(observation.sequence, observation.kind) for observation in observations],
+            [(observation.sequence, observation.kind,
+              observation.payload.get("sender_id")) for observation in observations],
             self._clock(), eligible_wait_ids=eligible_wait_ids,
         )
         observation_payload = self._render(
@@ -692,6 +693,7 @@ class AutonomousLoop:
             self.store.satisfy_event_waits(
                 chat_id, topic_id, observation.kind, self._clock(),
                 eligible_wait_ids=eligible_wait_ids,
+                sender_id=observation.payload.get("sender_id"),
             )
 
         # The outcome is the agent's, never a default the application supplies.
@@ -791,11 +793,21 @@ class AutonomousLoop:
                     "activations": len(self.store.episode_activations(episode_id)),
                     "continuation": continuation,
                 }
-        waits = [
-            {"wait_id": str(row["wait_id"]), "kind": str(row["kind"]),
-             "purpose": str(row["purpose"])}
-            for row in self.store.active_waits(chat_id, topic_id)
-        ]
+        waits = []
+        for row in self.store.active_waits(chat_id, topic_id):
+            wait = {"wait_id": str(row["wait_id"]), "kind": str(row["kind"]),
+                    "purpose": str(row["purpose"])}
+            serialized_filter = row["event_types_json"]
+            if serialized_filter:
+                stored_filter = json.loads(serialized_filter)
+                if isinstance(stored_filter, dict):
+                    if stored_filter.get("event_types") is not None:
+                        wait["event_types"] = stored_filter["event_types"]
+                    if stored_filter.get("sender_id") is not None:
+                        wait["sender_id"] = stored_filter["sender_id"]
+                else:  # Legacy rows stored the event-kind list directly.
+                    wait["event_types"] = stored_filter
+            waits.append(wait)
         return {
             "kind": "group_observations",
             "chat_id": chat_id,
@@ -1217,7 +1229,8 @@ class _ActionHandler:
         self._loop.store.add_wait(
             wait_id=wait_id, chat_id=self.chat_id, topic_id=self.topic_id,
             kind="event", purpose=str(arguments["purpose"]),
-            event_types=arguments.get("event_types"), expires_at=expires_at,
+            event_types=arguments.get("event_types"),
+            sender_id=arguments.get("sender_id"), expires_at=expires_at,
             episode_id=self.episode_id,
         )
         self.waits.append(wait_id)

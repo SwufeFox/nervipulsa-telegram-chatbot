@@ -5,8 +5,9 @@ same `GroupAgent` + `NervipulsaAgent` path a live deployment uses, and the only
 substitution is the Telegram transport (which records instead of sending).
 
 The purpose is behavioural, not structural: does the bot stay quiet when it
-should, answer when addressed, resist a prompt injection, and avoid repeating
-itself? Each beat is printed with the decision the policy actually made.
+should, consider an address without treating it as an obligation, follow an
+explicit wait, and avoid repeating itself? Each beat is driven through the
+autonomous scheduler and prints its recorded decision.
 
 Run:
     python experiments/live_group_sim.py                    # default model
@@ -26,12 +27,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Windows consoles default to GBK here, which cannot encode the emoji a real
-# group chat contains. Reconfigure rather than sanitise the input — the point is
-# to see exactly what a group would send.
-for stream in (sys.stdout, sys.stderr):
-    if hasattr(stream, "reconfigure"):
-        stream.reconfigure(encoding="utf-8", errors="replace")
 
 from nervipulsa.config import Settings
 
@@ -41,6 +36,19 @@ from app.config import AppConfig, load_default_profile
 from app.store import Store
 from app.telegram import TelegramClient
 from app.turns import TurnManager
+
+def _has_runtime_evidence(activations: int, model_calls: int) -> bool:
+    return activations > 0 and model_calls > 0
+
+
+def _runtime_activation_count(agents) -> int:
+    count = 0
+    for agent in agents:
+        runtime = agent.runtime
+        actor = getattr(runtime, "actor", None) if runtime is not None else None
+        if actor is not None:
+            count += len(actor.activations)
+    return count
 
 BASE_URL = os.environ.get("NERVIPULSA_BASE_URL", "http://127.0.0.1:3425/v1")
 API_KEY = os.environ.get("NERVIPULSA_API_KEY", "")
@@ -120,6 +128,8 @@ class Sim:
             workspace=spec.workspace,
             system_prompt=spec.system_prompt,
             timeout=self.config.request_timeout,
+            tool_catalog=spec.tool_catalog,
+            response_commit_hook=spec.response_commit_hook,
         )
         self.agents[str(spec.workspace)] = agent
         return agent
@@ -150,16 +160,19 @@ class Sim:
         await self.bot.step([upd])
 
     async def settle(self, label: str = "") -> None:
-        """Close the debounce window and let the bot act."""
+        """Close the debounce window and drive one autonomous scheduler pass."""
         self.clock[0] += self.bot.config.debounce_seconds + 0.5
         before = len(self.transport.sent)
-        decisions = await self.bot.run_turns()
-        for d in decisions:
-            if d.is_silent:
-                print(f"  {'':6} │ · silent  ({d.reason})")
+        results = await self.bot.autonomous_step(force=True)
+        for result in results:
+            if result.outcome == "silent":
+                print(f"  {'':6} │ · silent")
+            elif result.outcome == "speak":
+                print(f"  {'':6} │ · message action staged")
+            elif result.outcome:
+                print(f"  {'':6} │ · {result.outcome}")
             else:
-                print(f"  {'':6} │ · replying ({d.reason}, "
-                      f"score={d.detail.get('score', '-')})")
+                print(f"  {'':6} │ · {result.state}")
         for reply in self.transport.sent[before:]:
             for line in reply["text"].splitlines():
                 print(f"  {'Alma':6} │ {line}")
@@ -169,22 +182,27 @@ class Sim:
         if stats.sends_unknown or stats.sends_failed:
             print(f"  !! send problems: unknown={stats.sends_unknown} "
                   f"failed={stats.sends_failed}")
-
     @property
     def last_bot_message_id(self) -> int | None:
         return self.transport.sent[-1]["_tg_id"] if self.transport.sent else None
 
 
 async def main() -> int:
+    # Windows consoles default to GBK, which cannot encode group chat emoji.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="opencode-go/muse-spark-1.3-contributor")
     parser.add_argument("--proactive", action="store_true")
     parser.add_argument("--debounce", type=float, default=3.5)
-    parser.add_argument("--scenario", default="main",
-                        help="main | topics | injection")
+    parser.add_argument("--scenario", choices=("main", "topics", "injection"),
+                        default="main", help="scenario to simulate")
     args = parser.parse_args()
 
-    root = Path(tempfile.mkdtemp(prefix="live-sim-"))
+    temporary = tempfile.TemporaryDirectory(prefix="live-sim-")
+    root = Path(temporary.name)
     prompt = load_default_profile()
     config = AppConfig(
         bot_name="Alma",
@@ -300,21 +318,34 @@ async def main() -> int:
         print(f"\n{len(sim.agents)} scopes, {len(sessions)} distinct runtime sessions "
               f"-> {'ISOLATED' if len(sessions) == len(sim.agents) else 'SHARED (leak!)'}")
 
-    print("\n--- decisions (persisted, silence included) ---")
-    for row in store._query(
-        "SELECT outcome, reason, created_at FROM decisions ORDER BY created_at"
-    ):
-        print(f"  {row['outcome']:6} {row['reason']}")
 
-    total = sim.bot.stats.total
+    autonomy = sim.bot.autonomy
     print(f"\nmessages stored: {store.stats()['messages']}  "
-          f"model calls: {total.model_calls}  "
-          f"replies: {total.replies_decided}  silences: {total.silences_decided}  "
-          f"sent: {total.sends_ok}  unknown: {total.sends_unknown}")
-
+          f"workflows: {autonomy.workflows if autonomy else 0}  "
+          f"model calls: {autonomy.model_calls if autonomy else 0}  "
+          f"actions staged: {autonomy.actions_staged if autonomy else 0}  "
+          f"actions sent: {autonomy.actions_sent if autonomy else 0}  "
+          f"silent workflows: {autonomy.silent_workflows if autonomy else 0}  "
+          f"recorded sends: {len(transport.sent)}")
+    activations = _runtime_activation_count(sim.agents.values())
+    model_calls = sim.bot.autonomy.model_calls if sim.bot.autonomy is not None else 0
+    provider_calls = sum(
+        1
+        for agent in sim.agents.values()
+        if agent.runtime is not None
+        for activation in agent.runtime.actor.activations
+        if (activation.context_metrics or {}).get("provider_usage")
+    )
+    recorded_sends = len(transport.sent)
+    print(f"\nCore evidence: activations={activations} model_calls={model_calls} "
+          f"provider_usage_records={provider_calls} recorded_sends={recorded_sends}")
     await sim.stop()
     store.close()
-    print(f"\nworkspace: {root}")
+    if not _has_runtime_evidence(activations, provider_calls):
+        print("ERROR: simulation produced no Core activation/provider-usage evidence")
+        temporary.cleanup()
+        return 1
+    temporary.cleanup()
     return 0
 
 
