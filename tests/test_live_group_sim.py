@@ -1,7 +1,16 @@
 from types import SimpleNamespace
 
+from experiments import live_group_sim
 from experiments.live_group_sim import _has_runtime_evidence, _runtime_activation_count
 
+
+def test_sim_clock_advances_only_by_explicit_elapsed_time():
+    clock = live_group_sim.SimulationClock.__new__(live_group_sim.SimulationClock)
+    clock._time = 1_000.0
+
+    clock.advance(20.5)
+
+    assert clock() == 1_020.5
 
 def test_simulation_requires_both_activation_and_model_call_evidence():
     assert not _has_runtime_evidence(0, 0)

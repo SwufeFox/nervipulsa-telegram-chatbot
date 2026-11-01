@@ -72,13 +72,13 @@ class RecordingTransport:
 
 def update(uid: int, mid: int, sender: int, name: str, text: str,
            reply_to: int | None = None, reply_sender: int | None = None,
-           topic: int | None = None) -> dict:
+           topic: int | None = None, timestamp: float | None = None) -> dict:
     msg: dict = {
         "message_id": mid,
         "from": {"id": sender, "is_bot": sender == ALMA, "first_name": name.title(),
                  "username": name},
         "chat": {"id": CHAT, "type": "supergroup", "title": "Sim Group"},
-        "date": int(time.time()),
+        "date": int(time.time() if timestamp is None else timestamp),
         "text": text,
     }
     if topic is not None:
@@ -93,17 +93,34 @@ def update(uid: int, mid: int, sender: int, name: str, text: str,
     return {"update_id": uid, "message": msg}
 
 
+class SimulationClock:
+    """Deterministic wall clock advanced once per scripted chat beat."""
+
+    def __init__(self) -> None:
+        self._time = time.time()
+
+    def __call__(self) -> float:
+        return self._time
+
+    def advance(self, seconds: float) -> None:
+        self._time += seconds
+
+
+
 class Sim:
-    def __init__(self, config: AppConfig, store: Store, transport, prompt: str) -> None:
-        self.clock = [time.time()]
+    def __init__(self, config: AppConfig, store: Store, clock: SimulationClock,
+                 transport, prompt: str) -> None:
+        self.clock = clock
+        self.beat_seconds = max(config.debounce_seconds + 0.5,
+                                config.min_action_interval_seconds + 0.5)
         self.next_mid = 100
         self.next_uid = 1
         self.transport = transport
         self.store = store
         self.config = config
         self.prompt = prompt
-        # One agent per (chat, topic), honouring the AgentSpec workspace the bot
-        # passes in. A single shared agent here would hide a cross-topic leak
+        # One agent per (chat, topic), honouring the AgentSpec workspace the
+        # bot passes in. A single shared agent here would hide a cross-topic leak
         # instead of exposing it — which is exactly what the first run of this
         # script did.
         self.agents: dict[str, NervipulsaAgent] = {}
@@ -111,8 +128,8 @@ class Sim:
             config=config, store=store, client=TelegramClient(transport),
             system_prompt=prompt, agent_factory=self._factory,
             turn_manager=TurnManager(debounce_seconds=config.debounce_seconds,
-                                     clock=lambda: self.clock[0]),
-            bot_user_id=ALMA, clock=lambda: self.clock[0],
+                                     clock=clock),
+            bot_user_id=ALMA, clock=clock,
         )
 
     def _factory(self, spec) -> NervipulsaAgent:
@@ -154,14 +171,14 @@ class Sim:
         mid = self.next_mid
         upd = update(self.next_uid, mid, sender, name, text,
                      reply_to=reply_to, reply_sender=ALMA if reply_to else None,
-                     topic=topic)
+                     topic=topic, timestamp=self.clock())
         self.next_uid += 1
-        print(f"  {name:6} │ {text}")
+        print(f"  {name:6} #{mid} │ {text}")
         await self.bot.step([upd])
 
     async def settle(self, label: str = "") -> None:
-        """Close the debounce window and drive one autonomous scheduler pass."""
-        self.clock[0] += self.bot.config.debounce_seconds + 0.5
+        """Advance one explicit beat and drive one autonomous scheduler pass."""
+        self.clock.advance(self.beat_seconds)
         before = len(self.transport.sent)
         results = await self.bot.autonomous_step(force=True)
         for result in results:
@@ -174,10 +191,13 @@ class Sim:
             else:
                 print(f"  {'':6} │ · {result.state}")
         for reply in self.transport.sent[before:]:
+            reply_parameters = reply.get("reply_parameters") or {}
+            anchor = reply_parameters.get("message_id")
+            label = f"Alma ↳ #{anchor}" if anchor is not None else "Alma"
             for line in reply["text"].splitlines():
-                print(f"  {'Alma':6} │ {line}")
+                print(f"  {label:6} │ {line}")
             if not reply["text"].strip():
-                print(f"  {'Alma':6} │ (EMPTY TEXT — BUG)")
+                print(f"  {label:6} │ (EMPTY TEXT — BUG)")
         stats = self.bot.stats.total
         if stats.sends_unknown or stats.sends_failed:
             print(f"  !! send problems: unknown={stats.sends_unknown} "
@@ -222,13 +242,17 @@ async def main() -> int:
         proactive_min_interval_seconds=0.0,
         proactive_max_per_hour=8,
     )
-    store = Store(root / "bot.sqlite3")
+    clock = SimulationClock()
+    store = Store(root / "bot.sqlite3", clock=clock)
     transport = RecordingTransport()
-    sim = Sim(config, store, transport, prompt)
+    sim = Sim(config, store, clock, transport, prompt)
     await sim.start()
 
     print(f"\n=== simulated group  (model={args.model}, "
           f"proactive={'on' if args.proactive else 'off'}) ===\n")
+
+    print(f"simulated beat gap={sim.beat_seconds:.1f}s; "
+          f"outbound interval={config.min_action_interval_seconds:.1f}s")
 
     if args.scenario == "main":
         print("[1] ordinary chatter — nothing addressed to the bot")
