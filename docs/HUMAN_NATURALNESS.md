@@ -154,3 +154,7 @@
 原先 beat 4 的 staging 回复直到 beat 7/8 才被 recording transport 记录。代码追踪确认这是速率限制：生产默认 `min_action_interval_seconds=20`，`Store.claim_action()` 在间隔未到时返回 `throttled`，action 留在 pending 状态并在后续 flush 重试。旧模拟给 scheduler 手动推进 debounce 时钟，但 `Store` 使用独立的真实时钟，因此发送时机依赖本地模型响应时长。那次延迟回复的 Telegram `reply_parameters.message_id` 是 `108`，正是 beat 4 Bob 的追问；它是有效的延迟回复，不是对 beat 7 迁移问题的回答。没有改生产 freshness 或 rate limit。
 
 模拟现在把同一个确定性时钟注入 `Store`、`GroupAgent` 和 `TurnManager`，并在每个 beat 明确推进 `max(debounce + 0.5s, min_action_interval + 0.5s)`；输入消息时间戳也使用该时钟。默认配置下输出明确显示 beat gap `20.5s`、生产发送间隔 `20.0s`，所以这个脚本的各 beat action 在当前 beat 可见。复跑完成 8 activations、8 model calls、3 个 staged / 3 个 sent actions、5 次沉默；普通闲聊、已回答问题、表情闲聊及后续群聊仍保持沉默。该固定 20.5 秒场景验证了确定性 beat 和发送路径，不代表活跃生产群聊的实际回复延迟。`python -m pytest tests/test_live_group_sim.py tests/test_agent_profile.py -q`：15 passed。
+### 话题隔离与缺失上下文
+
+`python experiments/live_group_sim.py --scenario topics` 暴露了 topic B 对“what did we just say about the timeout?”回答“I didn't catch the earlier part”，听起来像 Alma 漏读了本线程消息。提示词现在把这类说明限定在：用户明确提到先前讨论，而当前 topic 的可见上下文中没有该讨论。单独的配置问题继续使用环境相关建议。最后一次成功复跑中，topic A 得到部署配置检查建议，没有缺失历史说明；topic B 回答“I don't see that earlier discussion in this thread — which timeout do you mean?”。该次运行记录了 2 个不同 runtime session、2 次模型调用和 2 次发送。中间有一次 topic A 的模型 activation 失败（无 provider usage）；措辞结论来自之后成功的复跑。
+
