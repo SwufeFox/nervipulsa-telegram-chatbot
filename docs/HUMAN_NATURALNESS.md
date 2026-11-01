@@ -146,3 +146,11 @@
 `wait_for_event` 现在支持可选 `sender_id`。Alice/Bob 回归通过：Bob 的普通观察不满足指定 Alice 的 wait，Alice 的观察可以满足；普通群观察仍会唤醒 agent 并触发模型调用。
 
 此前 `live_group_sim --scenario main` 因 factory 缺少工具目录和 response commit hook，出现 8 个 agent errors、0 次模型调用并以状态码 1 退出。修复 wiring 后，合成 main 场景完成 8 次 Core activation、8 个 autonomous workflow 和 8 次 `AutonomousLoop.model_calls`，8 条 activation 均有 provider usage 记录；recording transport 收到 2 条消息，脚本通过 guard 并以状态码 0 退出。摘要现在直接显示 autonomous workflow/model/action/silence 计数、消息数和 recorded sends；Core activation 与 provider usage 单独报告。证据在 shutdown 前采集，因为 `sim.stop()` 会关闭 agent 并清空 runtime。测试：`python -m pytest tests/test_live_group_sim.py -q`（2 passed）；`python experiments/live_group_sim.py --scenario main`（passed）。本次只用合成群聊输入和 recording-only transport。
+
+## 2026-11-01 合成群聊中的配置回复简化
+
+`python experiments/live_group_sim.py --scenario main` 使用本地模型、临时数据库和 recording-only Telegram transport。提示词改动前，cron 时区回复为 2 句、约 47 词；加入“先给最短可操作检查，仅在会改变下一步时增加替代项或 caveat”后，一次复跑缩为 2 句、22 词。后续生成仍有波动；本次最终复跑为 24 词，保留了先澄清调度器、再给对应配置项的简洁结构。
+
+原先 beat 4 的 staging 回复直到 beat 7/8 才被 recording transport 记录。代码追踪确认这是速率限制：生产默认 `min_action_interval_seconds=20`，`Store.claim_action()` 在间隔未到时返回 `throttled`，action 留在 pending 状态并在后续 flush 重试。旧模拟给 scheduler 手动推进 debounce 时钟，但 `Store` 使用独立的真实时钟，因此发送时机依赖本地模型响应时长。那次延迟回复的 Telegram `reply_parameters.message_id` 是 `108`，正是 beat 4 Bob 的追问；它是有效的延迟回复，不是对 beat 7 迁移问题的回答。没有改生产 freshness 或 rate limit。
+
+模拟现在把同一个确定性时钟注入 `Store`、`GroupAgent` 和 `TurnManager`，并在每个 beat 明确推进 `max(debounce + 0.5s, min_action_interval + 0.5s)`；输入消息时间戳也使用该时钟。默认配置下输出明确显示 beat gap `20.5s`、生产发送间隔 `20.0s`，所以这个脚本的各 beat action 在当前 beat 可见。复跑完成 8 activations、8 model calls、3 个 staged / 3 个 sent actions、5 次沉默；普通闲聊、已回答问题、表情闲聊及后续群聊仍保持沉默。该固定 20.5 秒场景验证了确定性 beat 和发送路径，不代表活跃生产群聊的实际回复延迟。`python -m pytest tests/test_live_group_sim.py tests/test_agent_profile.py -q`：15 passed。
