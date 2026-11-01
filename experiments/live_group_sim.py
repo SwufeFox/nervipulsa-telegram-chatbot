@@ -9,6 +9,9 @@ should, consider an address without treating it as an obligation, follow an
 explicit wait, and avoid repeating itself? Each beat is driven through the
 autonomous scheduler and prints its recorded decision.
 
+The runtime summary lists tool names rather than full schemas so the conversation
+output stays readable.
+
 Run:
     python experiments/live_group_sim.py                    # default model
     python experiments/live_group_sim.py --model auto/glm-5.3
@@ -49,6 +52,11 @@ def _runtime_activation_count(agents) -> int:
         if actor is not None:
             count += len(actor.activations)
     return count
+
+
+def _runtime_tool_names(tools: list[dict]) -> list[str]:
+    return [schema["function"]["name"] for schema in tools]
+
 
 BASE_URL = os.environ.get("NERVIPULSA_BASE_URL", "http://127.0.0.1:3425/v1")
 API_KEY = os.environ.get("NERVIPULSA_API_KEY", "")
@@ -330,7 +338,7 @@ async def main() -> int:
             "scope": scope,
             "session": rt.bus.session_id[:12],
             "activations": len(rt.actor.activations),
-            "tools_offered": rt.actor.tools,
+            "tool_names": _runtime_tool_names(rt.actor.tools),
             "python_requested": sum(1 for e in rt.trace if e.type == "python.requested"),
             "transcript_chars": rt.status()["transcript_chars"],
             "context_limit": rt.status()["context_limit_chars"],

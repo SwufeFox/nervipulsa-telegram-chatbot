@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
 from experiments import live_group_sim
-from experiments.live_group_sim import _has_runtime_evidence, _runtime_activation_count
+from experiments.live_group_sim import (
+    _has_runtime_evidence,
+    _runtime_activation_count,
+    _runtime_tool_names,
+)
 
 
 def test_sim_clock_advances_only_by_explicit_elapsed_time():
@@ -23,3 +27,15 @@ def test_simulation_counts_only_started_runtimes():
     runtime = SimpleNamespace(actor=SimpleNamespace(activations=[object(), object()]))
     agents = [SimpleNamespace(runtime=None), SimpleNamespace(runtime=runtime)]
     assert _runtime_activation_count(agents) == 2
+
+def test_runtime_summary_lists_tool_names_without_schemas():
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "send_message",
+            "description": "Full schema description",
+            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+        },
+    }]
+
+    assert _runtime_tool_names(tools) == ["send_message"]
