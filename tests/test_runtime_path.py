@@ -126,93 +126,73 @@ def test_a_reply_is_produced_by_the_real_runtime(tmp_path: Path, config, transpo
     store.close()
 
 
-def test_old_recoverable_pause_waits_for_its_new_input(tmp_path: Path, system_prompt) -> None:
-    """An input can be accepted before the actor has cleared an old pause."""
-    from types import SimpleNamespace
+def test_input_during_a_nonrecoverable_pause_is_reported_without_waiting(
+    tmp_path: Path, system_prompt,
+) -> None:
+    """A parked input must not cost the caller its whole model timeout.
 
-    agent = build(tmp_path, system_prompt)
-    agent._timeout = 1.0
-    old = SimpleNamespace(id="old", status="paused", error_kind="response_invalid",
-                          error_message="empty", context_metrics={"attempts": [{}]})
-    actor = SimpleNamespace(paused=old, activations=[old])
-    pending = []
-
-    async def release() -> None:
-        await asyncio.sleep(0.16)  # More than one polling interval.
-        actor.paused = None
-        actor.activations.append(SimpleNamespace(
-            id="new", status="committed", error_kind=None,
-            input_event_ids=("new-input",), context_metrics={},
-            response=ModelResponse(content="new answer", model="scripted"),
-        ))
-
-    def submit_text(prompt):
-        pending.append(asyncio.create_task(release()))
-        return SimpleNamespace(accepted=True, event_id="new-input")
-
-    agent._runtime = SimpleNamespace(actor=actor, submit_text=submit_text)
-
-    async def body() -> None:
-        result = await agent.ask(chat_id=1, prompt="new message", tag="new")
-        await asyncio.gather(*pending)
-        assert result.status == "committed"
-        assert result.activation_id == "new"
-        assert result.text == "new answer"
-
-    run(body())
-
-
-def test_old_nonrecoverable_pause_is_reported_without_waiting(tmp_path: Path, system_prompt) -> None:
-    from types import SimpleNamespace
+    Only an explicit retry can clear these pauses, so Core reports the block
+    instead of waiting for an activation that will never be created.
+    """
+    from nervipulsa.ports import ProviderFailure
 
     async def body() -> None:
         for kind in ("response_unknown", "commit_interrupted"):
-            agent = build(tmp_path, system_prompt)
-            agent._timeout = 1.0
-            old = SimpleNamespace(id="old", status="paused", error_kind=kind,
-                                  error_message="blocked", context_metrics={"attempts": [{}]})
-            actor = SimpleNamespace(paused=old, activations=[old])
-            agent._runtime = SimpleNamespace(
-                actor=actor,
-                submit_text=lambda prompt: SimpleNamespace(accepted=True, event_id="new-input"),
-            )
-            result = await asyncio.wait_for(
-                agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=0.5
-            )
-            assert result.status == "paused"
-            assert result.detail["error_kind"] == kind
-            assert result.detail["not_this_activation"] is True
+            async def respond(request, kind=kind):
+                raise ProviderFailure(kind, "blocked")
+
+            agent = build(tmp_path / kind, system_prompt, ScriptedBackend(respond))
+            agent._timeout = 5.0
+            await agent.start()
+            try:
+                first = await agent.ask(chat_id=1, prompt="old message", tag="old")
+                assert first.detail["error_kind"] == kind
+
+                loop = asyncio.get_running_loop()
+                started = loop.time()
+                result = await asyncio.wait_for(
+                    agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=3,
+                )
+                elapsed = loop.time() - started
+                assert result.status == "paused"
+                assert result.detail["error_kind"] == kind
+                assert result.detail["not_this_activation"] is True
+                assert elapsed < 2.0, "the parked input waited for the full timeout"
+            finally:
+                await agent.stop()
 
     run(body())
 
 
-def test_failed_retry_of_old_pause_does_not_wait_for_full_timeout(tmp_path: Path, system_prompt) -> None:
-    from types import SimpleNamespace
-
-    agent = build(tmp_path, system_prompt)
-    agent._timeout = 2.0
-    old = SimpleNamespace(id="old", status="paused", error_kind="provider_error",
-                          error_message="retry failed", context_metrics={"attempts": [{}]})
-    actor = SimpleNamespace(paused=old, activations=[old])
-    pending = []
-
-    async def retry_fails() -> None:
-        await asyncio.sleep(0.16)
-        old.context_metrics["attempts"].append({})
-
-    def submit_text(prompt):
-        pending.append(asyncio.create_task(retry_fails()))
-        return SimpleNamespace(accepted=True, event_id="new-input")
-
-    agent._runtime = SimpleNamespace(actor=actor, submit_text=submit_text)
+def test_retry_that_fails_again_reports_the_pause_instead_of_waiting(
+    tmp_path: Path, system_prompt,
+) -> None:
+    """A resumed activation that fails again leaves the new input parked."""
+    from nervipulsa.ports import ProviderFailure
 
     async def body() -> None:
-        result = await asyncio.wait_for(
-            agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=0.8
-        )
-        await asyncio.gather(*pending)
-        assert result.status == "paused"
-        assert result.detail["not_this_activation"] is True
+        async def respond(request):
+            raise ProviderFailure("request_not_sent", "offline")
+
+        agent = build(tmp_path, system_prompt, ScriptedBackend(respond))
+        agent._timeout = 5.0
+        await agent.start()
+        try:
+            first = await agent.ask(chat_id=1, prompt="old message", tag="old")
+            assert first.detail["error_kind"] == "request_not_sent"
+
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            result = await asyncio.wait_for(
+                agent.ask(chat_id=1, prompt="new message", tag="new"), timeout=3,
+            )
+            elapsed = loop.time() - started
+            assert result.status == "paused"
+            assert result.activation_id == first.activation_id
+            assert result.detail["not_this_activation"] is True
+            assert elapsed < 2.0, "the parked input waited for the full timeout"
+        finally:
+            await agent.stop()
 
     run(body())
 

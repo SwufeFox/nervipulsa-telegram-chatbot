@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     # Pinned to a specific Core commit, never a floating branch. See
     # docs/INTEGRATION_CONTRACT.md before changing this line.
-    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@5f65658660a2c8145f41664db0ee2747a9b64517",
+    "nervipulsa @ git+https://github.com/SwufeFox/nervipulsa.git@7f7df7642b22d0991f2c8962158eaff4fdd63e74",
     # The production Telegram transport. Pinned: PTB is pre-1.0-stable in the
     # sense that its async surface moves between minors, and the transport here
     # is written against the Bot methods of exactly this version.

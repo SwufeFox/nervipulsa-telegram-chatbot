@@ -263,10 +263,6 @@ class NervipulsaAgent:
         runtime = self._runtime
 
         async with self._lock:
-            before = len(runtime.actor.activations)
-            paused_before = runtime.actor.paused
-            prior_attempts = len((getattr(paused_before, "context_metrics", None) or {}).get("attempts") or [])
-            prior_status = getattr(paused_before, "status", None)
             delivery = runtime.submit_observation(payload) if observation else runtime.submit_text(payload)
             if not delivery.accepted:
                 return AgentResult(
@@ -277,9 +273,7 @@ class NervipulsaAgent:
                 )
             input_event_id = delivery.event_id
 
-            activation = await self._await_activation(
-                runtime, before, input_event_id, paused_before, prior_attempts, prior_status
-            )
+            activation = await self._await_activation(runtime, input_event_id)
             if activation is None:
                 paused = runtime.actor.paused
                 if paused is not None and paused.status == "paused":
@@ -334,36 +328,24 @@ class NervipulsaAgent:
             )
 
     async def _await_activation(
-        self, runtime: Runtime, before: int, input_event_id: str | None,
-        paused_before: Any | None, prior_attempts: int, prior_status: str | None,
+        self, runtime: Runtime, input_event_id: str | None,
     ) -> Any | None:
-        """Poll the activation ledger for the activation that consumed our event.
+        """Wait for the activation that consumed this input to settle.
 
-        This is a live read of `actor.activations`, which is the only
-        input→output correlation the runtime exposes (docs §2). If the runtime
-        ever grows a durable correlation event, replace this loop with it.
+        Core owns the correlation: it indexes input event ids to the activation
+        that consumed them and wakes this wait on the state transition, so the
+        adapter needs no polling interval, no ledger length snapshot, and no
+        knowledge of how a paused activation is retried. The answer stays stable
+        across a retry because a retried activation keeps its input event ids.
+
+        `None` means waiting longer cannot help: the input was not consumed
+        before the deadline, or the actor is paused in a way only an explicit
+        retry clears. The caller reports those through the paused/timeout
+        branches, which carry Core's own pause reason.
         """
-        deadline = asyncio.get_running_loop().time() + self._timeout
-        while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.05)
-            activations = runtime.actor.activations
-            for activation in activations[before:]:
-                if input_event_id and input_event_id in activation.input_event_ids:
-                    if activation.status in {"running"}:
-                        continue
-                    return activation
-            # Core keeps the paused pointer during an explicit or automatic
-            # retry. It only blocks this input once the retry has paused again.
-            paused = runtime.actor.paused
-            if paused is not None and paused.status == "paused":
-                if paused is not paused_before or paused.error_kind in {
-                    "response_unknown", "commit_interrupted"
-                }:
-                    return None
-                attempts = len((getattr(paused, "context_metrics", None) or {}).get("attempts") or [])
-                if prior_status == "running" or attempts > prior_attempts:
-                    return None
-        return None
+        return await runtime.wait_for_activation(
+            input_event_id=input_event_id, timeout=self._timeout,
+        )
 
     # -- statistics --------------------------------------------------------
 
