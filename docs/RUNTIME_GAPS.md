@@ -241,7 +241,7 @@ regressions in `tests/test_runtime_path.py`.
 
 ---
 
-## G7 — `Transcript` is append-only and unbounded for a session's lifetime · **OPEN**
+## G7 — `Transcript` is append-only and unbounded for a session's lifetime · **PARTLY MITIGATED**
 
 **Evidence**
 Read: `llm.py` `Transcript` never drops projections except through model-ordered
@@ -260,6 +260,23 @@ A `Runtime` is created lazily per chat and its transcript is the model view only
 the application's own `messages` table is the durable chat log, trimmed by
 `history_messages` at prompt-build time. Long sessions are bounded by restarting
 the process, not by the runtime releasing memory.
+
+**Progress in Core `6d3fa9a`**
+Measured with 60 scripted turns on one runtime: `activations` held 249 KB of
+request snapshots against 17 KB of trace payloads and a 7.8 KB transcript. The
+snapshot is the exact message list a request carried, so it grows with the
+conversation as well as with turn count — the dominant resident cost. Core now
+keeps `snapshot` and `context_metrics["input_events"]` only for the last 32
+committed activations (`ACTIVATION_SNAPSHOT_RETENTION`); older views stay in the
+journal's per-activation transcript snapshots. Paused activations are never
+pruned, because a retry replays that exact view.
+
+At 200 turns the resident snapshot cost is now bounded by 32 × current transcript
+size (749 KB at 25 KB of transcript) instead of the sum of all 200 views. Still
+open: the `activations` list itself, `Runtime.trace` payloads (57 KB at 200
+turns), and the per-activation `context_metrics` remainder (152 KB at 200 turns).
+Those grow linearly with session length; the first two need a stated retention
+policy before trimming, and the trace is the runtime's own diagnostic record.
 
 ---
 
