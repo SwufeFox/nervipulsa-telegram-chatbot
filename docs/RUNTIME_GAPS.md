@@ -196,18 +196,18 @@ without notifying the producer is the gap.
 **Workaround in use**
 The application does not treat `assistant.message` as the delivery path. It reads
 the reply from the activation it waited on (`agent.ask` returns
-`activation.response.content`), so a dropped UI event cannot lose a reply. The cost
-is that the application depends on `actor.activations`, a live in-memory list —
-see G6.
+`activation.response.content`), so a dropped UI event cannot lose a reply. Finding
+that activation is now a supported Core call rather than a scan of a live list —
+see the resolved G6.
 
 ---
 
-## G6 — Input→output correlation exists only as an in-memory list · **OPEN**
+## G6 — Input→output correlation exists only as an in-memory list · **RESOLVED in Core `7f7df76`**
 
 **Evidence**
 `experiments/probe_runtime.py` P5/P5b. `assistant.message` carries
 `{"text", "activation_id"}` but not the input event ids. The only mapping back to
-input is `Runtime.actor.activations[i].input_event_ids`.
+input was `Runtime.actor.activations[i].input_event_ids`.
 
 **Failed scenario**
 An application that needs to know "which message did this reply answer?" must read
@@ -217,19 +217,27 @@ between an application that can attribute a reply and one that guesses.
 **Generic?** Yes. Any application correlating an outbound effect with an inbound
 event needs this, and the brief lists "event correlation" as a candidate capability.
 
-**Workaround in use**
-`NervipulsaAgent.ask` holds a per-chat lock, snapshots `len(activations)` before
-submitting, and then polls for the activation whose `input_event_ids` contains the
-`Delivery.event_id` it just got. That is unambiguous because no other activation
-can be running on that runtime (one runtime per chat, serialized by the lock).
-Verified in `tests/test_runtime_path.py`.
+**Resolution**
+Core now owns the correlation: `Runtime.activation_for_event(event_id)` answers in
+constant time, `await Runtime.wait_for_activation(input_event_id=…, timeout=…)`
+returns the activation once it stops running, and every settle emits
+`agent.activation_finished` with `{activation_id, input_event_ids, status,
+error_kind, ended_at, settle_version}` into the trace and journal. `settle_version`
+plus `after_version=` lets a host that retries a paused activation wait for the
+retry's outcome rather than the pause it just observed.
 
-**Minimal Core interface it would need**
-Include `input_event_ids` in the `assistant.message` payload (one line in
-`_complete_and_commit`), or add a `agent.activation_finished` event carrying
-`{activation_id, input_event_ids, status}`. Small and additive. Not submitted:
-the polling workaround is correct, and a Core PR should be driven by a failure the
-workaround cannot handle.
+The wait also reports a blocked input instead of hiding it: when the submitted
+event is parked behind a pause that only an explicit retry can clear, it returns
+`None` immediately, so an application does not spend its full model timeout on
+input that cannot be consumed.
+
+**Former workaround (removed)**
+`NervipulsaAgent.ask` held a per-chat lock, snapshotted `len(activations)`,
+polled every 50 ms for the activation containing its `Delivery.event_id`, and
+carried its own rules for telling a stale pause from a retry in flight. All of
+that is gone; `app/agent.py::_await_activation` is now one awaited Core call. Core
+regressions live in `tests/test_activation_correlation.py`, application
+regressions in `tests/test_runtime_path.py`.
 
 ---
 

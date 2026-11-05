@@ -9,7 +9,7 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
-pinned      5f65658   (published on origin)
+pinned      7f7df76   (published on origin)
 
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
@@ -20,9 +20,10 @@ commits     9a734c4   feat: let a host application own its system prompt
             9e8e1a3   docs: clarify transcript restore deduplication limits
             7618bd0   fix: surface corrupt transcript snapshots
             5f65658   fix: a malformed response must pause the actor, not kill it
+            7f7df76   feat: correlate activations with their input events
 ```
 
-`5f65658` is both the pinned revision and the newest commit on the Core branch in
+`7f7df76` is both the pinned revision and the newest commit on the Core branch in
 `origin`. Fresh installs resolve the same Core revision used by this working
 copy and its App integration suite.
 
@@ -33,6 +34,7 @@ copy and its App integration suite.
 | `a6f102f` | the agent forgets the whole conversation on restart |
 | `7618bd0` | a corrupt snapshot is reported as "no history", so memory loss looks like a fresh start |
 | `5f65658` | one malformed model response kills the actor task; every later turn in that runtime is dead and reported only as a timeout |
+| `7f7df76` | the host must poll `actor.activations` for input→output correlation, and a parked input blocks for the whole model timeout |
 
 Core features consumed by this application:
 
@@ -46,6 +48,7 @@ Core features consumed by this application:
 | `a6f102f` | `Runtime(..., session_id=)` + `restore_transcript()` reload the last committed model view; only the transcript is restored - no mailbox, activation ledger, Python namespace or pending effect |
 | `7618bd0` | `journal.latest_transcript_snapshot()` raises on a corrupt or structurally invalid snapshot instead of returning None, and validates message/event list shapes |
 | `5f65658` | `LLMActor` type-checks a `ModelResponse` before validating its contents; a bad field pauses that activation as `response_invalid` instead of raising inside the actor task |
+| `7f7df76` | `Runtime.wait_for_activation(input_event_id=, activation_id=, timeout=, after_version=)` and `Runtime.activation_for_event(event_id)` give the host a supported input→output correlation; every settle also emits `agent.activation_finished` with `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`; a pause that parks the submitted input resolves to `None` instead of waiting out the timeout |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
@@ -59,6 +62,13 @@ The application pins a **commit**, never `main`. Before upgrading Core:
 A Core change that breaks any of the five is a breaking contract change and needs
 the shared contract updated **before** either side is merged.
 
+The offline milestone harness is currently a known-broken check: as of `7f7df76`,
+`experiments/milestone_a.py` reports zero turn decisions and crashes on an empty
+send list on the legacy turn path, both before and after the Core change. It is not
+evidence either way until repaired; use `python -m pytest -q` on both repositories
+plus `python experiments/live_group_sim.py --scenario main` (real Runtime,
+recording-only transport) as the upgrade check.
+
 ## Version compatibility
 
 | Application | Core commit | Core suite | Notes |
@@ -70,6 +80,7 @@ the shared contract updated **before** either side is merged.
 | 0.1.0 | `1eb558ca3a4c3b1cade8db71bddf41375ae89eb6` | 181 passed | fixes retry control-event double activation and stale pause error; verified with the App suite (194 passed) and offline milestones |
 | 0.2.0 | `8498fb400d3b53d86da580c93b434bf11df3fa3e` | 187 passed | autonomous participation: structured observations, pre-tool commit hook, observation budget reset; App suite 257 passed |
 | 0.2.0 | `5f65658660a2c8145f41664db0ee2747a9b64517` | 204 passed | malformed model responses pause their activation; App suite 422 passed |
+| 0.2.0 | `7f7df7642b22d0991f2c8962158eaff4fdd63e74` | 210 passed / 157.41s | activation/input correlation, settle event, retry-aware wait, parked-input reporting; App suite 446 passed with 4 pre-existing timing failures in the `test_live_*` long-poll harness when run as a group (each passes alone) |
 
 ## Depends on (public, stable)
 
@@ -184,6 +195,8 @@ Read surface the application relies on:
 | --- | --- | --- |
 | `bus.session_id` | diagnostics, restart detection | process only |
 | `actor.activations` | reply text + input correlation | process only |
+| `runtime.wait_for_activation(...)` / `runtime.activation_for_event(...)` | supported input→output correlation; the adapter awaits the activation that consumed its event instead of scanning the ledger | process only |
+| `agent.activation_finished` (`Runtime.trace`, journal) | one event per settle, carrying `activation_id`, `input_event_ids`, `status`, `error_kind`, `ended_at`, `settle_version` | journal |
 | `actor.tools` | startup assertion that exposed tools exactly match the injected closed catalog (or none when no catalog is supplied) | derived |
 | `actor.transcript` | tests only | process only |
 | `actor.paused` | stop waiting instead of burning the timeout | process only |
@@ -277,7 +290,7 @@ Stated plainly so nobody infers them:
 
 | Fragility | Impact | Mitigation |
 | --- | --- | --- |
-| `actor.activations` is a live list, not an event | a future Core change to its shape breaks `NervipulsaAgent._await_activation` | one function, covered by `test_runtime_path.py`; `RUNTIME_GAPS.md` G6 proposes the event that would replace it |
+| ~~`actor.activations` is a live list, not an event~~ | resolved by `7f7df76`: the adapter awaits `Runtime.wait_for_activation` and never scans the ledger | one call site, covered by `tests/test_runtime_path.py` and Core's `tests/test_activation_correlation.py` |
 | ~~`Runtime.start()` spawns a worker regardless of tools~~ | resolved by `6a300ce` | this application passes `python_host=False`; regression-guarded by `test_python_host_optional.py` in Core |
 | `inspect_durable` payload keys are not typed | diagnostics only | nothing depends on the shape |
 | `Delivery.reason` strings are free text | tests assert on `accepted`, not on `reason`, except for `"capacity_exceeded"` | prefer `accepted` in new code |
