@@ -24,7 +24,7 @@ def test_simulation_requires_both_activation_and_model_call_evidence():
 
 def test_simulation_counts_only_started_runtimes():
     assert _runtime_activation_count([SimpleNamespace(runtime=None)]) == 0
-    runtime = SimpleNamespace(actor=SimpleNamespace(activations=[object(), object()]))
+    runtime = SimpleNamespace(actor=SimpleNamespace(activation_count=2))
     agents = [SimpleNamespace(runtime=None), SimpleNamespace(runtime=runtime)]
     assert _runtime_activation_count(agents) == 2
 

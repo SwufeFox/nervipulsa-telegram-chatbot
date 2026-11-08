@@ -357,19 +357,15 @@ class NervipulsaAgent:
         return {
             "started": True,
             "session_id": runtime.bus.session_id,
-            "activations": len(runtime.actor.activations),
+            "activations": runtime.actor.activation_count,
             "actor": status.get("actor"),
             "pause_reason": status.get("pause_reason"),
             "transcript_chars": status.get("transcript_chars"),
             "context_limit_chars": status.get("context_limit_chars"),
-            "events": len(runtime.trace),
-            "python_executions": rt_count(runtime, "python.requested"),
+            "events": runtime.event_count(),
+            "python_executions": runtime.event_count("python.requested"),
             "model_tools": [s.get("function", {}).get("name") for s in runtime.actor.tools],
         }
-
-
-def rt_count(runtime: Runtime, event_type: str) -> int:
-    return sum(1 for event in runtime.trace if event.type == event_type)
 
 
 class BackendFailure(Exception):

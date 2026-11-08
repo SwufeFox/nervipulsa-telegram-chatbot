@@ -50,7 +50,7 @@ def _runtime_activation_count(agents) -> int:
         runtime = agent.runtime
         actor = getattr(runtime, "actor", None) if runtime is not None else None
         if actor is not None:
-            count += len(actor.activations)
+            count += actor.activation_count
     return count
 
 
@@ -337,9 +337,9 @@ async def main() -> int:
         print(json.dumps({
             "scope": scope,
             "session": rt.bus.session_id[:12],
-            "activations": len(rt.actor.activations),
+            "activations": rt.actor.activation_count,
             "tool_names": _runtime_tool_names(rt.actor.tools),
-            "python_requested": sum(1 for e in rt.trace if e.type == "python.requested"),
+            "python_requested": rt.event_count("python.requested"),
             "transcript_chars": rt.status()["transcript_chars"],
             "context_limit": rt.status()["context_limit_chars"],
             "usage_last": (rt.actor.activations[-1].context_metrics.get("provider_usage")
