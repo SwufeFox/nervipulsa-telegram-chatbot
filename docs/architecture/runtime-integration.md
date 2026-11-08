@@ -29,11 +29,12 @@ local green suite is not remote verification.
 | `Runtime.start()` / `await Runtime.shutdown()` | lifecycle | `start()` also spawns a Python worker **[probe Q1]** unless `python_host=False` (see §3 G2 and §5). |
 | `Runtime.submit_text(text)` | → `Delivery` | The only text entry point. Emits `user.message` with `{"text": ...}` and nothing else. |
 | `Runtime.add_listener(fn)` | observe every accepted event | Called synchronously from the bus observer, after admission. |
+| `Runtime.trace` / `Runtime.event_count(type=None)` | 最近最多 1,024 个事件 / 从 Runtime 启动以来的累计数 | trace 是诊断窗口；历史由 journal 保存 |
 | `Runtime.bus.call(source, type, payload, *, reply_to, lane, lane_key, ...)` | → `Delivery` | Direct event injection. Route table is fixed at construction (`Runtime._register`). |
 | `Runtime.retry()` | → `Delivery` | Emits `agent.retry`; only meaningful when the actor is paused. |
 | `Runtime.status()` | dict | `runtime`, `actor`, `pause_reason`, `context_*`, `journal_*`, `api_key: "set"/"missing"`. |
 | `Runtime.inspect_durable(session_id)` / `durable_sessions()` | dict / list | Read-only inspection of a **previous** session's committed activations and transcript snapshots. |
-| `LLMActor.transcript` / `.projector` / `.activations` / `.paused` | live objects | Public attributes. `activations[i].input_event_ids` is the only input→output correlation that exists. |
+| `LLMActor.activations` / `.activation_count` / `.paused` | live objects | `activations` 是最近最多 256 项的诊断窗口；累计数由 `activation_count` 提供；输入关联使用 Runtime 的等待/索引 API。 |
 | `Mailbox`, `Bus`, `Lane`, `Emitter` | kernel primitives | Directly constructible; `Bus.register` is immutable once `start()` is called. |
 
 ### State ownership (memory vs. persisted)
@@ -42,7 +43,7 @@ local green suite is not remote verification.
 | --- | --- | --- |
 | Bus seq / routes / mailboxes | RAM | **No** |
 | Transcript (model view) | RAM | **No** **[probe P7]** — a new `Runtime` starts with 0 messages |
-| Activations, `held`, tool-call ledger | RAM | **No** |
+| `actor.activations` / `Runtime.trace` | RAM，分别保留最近最多 256 activations / 1,024 events | **No** — lifetime counters remain available; historical rows are journal inspection only |
 | Python worker namespace | worker process | **No** — new epoch, `namespace: current_epoch_only` |
 | `events` / `deliveries` / `activations` / `executions` / `tool_calls` tables | SQLite (async, bounded queue, WAL+NORMAL) | yes, but **observation** only; nothing reads them back into a session |
 | `durable_effects` | SQLite (sync, FULL) | yes; `intent → dispatching → observed`, `unknown` when unconfirmable |
@@ -121,17 +122,18 @@ is not configurable.
 [{"text": "ack", "activation_id": "act_70ba11aacd83"}]
 ```
 
-Correlation back to input is possible only through `Runtime.actor.activations`
-**[probe P5b]**:
+Core now provides direct correlation through `Runtime.wait_for_activation(input_event_id=...)`
+and `Runtime.activation_for_event(event_id)`; hosts no longer need to scan
+`actor.activations`. `Runtime.wait_for_activation` returns the activation that
+consumed the submitted input and settled it. Both the actor's activation list
+and the input/id lookup indexes retain only the most recent 256 entries;
+`actor.activation_count` preserves the lifetime count. An evicted activation
+can no longer be returned by the in-memory lookup, though its journal record
+remains available for read-only inspection.
 
-```json
-{"submitted": "evt_00000001",
- "activations": [["act_70ba11aacd83", ["evt_00000001"], "committed"]]}
-```
-
-That is a *live in-memory list*, not an event. It is not durable, it grows without bound, and
-reading it means reaching into actor internals from application code. There is no
-`assistant.message` field that names the input events it answered.
+The event trace is likewise a recent diagnostic window (up to 1,024 events).
+Use `Runtime.event_count(type)` for cumulative counts; individual older events
+remain in the journal when its writer has not reported dropped records.
 
 ---
 

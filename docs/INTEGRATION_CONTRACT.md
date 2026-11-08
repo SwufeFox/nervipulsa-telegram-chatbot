@@ -9,7 +9,7 @@ and `nervipulsa` (the runtime). Anything not listed here is not depended on.
 repository  https://github.com/SwufeFox/nervipulsa
 base        08ead0f   prune: remove workspace fingerprint wiring
 branch      feat/configurable-agent-profile
-pinned      6d3fa9a   (published on origin)
+pinned      9f2b1d6   (published on origin)
 
 commits     9a734c4   feat: let a host application own its system prompt
             6a300ce   feat: let a runtime run without a Python host
@@ -22,9 +22,10 @@ commits     9a734c4   feat: let a host application own its system prompt
             5f65658   fix: a malformed response must pause the actor, not kill it
             7f7df76   feat: correlate activations with their input events
             6d3fa9a   fix: bound retained activation diagnostics
+            9f2b1d6   fix: bound runtime diagnostic history
 ```
 
-`6d3fa9a` is both the pinned revision and the newest commit on the Core branch in
+`9f2b1d6` is both the pinned revision and the newest commit on the Core branch in
 `origin`. Fresh installs resolve the same Core revision used by this working
 copy and its App integration suite.
 
@@ -37,6 +38,7 @@ copy and its App integration suite.
 | `5f65658` | one malformed model response kills the actor task; every later turn in that runtime is dead and reported only as a timeout |
 | `7f7df76` | the host must poll `actor.activations` for input→output correlation, and a parked input blocks for the whole model timeout |
 | `6d3fa9a` | every committed activation keeps its exact request view in memory forever; measured 249 KB of snapshots after 60 turns, growing with both turn count and transcript length |
+| `9f2b1d6` | the in-memory activation ledger and correlation indexes grow with every turn; trace keeps every event forever. Both now have bounded diagnostic windows and cumulative counters remain accurate |
 
 Core features consumed by this application:
 
@@ -52,6 +54,7 @@ Core features consumed by this application:
 | `5f65658` | `LLMActor` type-checks a `ModelResponse` before validating its contents; a bad field pauses that activation as `response_invalid` instead of raising inside the actor task |
 | `7f7df76` | `Runtime.wait_for_activation(input_event_id=, activation_id=, timeout=, after_version=)` and `Runtime.activation_for_event(event_id)` give the host a supported input→output correlation; every settle also emits `agent.activation_finished` with `{activation_id, input_event_ids, status, error_kind, ended_at, settle_version}`; a pause that parks the submitted input resolves to `None` instead of waiting out the timeout |
 | `6d3fa9a` | only the last `ACTIVATION_SNAPSHOT_RETENTION` (32) committed activations keep `snapshot` and `context_metrics["input_events"]` in memory; older views remain in the journal. A paused activation always keeps both, because a retry replays that exact view |
+| `9f2b1d6` | `LLMActor.activations` and its correlation indexes retain at most 256 recent activations; `activation_count` is cumulative. `Runtime.trace` retains up to 1,024 recent events; `Runtime.event_count(type=None)` is cumulative. Evicted lookups return `None`, and historical records are inspection-only in the journal |
 
 The application pins a **commit**, never `main`. Before upgrading Core:
 
@@ -85,6 +88,7 @@ recording-only transport) as the upgrade check.
 | 0.2.0 | `5f65658660a2c8145f41664db0ee2747a9b64517` | 204 passed | malformed model responses pause their activation; App suite 422 passed |
 | 0.2.0 | `7f7df7642b22d0991f2c8962158eaff4fdd63e74` | 210 passed / 157.41s | activation/input correlation, settle event, retry-aware wait, parked-input reporting; App suite 446 passed with 4 pre-existing timing failures in the `test_live_*` long-poll harness when run as a group (each passes alone) |
 | 0.2.0 | `6d3fa9aab28ecd180c11137da01cd94997c00db9` | 212 passed / 205.51s | bounded activation diagnostics: 32 retained request views, older ones journal-only; paused activations keep theirs. App suite 446 passed, 4 environment failures (three `test_live_*` long-poll timing tests, one TTY console test); the runtime/adapter suites alone: 56 passed |
+| 0.2.0 | `9f2b1d64d21fe8a05c3e39f1adc3516eaeafa0bf` | 214 passed / 197.02s | bounded 256-activation / 1,024-event history windows with cumulative counters; App runtime suites 56 passed and smoke passed. Full App run: 445 passed, 5 failed (one simulation counter fixture, fixed and focused pass; four live polling timeouts) |
 
 ## Depends on (public, stable)
 
@@ -198,13 +202,13 @@ Read surface the application relies on:
 | Attribute | Why | Durability |
 | --- | --- | --- |
 | `bus.session_id` | diagnostics, restart detection | process only |
-| `actor.activations` | reply text + input correlation | process only |
-| `runtime.wait_for_activation(...)` / `runtime.activation_for_event(...)` | supported input→output correlation; the adapter awaits the activation that consumed its event instead of scanning the ledger | process only |
-| `agent.activation_finished` (`Runtime.trace`, journal) | one event per settle, carrying `activation_id`, `input_event_ids`, `status`, `error_kind`, `ended_at`, `settle_version` | journal |
+| `actor.activations` / `actor.activation_count` | recent diagnostic objects / lifetime activation count | process only; at most 256 objects |
+| `runtime.wait_for_activation(...)` / `runtime.activation_for_event(...)` | supported input→output correlation; indexes share the 256-activation window, expired queries return `None` | process only |
+| `agent.activation_finished` (`Runtime.trace`, journal) | one event per settle; trace retains at most 1,024 events, journal is the historical inspection layer | journal, subject to its reported queue errors/drops |
 | `actor.tools` | startup assertion that exposed tools exactly match the injected closed catalog (or none when no catalog is supplied) | derived |
 | `actor.transcript` | tests only | process only |
 | `actor.paused` | stop waiting instead of burning the timeout | process only |
-| `trace` | tests and diagnostics | process only |
+| `trace` / `Runtime.event_count(type=None)` | recent event diagnostics / cumulative observed counts | trace is process-only; historical rows are journal inspection |
 | `status()` | diagnostics | derived |
 | `inspect_durable(session_id=)` / `durable_sessions()` | post-restart inspection | SQLite |
 

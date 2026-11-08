@@ -245,8 +245,8 @@ regressions in `tests/test_runtime_path.py`.
 
 **Evidence**
 Read: `llm.py` `Transcript` never drops projections except through model-ordered
-compaction at the context limit. `Runtime.trace` and `actor.activations` grow
-without bound too (the v0.4 docs list this as an open decision).
+Before Core `9f2b1d6`, `Runtime.trace` and `actor.activations` also grew without
+bound; Core now caps both resident diagnostic windows and keeps lifetime counters.
 
 **Failed scenario**
 A long-lived group chat that keeps one runtime alive forever grows memory without
@@ -256,27 +256,35 @@ underlying property is real for any durable session.
 **Generic?** Yes, but it is a known and documented Core decision, not an oversight.
 
 **Workaround in use**
+
 A `Runtime` is created lazily per chat and its transcript is the model view only;
 the application's own `messages` table is the durable chat log, trimmed by
-`history_messages` at prompt-build time. Long sessions are bounded by restarting
-the process, not by the runtime releasing memory.
+`history_messages` at prompt-build time. Core now bounds activation snapshots,
+the activation ledger and the trace. The transcript/archive and repeated retries
+on one paused activation remain unbounded, so process restarts are still the
+outer memory bound for a long-lived session.
 
-**Progress in Core `6d3fa9a`**
+**Progress in Core `9f2b1d6`**
 Measured with 60 scripted turns on one runtime: `activations` held 249 KB of
 request snapshots against 17 KB of trace payloads and a 7.8 KB transcript. The
 snapshot is the exact message list a request carried, so it grows with the
-conversation as well as with turn count — the dominant resident cost. Core now
-keeps `snapshot` and `context_metrics["input_events"]` only for the last 32
-committed activations (`ACTIVATION_SNAPSHOT_RETENTION`); older views stay in the
-journal's per-activation transcript snapshots. Paused activations are never
-pruned, because a retry replays that exact view.
+conversation as well as with turn count — the dominant resident cost. Core keeps
+`snapshot` and `context_metrics["input_events"]` only for the last 32 committed
+activations (`ACTIVATION_SNAPSHOT_RETENTION`); older views stay in per-activation
+transcript snapshots in the journal. A current paused activation keeps its exact
+view so retry does not rebuild it from a changed transcript.
 
-At 200 turns the resident snapshot cost is now bounded by 32 × current transcript
-size (749 KB at 25 KB of transcript) instead of the sum of all 200 views. Still
-open: the `activations` list itself, `Runtime.trace` payloads (57 KB at 200
-turns), and the per-activation `context_metrics` remainder (152 KB at 200 turns).
-Those grow linearly with session length; the first two need a stated retention
-policy before trimming, and the trace is the runtime's own diagnostic record.
+At 200 turns the resident snapshot cost was 749 KB for a 25 KB transcript,
+instead of the sum of all 200 views. Core now also retains at most 256 activation
+objects and 1,024 trace events. `activation_count` and `Runtime.event_count(...)`
+remain cumulative; correlation indexes expire with evicted activations, and
+waits for expired ids return `None` immediately. Running and current paused
+activations are exempt from pruning. The journal receives historical event and
+activation records; `journal.incomplete` / `journal.dropped` reports writer loss.
+
+Still open: the transcript/archive remains append-only, and retries can grow the
+attempt list on one current paused activation. Other per-activation metrics are
+now limited to the retained activation window. G7 remains partly mitigated.
 
 ---
 
