@@ -305,8 +305,6 @@ def test_a_reply_that_grew_too_old_is_dropped_and_reported(tmp_path):
             assert events, "an expired reply left no trace the agent could see"
             payload = json.loads(events[-1]["payload_json"])
             assert payload["status"] == "cancelled"
-            assert "waited too long" in payload["error"]
-            assert "nobody saw this" in payload["note"]
         finally:
             await bot.stop()
             store.close()

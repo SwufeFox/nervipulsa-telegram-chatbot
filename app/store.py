@@ -38,7 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+MAX_OPEN_INTENTS = 32
+MAX_INTENT_ID_LENGTH = 200
 
 # An event wait without an explicit filter means a new inbound Telegram message
 # in this scope. Synthetic scheduler and workflow observations need an explicit
@@ -166,12 +168,9 @@ CREATE TABLE IF NOT EXISTS autonomous_calls (
 -- One logical episode of participation in a scope: the durable identity that
 -- outlives any single model activation.
 --
--- A `workflows` row is one activation; this row is the work the agent is in the
+-- A workflow is one model activation; this row is the work the agent is in the
 -- middle of. While an episode is open, every activation for that scope joins
--- it, so a wake after a wait or a tool result is provably the continuation of
--- the same job rather than a fresh decision task. `intent_id` is the model's
--- own statement of the goal, when it made one.
---
+-- it. Individual commitments link back to this aggregate episode.
 -- Deliberately data, not a coroutine: it survives a restart, and a process that
 -- dies mid-episode leaves it open so the replayed observations resume it.
 CREATE TABLE IF NOT EXISTS workflow_episodes (
@@ -180,7 +179,6 @@ CREATE TABLE IF NOT EXISTS workflow_episodes (
     topic_id     INTEGER,
     state        TEXT    NOT NULL CHECK (state IN ('open', 'closed')),
     reason       TEXT,
-    intent_id    TEXT,
     opened_at    REAL    NOT NULL,
     updated_at   REAL    NOT NULL,
     closed_at    REAL
@@ -268,20 +266,13 @@ CREATE TABLE IF NOT EXISTS agent_waits (
     resolved_at    REAL,
     -- The episode that asked for this wait. A timer firing is a continuation
     -- trigger, so the wait must be attributable to the work it resumes.
-    episode_id     TEXT
+    episode_id     TEXT,
+    intent_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_waits_due ON agent_waits (status, due_at);
 
--- One open intent per scope: "what was I in the middle of".
---
--- A workflow is one model activation; a wait only says when to be woken. Neither
--- carries the reason the agent wanted to come back, so every wake rebuilt a
--- short decision task and the conversation had no thread across activations.
--- This row is that thread. It is deliberately just data - it does not imply a
--- running process, and it survives as long as its scope does.
---
--- `status` is terminal only through an explicit resolution or expiry; a failed
--- workflow does NOT close it, because failing to act is not losing interest.
+-- One scope can carry several independent, message-anchored commitments.
+-- Legacy unanchored entries remain unattributed with a NULL anchor.
 CREATE TABLE IF NOT EXISTS agent_intents (
     intent_id    TEXT PRIMARY KEY,
     chat_id      INTEGER NOT NULL,
@@ -294,17 +285,14 @@ CREATE TABLE IF NOT EXISTS agent_intents (
     updated_at   REAL    NOT NULL,
     expires_at   REAL,
     resolved_by  TEXT,
-    resolved_at  REAL
+    resolved_at  REAL,
+    anchor_message_id INTEGER,
+    owner_id     INTEGER,
+    episode_id   TEXT
 );
--- At most one *open* intent per scope. A partial index is the constraint:
--- closing an intent must always be possible, opening a second one must not.
-CREATE UNIQUE INDEX IF NOT EXISTS agent_intents_one_open
-    ON agent_intents (chat_id, topic_id)
-    WHERE status = 'open';
--- SQLite treats NULLs as distinct in unique indexes, so the index above alone
--- cannot prevent multiple open intents in a scope without a topic.
-CREATE UNIQUE INDEX IF NOT EXISTS agent_intents_one_open_no_topic
-    ON agent_intents (chat_id) WHERE status = 'open' AND topic_id IS NULL;
+-- Anchor uniqueness is scoped, including the NULL-topic case. Legacy NULL
+-- anchors are not unique: multiple unattributed historical commitments survive.
+
 
 -- Small, agent-authored notes. Source and provenance stay attached; this is
 -- not a channel for the model to rewrite its own instructions or permissions.
@@ -342,11 +330,10 @@ CREATE TABLE IF NOT EXISTS actions (
     created_at      REAL    NOT NULL,
     updated_at      REAL    NOT NULL,
     expires_at      REAL,
-    -- The goal this message claims to complete. Written together with the
-    -- action so a restart between "Telegram accepted it" and "close the goal"
-    -- can still finish the job; without persisting it, an intent would outlive
-    -- the message that was supposed to end it.
-    intent_id       TEXT
+    -- Association and completion are separate: a progress reply can be linked
+    -- to a commitment without resolving it, while a completed send closes its ID.
+    intent_id       TEXT,
+    resolves_intent INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS actions_status ON actions (status, created_at);
 CREATE INDEX IF NOT EXISTS actions_scope ON actions (chat_id, topic_id, status);
@@ -432,64 +419,82 @@ class Store:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._migrate_observation_cursors()
-        self._migrate_action_intents()
-        self._migrate_episode_columns()
-        self._conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
-        self._conn.commit()
+        self._migrate_conversation_continuity()
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _migrate_action_intents(self) -> None:
-        """Add `actions.intent_id` to databases that predate agent intents.
-
-        `CREATE TABLE IF NOT EXISTS` leaves an existing table untouched, so a
-        deployed database keeps the old column set and every insert would fail
-        on the extra value. Checked against `table_info` rather than catching
-        the error, so the intent is explicit and a skipped migration cannot
-        look like success.
-        """
-        columns = {row["name"] for row in
-                   self._conn.execute("PRAGMA table_info(actions)").fetchall()}
-        if "intent_id" in columns:
-            return
-        self._conn.execute("BEGIN IMMEDIATE")
+    def _migrate_conversation_continuity(self) -> None:
+        """Atomically upgrade singleton commitments and their durable links."""
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            self._conn.execute("ALTER TABLE actions ADD COLUMN intent_id TEXT")
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
+            def columns(table: str) -> set[str]:
+                return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for table in ("workflows", "agent_waits"):
+                if "episode_id" not in columns(table):
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN episode_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS workflows_episode"
+                         " ON workflows (episode_id, created_at)")
+
+            intent_columns = columns("agent_intents")
+            for name, definition in (("anchor_message_id", "INTEGER"),
+                                     ("owner_id", "INTEGER"), ("episode_id", "TEXT")):
+                if name not in intent_columns:
+                    conn.execute(f"ALTER TABLE agent_intents ADD COLUMN {name} {definition}")
+            if "intent_id" not in columns("agent_waits"):
+                conn.execute("ALTER TABLE agent_waits ADD COLUMN intent_id TEXT")
+            action_columns = columns("actions")
+            if "intent_id" not in action_columns:
+                conn.execute("ALTER TABLE actions ADD COLUMN intent_id TEXT")
+                action_columns.add("intent_id")
+            if "resolves_intent" not in action_columns:
+                conn.execute("ALTER TABLE actions ADD COLUMN resolves_intent INTEGER NOT NULL DEFAULT 0")
+                conn.execute("UPDATE actions SET resolves_intent = 1 WHERE intent_id IS NOT NULL")
+
+            episode_columns = columns("workflow_episodes")
+            if "intent_id" in episode_columns:
+                conn.execute(
+                    "UPDATE agent_intents SET episode_id = (SELECT e.episode_id"
+                    " FROM workflow_episodes e WHERE e.intent_id = agent_intents.intent_id"
+                    " AND e.chat_id = agent_intents.chat_id"
+                    " AND e.topic_id IS agent_intents.topic_id LIMIT 1)"
+                    " WHERE episode_id IS NULL AND EXISTS (SELECT 1 FROM workflow_episodes e"
+                    " WHERE e.intent_id = agent_intents.intent_id"
+                    " AND e.chat_id = agent_intents.chat_id"
+                    " AND e.topic_id IS agent_intents.topic_id)"
+                )
+                conn.execute(
+                    "UPDATE agent_waits SET intent_id = (SELECT e.intent_id"
+                    " FROM workflow_episodes e WHERE e.episode_id = agent_waits.episode_id"
+                    " AND e.chat_id = agent_waits.chat_id"
+                    " AND e.topic_id IS agent_waits.topic_id)"
+                    " WHERE intent_id IS NULL AND episode_id IS NOT NULL AND EXISTS ("
+                    " SELECT 1 FROM workflow_episodes e WHERE e.episode_id = agent_waits.episode_id"
+                    " AND e.intent_id IS NOT NULL AND e.chat_id = agent_waits.chat_id"
+                    " AND e.topic_id IS agent_waits.topic_id)"
+                )
+                conn.execute("ALTER TABLE workflow_episodes DROP COLUMN intent_id")
+
+            conn.execute("DROP INDEX IF EXISTS agent_intents_one_open")
+            conn.execute("DROP INDEX IF EXISTS agent_intents_one_open_no_topic")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS agent_intents_anchor_topic"
+                         " ON agent_intents(chat_id, topic_id, anchor_message_id)"
+                         " WHERE status = 'open' AND anchor_message_id IS NOT NULL"
+                         " AND topic_id IS NOT NULL")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS agent_intents_anchor_no_topic"
+                         " ON agent_intents(chat_id, anchor_message_id)"
+                         " WHERE status = 'open' AND anchor_message_id IS NOT NULL"
+                         " AND topic_id IS NULL")
+            conn.execute("CREATE INDEX IF NOT EXISTS actions_intent ON actions(intent_id, status)")
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
             raise
-
-    def _migrate_episode_columns(self) -> None:
-        """Add the episode links to databases that predate workflow episodes.
-
-        Both columns are nullable and older rows keep NULL, which reads as "this
-        work predates episodes" rather than being silently attached to a made-up
-        identity. Checked against `table_info` so a skipped migration is visible
-        instead of surfacing later as an insert failure.
-        """
-        wanted = {"workflows": "episode_id", "agent_waits": "episode_id"}
-        for table, column in wanted.items():
-            columns = {row["name"] for row in
-                       self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
-            if column in columns:
-                continue
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
-                self._conn.commit()
-            except Exception:
-                self._conn.rollback()
-                raise
-        # Only valid once the column exists, so it cannot live in SCHEMA.
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS workflows_episode"
-            " ON workflows (episode_id, created_at)")
-        self._conn.commit()
 
     def _migrate_observation_cursors(self) -> None:
         """Atomically rebuild legacy cursors and recover interrupted rebuilds."""
@@ -785,15 +790,6 @@ class Store:
         )
         return rows[0] if rows else None
 
-    def attach_episode_intent(self, episode_id: str, intent_id: str | None) -> None:
-        """Record which goal the open episode has claimed."""
-        with self._write() as conn:
-            conn.execute(
-                "UPDATE workflow_episodes SET intent_id = ?, updated_at = ?"
-                " WHERE episode_id = ? AND state = 'open'",
-                (intent_id, self._now(), episode_id),
-            )
-
     def close_episode(self, episode_id: str, *, reason: str) -> bool:
         """End the episode. Idempotent; closing twice reports False."""
         with self._write() as conn:
@@ -970,6 +966,15 @@ class Store:
             sequence = int(existing[0])
         else:
             payload: dict[str, Any] = {"action_id": action_id, "status": status, "text": text[:500]}
+            associated = conn.execute(
+                "SELECT a.intent_id, i.anchor_message_id FROM actions a"
+                " LEFT JOIN agent_intents i ON i.intent_id = a.intent_id"
+                " WHERE a.action_id = ?", (action_id,),
+            ).fetchone()
+            if associated is not None and associated["intent_id"] is not None:
+                payload["intent_id"] = associated["intent_id"]
+                if associated["anchor_message_id"] is not None:
+                    payload["anchor_message_id"] = associated["anchor_message_id"]
             if status == "unknown":
                 payload["note"] = "delivery unconfirmed: the message may already be visible in the group. It is not retried."
             elif status == "cancelled":
@@ -1057,6 +1062,7 @@ class Store:
         purpose: str, event_types: list[str] | None = None,
         sender_id: int | None = None, due_at: float | None = None,
         expires_at: float | None = None, episode_id: str | None = None,
+        intent_id: str | None = None,
     ) -> None:
         event_filter = None
         if event_types is not None or sender_id is not None:
@@ -1065,105 +1071,195 @@ class Store:
                 ensure_ascii=False,
             )
         with self._write() as conn:
+            if intent_id is not None and conn.execute(
+                "SELECT 1 FROM agent_intents WHERE intent_id = ? AND chat_id = ?"
+                " AND topic_id IS ? AND status = 'open'", (intent_id, chat_id, topic_id),
+            ).fetchone() is None:
+                raise ValueError("unknown_intent")
             conn.execute(
                 "INSERT OR REPLACE INTO agent_waits (wait_id, chat_id, topic_id, kind,"
                 " purpose, event_types_json, due_at, expires_at, status, created_at,"
-                " resolved_at, episode_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?)",
+                " resolved_at, episode_id, intent_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?)",
                 (wait_id, chat_id, topic_id, kind, purpose, event_filter,
-                 due_at, expires_at, self._now(), episode_id),
+                 due_at, expires_at, self._now(), episode_id, intent_id),
             )
 
     # -- agent intents (continuation across activations) ---------------------
 
-    def open_intent(
-        self, *, intent_id: str, chat_id: int, topic_id: int | None,
-        goal: str, expires_at: float | None = None,
-    ) -> bool:
-        """Record what the agent is now in the middle of.
+    def open_intents(self, chat_id: int, topic_id: int | None) -> list[sqlite3.Row]:
+        return self._query(
+            "SELECT * FROM agent_intents WHERE chat_id = ? AND topic_id IS ?"
+            " AND status = 'open' ORDER BY created_at, intent_id", (chat_id, topic_id),
+        )
 
-        Returns False when this scope already has an open intent, which the
-        partial unique index enforces at the storage layer: two concurrent
-        activations for one topic must not both invent a goal.
-        """
-        if not goal.strip():
-            return False
-        try:
-            with self._write() as conn:
-                conn.execute(
-                    "INSERT INTO agent_intents (intent_id, chat_id, topic_id, goal,"
-                    " status, created_at, updated_at, expires_at)"
-                    " VALUES (?, ?, ?, ?, 'open', ?, ?, ?)",
-                    (intent_id, chat_id, topic_id, goal[:1000], self._now(),
-                     self._now(), expires_at),
-                )
-            return True
-        except sqlite3.IntegrityError:
-            return False
-
-    def current_intent(self, chat_id: int, topic_id: int | None) -> sqlite3.Row | None:
-        """The scope's one open intent, if any."""
+    def intent_for_anchor(self, chat_id: int, topic_id: int | None,
+                          anchor_message_id: int) -> sqlite3.Row | None:
         rows = self._query(
             "SELECT * FROM agent_intents WHERE chat_id = ? AND topic_id IS ?"
-            " AND status = 'open' ORDER BY created_at LIMIT 1",
-            (chat_id, topic_id),
+            " AND anchor_message_id = ? AND status = 'open'",
+            (chat_id, topic_id, anchor_message_id),
         )
         return rows[0] if rows else None
 
-    def replace_intent(self, *, intent_id: str, chat_id: int, topic_id: int | None,
-                       goal: str, expires_at: float | None) -> None:
-        """Replace the goal with a new identity so old sends cannot close it."""
-        with self._write(immediate=True) as conn:
-            now = self._now()
-            conn.execute(
-                "UPDATE agent_intents SET status = 'abandoned', resolved_by = 'replaced',"
-                " resolved_at = ?, updated_at = ? WHERE chat_id = ? AND topic_id IS ?"
-                " AND status = 'open'", (now, now, chat_id, topic_id))
-            conn.execute(
-                "INSERT INTO agent_intents (intent_id, chat_id, topic_id, goal, status,"
-                " created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, 'open', ?, ?, ?)",
-                (intent_id, chat_id, topic_id, goal, now, now, expires_at))
-
-    def update_intent_goal(self, intent_id: str, goal: str) -> bool:
-        """Refine the goal without closing it: what she wants can change."""
-        if not goal.strip():
-            return False
-        with self._write() as conn:
-            cursor = conn.execute(
-                "UPDATE agent_intents SET goal = ?, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'open'",
-                (goal[:1000], self._now(), intent_id),
-            )
-            return cursor.rowcount == 1
-
-    def intent_is_open(self, intent_id: str) -> bool:
-        """Whether a specific goal is still open. Used after delivery."""
+    def get_intent(self, intent_id: str, *, chat_id: int,
+                   topic_id: int | None) -> sqlite3.Row | None:
         rows = self._query(
-            "SELECT 1 FROM agent_intents WHERE intent_id = ? AND status = 'open'"
-            " LIMIT 1", (intent_id,))
-        return bool(rows)
+            "SELECT * FROM agent_intents WHERE intent_id = ? AND chat_id = ?"
+            " AND topic_id IS ?", (intent_id, chat_id, topic_id),
+        )
+        return rows[0] if rows else None
 
-    def resolve_intent(
-        self, intent_id: str, *, how: str, status: str = "resolved",
-    ) -> bool:
-        """Close an intent. Idempotent: closing twice reports False, not an error."""
+    @staticmethod
+    def _source_owner(conn: sqlite3.Connection, chat_id: int, topic_id: int | None,
+                      anchor_message_id: int) -> int | None:
+        row = conn.execute(
+            "SELECT sender_id FROM messages WHERE chat_id = ? AND topic_id IS ?"
+            " AND message_id = ?", (chat_id, topic_id, anchor_message_id),
+        ).fetchone()
+        return None if row is None else row["sender_id"]
+
+    def _cancel_intent_work(self, conn: sqlite3.Connection, intent_id: str,
+                            now: float) -> None:
+        conn.execute(
+            "UPDATE agent_waits SET status = 'cancelled', resolved_at = ?"
+            " WHERE intent_id = ? AND status = 'active'", (now, intent_id),
+        )
+        rows = list(conn.execute(
+            "SELECT * FROM actions WHERE intent_id = ? AND status = 'pending'", (intent_id,)
+        ))
+        for action in rows:
+            conn.execute(
+                "UPDATE actions SET status = 'cancelled', error = 'intent_closed_unexecuted',"
+                " updated_at = ? WHERE action_id = ? AND status = 'pending'",
+                (now, action["action_id"]),
+            )
+            self._record_action_result(
+                conn, action_id=action["action_id"], chat_id=action["chat_id"],
+                topic_id=action["topic_id"], status="cancelled", text=action["text"],
+                error="intent_closed_unexecuted",
+            )
+
+    def open_intent(self, *, intent_id: str, chat_id: int, topic_id: int | None,
+                    goal: str, anchor_message_id: int, expires_at: float | None = None,
+                    episode_id: str | None = None) -> bool:
+        if (not goal.strip() or not intent_id or len(intent_id) > MAX_INTENT_ID_LENGTH
+                or anchor_message_id <= 0):
+            return False
+        with self._write(immediate=True) as conn:
+            source = conn.execute(
+                "SELECT sender_id FROM messages WHERE chat_id = ? AND topic_id IS ?"
+                " AND message_id = ?", (chat_id, topic_id, anchor_message_id),
+            ).fetchone()
+            if source is None:
+                return False
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_intents WHERE chat_id = ? AND topic_id IS ?"
+                " AND status = 'open'", (chat_id, topic_id),
+            ).fetchone()[0]
+            if count >= MAX_OPEN_INTENTS:
+                return False
+            now = self._now()
+            try:
+                conn.execute(
+                    "INSERT INTO agent_intents (intent_id, chat_id, topic_id, goal, status,"
+                    " created_at, updated_at, expires_at, anchor_message_id, owner_id, episode_id)"
+                    " VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+                    (intent_id, chat_id, topic_id, goal[:1000], now, now, expires_at,
+                     anchor_message_id, source["sender_id"], episode_id),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            return True
+
+    def replace_intent(self, *, intent_id: str, chat_id: int, topic_id: int | None,
+                       goal: str, expires_at: float | None = None,
+                       anchor_message_id: int | None = None,
+                       replaces_intent_id: str | None = None,
+                       episode_id: str | None = None) -> sqlite3.Row:
+        if not intent_id or len(intent_id) > MAX_INTENT_ID_LENGTH:
+            raise ValueError("unknown_intent")
+        if (anchor_message_id is None) == (replaces_intent_id is None):
+            raise ValueError("unknown_intent: provide exactly one replacement reference")
+        if replaces_intent_id is not None and (
+                not replaces_intent_id or len(replaces_intent_id) > MAX_INTENT_ID_LENGTH):
+            raise ValueError("unknown_intent")
+        if anchor_message_id is not None and anchor_message_id <= 0:
+            raise ValueError("invalid_anchor")
+        if not goal.strip():
+            raise ValueError("invalid_goal")
+        with self._write(immediate=True) as conn:
+            if replaces_intent_id is not None:
+                old = conn.execute(
+                    "SELECT * FROM agent_intents WHERE intent_id = ? AND chat_id = ?"
+                    " AND topic_id IS ? AND status = 'open'",
+                    (replaces_intent_id, chat_id, topic_id),
+                ).fetchone()
+                if old is None:
+                    raise ValueError("unknown_intent")
+                source_id = old["anchor_message_id"]
+            else:
+                source_id = anchor_message_id
+                old = conn.execute(
+                    "SELECT * FROM agent_intents WHERE chat_id = ? AND topic_id IS ?"
+                    " AND anchor_message_id = ? AND status = 'open'",
+                    (chat_id, topic_id, source_id),
+                ).fetchone()
+            source = None
+            if source_id is not None:
+                source = conn.execute(
+                    "SELECT sender_id FROM messages WHERE chat_id = ? AND topic_id IS ?"
+                    " AND message_id = ?", (chat_id, topic_id, source_id),
+                ).fetchone()
+                if source is None:
+                    raise ValueError("invalid_anchor")
+            owner_id = source["sender_id"] if source is not None else old["owner_id"]
+            if old is not None and old["goal"] == goal[:1000] and old["expires_at"] == expires_at:
+                return old
+            count = conn.execute(
+                "SELECT COUNT(*) FROM agent_intents WHERE chat_id = ? AND topic_id IS ?"
+                " AND status = 'open'", (chat_id, topic_id),
+            ).fetchone()[0]
+            if old is None and count >= MAX_OPEN_INTENTS:
+                raise ValueError("intent_capacity_exceeded")
+            now = self._now()
+            if old is not None:
+                conn.execute(
+                    "UPDATE agent_intents SET status = 'abandoned', resolved_by = 'replaced',"
+                    " resolved_at = ?, updated_at = ? WHERE intent_id = ? AND status = 'open'",
+                    (now, now, old["intent_id"]),
+                )
+                self._cancel_intent_work(conn, str(old["intent_id"]), now)
+            try:
+                conn.execute(
+                    "INSERT INTO agent_intents (intent_id, chat_id, topic_id, goal, status,"
+                    " created_at, updated_at, expires_at, anchor_message_id, owner_id, episode_id)"
+                    " VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+                    (intent_id, chat_id, topic_id, goal[:1000], now, now, expires_at,
+                     source_id, owner_id,
+                     episode_id if episode_id is not None else (old["episode_id"] if old else None)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("unknown_intent") from exc
+            return conn.execute("SELECT * FROM agent_intents WHERE intent_id = ?",
+                                (intent_id,)).fetchone()
+
+    def resolve_intent(self, intent_id: str, *, how: str,
+                       status: str = "resolved") -> bool:
         if status not in {"resolved", "abandoned"}:
             raise ValueError(f"not a terminal intent status: {status}")
-        with self._write() as conn:
+        with self._write(immediate=True) as conn:
+            now = self._now()
             cursor = conn.execute(
-                "UPDATE agent_intents SET status = ?, resolved_by = ?,"
-                " resolved_at = ?, updated_at = ?"
-                " WHERE intent_id = ? AND status = 'open'",
-                (status, how[:200], self._now(), self._now(), intent_id),
+                "UPDATE agent_intents SET status = ?, resolved_by = ?, resolved_at = ?,"
+                " updated_at = ? WHERE intent_id = ? AND status = 'open'",
+                (status, how[:200], now, now, intent_id),
             )
+            if cursor.rowcount:
+                self._cancel_intent_work(conn, intent_id, now)
             return cursor.rowcount == 1
 
     def expire_intents(self, now: float | None = None) -> list[sqlite3.Row]:
-        """Close intents whose deadline passed. Returns what was expired.
-
-        Expiry is a resolution, not a failure: it is reported back to the agent
-        so a forgotten goal does not silently keep colouring its context.
-        """
         moment = self._now() if now is None else now
         with self._write(immediate=True) as conn:
             rows = list(conn.execute(
@@ -1174,10 +1270,12 @@ class Store:
                     "UPDATE agent_intents SET status = 'abandoned', resolved_by = 'expired',"
                     " resolved_at = ?, updated_at = ? WHERE intent_id = ? AND status = 'open'",
                     (moment, moment, row["intent_id"]))
+                self._cancel_intent_work(conn, str(row["intent_id"]), moment)
                 update_id = conn.execute(
                     "SELECT MIN(COALESCE(MIN(update_id), 0), 0) - 1 FROM observation_events"
                 ).fetchone()[0]
                 payload = {"intent_id": row["intent_id"], "goal": row["goal"],
+                           "anchor_message_id": row["anchor_message_id"],
                            "note": "This goal reached its deadline and is closed."}
                 cursor = conn.execute(
                     "INSERT INTO observation_events (update_id, chat_id, topic_id, kind, received_at, payload_json)"
@@ -1188,19 +1286,28 @@ class Store:
                              (f"intent-expired:{row['intent_id']}", cursor.lastrowid))
             return rows
 
+    def intent_is_open(self, intent_id: str) -> bool:
+        return bool(self._query(
+            "SELECT 1 FROM agent_intents WHERE intent_id = ? AND status = 'open' LIMIT 1",
+            (intent_id,)))
+
     def active_waits(self, chat_id: int, topic_id: int | None) -> list[sqlite3.Row]:
         return self._query(
-            "SELECT * FROM agent_waits WHERE chat_id = ? AND topic_id IS ? AND status = 'active'"
-            " ORDER BY created_at", (chat_id, topic_id),
+            "SELECT w.*, i.anchor_message_id FROM agent_waits w"
+            " LEFT JOIN agent_intents i ON i.intent_id = w.intent_id"
+            " WHERE w.chat_id = ? AND w.topic_id IS ? AND w.status = 'active'"
+            " ORDER BY w.created_at", (chat_id, topic_id),
         )
 
     def due_waits(self, now: float) -> list[sqlite3.Row]:
         """Timers that have come due. Firing only grants another look."""
         return self._query(
-            "SELECT * FROM agent_waits WHERE status = 'active'"
-            " AND ((due_at IS NOT NULL AND due_at <= ?)"
-            "  OR (expires_at IS NOT NULL AND expires_at <= ?))"
-            " ORDER BY due_at", (now, now),
+            "SELECT w.*, i.anchor_message_id FROM agent_waits w"
+            " LEFT JOIN agent_intents i ON i.intent_id = w.intent_id"
+            " WHERE w.status = 'active'"
+            " AND ((w.due_at IS NOT NULL AND w.due_at <= ?)"
+            "  OR (w.expires_at IS NOT NULL AND w.expires_at <= ?))"
+            " ORDER BY w.due_at", (now, now),
         )
 
     def resolve_wait(self, wait_id: str, status: str) -> bool:
@@ -1257,6 +1364,8 @@ class Store:
             for observation in observations:
                 sequence, kind = observation[:2]
                 sender_id = observation[2] if len(observation) == 3 else None
+                if row["intent_id"] is not None and row["kind"] == "until":
+                    continue
                 if self._wait_matches_event(row, kind, sender_id):
                     matched[wait_id] = {
                         "wait_id": wait_id,
@@ -1265,6 +1374,12 @@ class Store:
                         "event_kind": kind,
                         "event_sequence": sequence,
                     }
+                    if row["intent_id"] is not None:
+                        matched[wait_id]["intent_id"] = str(row["intent_id"])
+                        intent = self.get_intent(str(row["intent_id"]), chat_id=chat_id,
+                                                 topic_id=topic_id)
+                        if intent is not None and intent["anchor_message_id"] is not None:
+                            matched[wait_id]["anchor_message_id"] = int(intent["anchor_message_id"])
                     if sender_id is not None:
                         matched[wait_id]["event_sender_id"] = sender_id
                     break
@@ -1288,6 +1403,8 @@ class Store:
             expires_at = row["expires_at"]
             if expires_at is not None and float(expires_at) <= now:
                 self.resolve_wait(wait_id, "expired")
+                continue
+            if row["intent_id"] is not None and row["kind"] == "until":
                 continue
             if self._wait_matches_event(row, kind, sender_id):
                 if self.resolve_wait(wait_id, "satisfied"):
@@ -1330,18 +1447,25 @@ class Store:
         topic_id: int | None, text: str, observed_through: int,
         reply_to: int | None = None, freshness: str = "strict",
         max_unobserved: int = 0, expires_at: float | None = None,
-        intent_id: str | None = None,
+        intent_id: str | None = None, resolves_intent: bool = False,
     ) -> bool:
         """Record the intent once. Re-preparing the same ID is a no-op."""
         with self._write() as conn:
+            if conn.execute("SELECT 1 FROM actions WHERE action_id = ?", (action_id,)).fetchone():
+                return False
+            if intent_id is not None and conn.execute(
+                "SELECT 1 FROM agent_intents WHERE intent_id = ? AND chat_id = ?"
+                " AND topic_id IS ? AND status = 'open'", (intent_id, chat_id, topic_id),
+            ).fetchone() is None:
+                raise ValueError("unknown_intent")
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO actions (action_id, workflow_id, chat_id, topic_id,"
                 " reply_to, text, observed_through, freshness, max_unobserved, status,"
-                " created_at, updated_at, expires_at, intent_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                " created_at, updated_at, expires_at, intent_id, resolves_intent)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
                 (action_id, workflow_id, chat_id, topic_id, reply_to, text,
                  observed_through, freshness, max_unobserved, self._now(), self._now(),
-                 expires_at, intent_id),
+                 expires_at, intent_id, int(resolves_intent)),
             )
             return cursor.rowcount == 1
 
@@ -1364,6 +1488,22 @@ class Store:
             ).fetchone()
             if row is None or row["status"] != "pending":
                 return "not-claimable"
+            if row["intent_id"] is not None:
+                intent = conn.execute(
+                    "SELECT status FROM agent_intents WHERE intent_id = ? AND chat_id = ?"
+                    " AND topic_id IS ?", (row["intent_id"], row["chat_id"], row["topic_id"]),
+                ).fetchone()
+                if intent is None or intent["status"] != "open":
+                    conn.execute(
+                        "UPDATE actions SET status = 'cancelled', error = 'intent_closed_unexecuted',"
+                        " updated_at = ? WHERE action_id = ? AND status = 'pending'",
+                        (moment, action_id),
+                    )
+                    self._record_action_result(
+                        conn, action_id=action_id, chat_id=row["chat_id"], topic_id=row["topic_id"],
+                        status="cancelled", text=row["text"], error="intent_closed_unexecuted",
+                    )
+                    return "not-claimable"
             if row["workflow_id"] is not None:
                 workflow = conn.execute("SELECT state FROM workflows WHERE workflow_id = ?",
                                         (row["workflow_id"],)).fetchone()
@@ -1374,6 +1514,10 @@ class Store:
                     "UPDATE actions SET status = 'cancelled',"
                     " error = 'expired_unexecuted', updated_at = ? WHERE action_id = ?",
                     (moment, action_id),
+                )
+                self._record_action_result(
+                    conn, action_id=action_id, chat_id=row["chat_id"], topic_id=row["topic_id"],
+                    status="cancelled", text=row["text"], error="expired_unexecuted",
                 )
                 return "expired"
             # Sequence numbers are global, so gaps can belong to other scopes.
@@ -1414,17 +1558,21 @@ class Store:
             raise ValueError(f"bad action status: {status}")
         with self._write(immediate=True) as conn:
             row = conn.execute("SELECT * FROM actions WHERE action_id = ?", (action_id,)).fetchone()
-            if row is None or row["status"] not in ({"pending", "sending"} if status == "cancelled" else {"sending"}):
+            allowed = {"pending"} if status == "cancelled" else {"sending"}
+            if row is None or row["status"] not in allowed:
                 return False
             conn.execute(
                 "UPDATE actions SET status = ?, telegram_message_id = ?, error = ?, updated_at = ? WHERE action_id = ?",
                 (status, telegram_message_id, (error or "")[:500] or None, self._now(), action_id),
             )
-            if status == "sent" and row["intent_id"]:
-                conn.execute(
+            if status == "sent" and row["intent_id"] and row["resolves_intent"]:
+                changed = conn.execute(
                     "UPDATE agent_intents SET status = 'resolved', resolved_by = 'send_message',"
-                    " resolved_at = ?, updated_at = ? WHERE intent_id = ? AND status = 'open'",
-                    (self._now(), self._now(), row["intent_id"]))
+                    " resolved_at = ?, updated_at = ? WHERE intent_id = ? AND chat_id = ?"
+                    " AND topic_id IS ? AND status = 'open'",
+                    (self._now(), self._now(), row["intent_id"], row["chat_id"], row["topic_id"]))
+                if changed.rowcount == 1:
+                    self._cancel_intent_work(conn, str(row["intent_id"]), self._now())
             if status in {"failed", "unknown", "cancelled"}:
                 # Same transaction as the status change: a crash between them
                 # would leave a message the agent believes was sent, or one
@@ -1663,6 +1811,7 @@ class Store:
                     "sender_label": message.sender_label, "is_bot": message.is_bot,
                     "text": message.text, "created_at": message.created_at,
                     "reply_to_bot": message.reply_to_bot,
+                    "reply_to_message_id": payload.get("reply_to_message_id"),
                     # Only present when there was an attachment, so a plain
                     # text message keeps its old payload shape.
                     **({"media": {"kind": message.media_kind,

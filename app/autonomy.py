@@ -363,29 +363,42 @@ class AutonomousLoop:
         if not due and (expires_at is None or float(expires_at) > now):
             return None  # nothing has actually happened yet
 
-        self.store.append_synthetic_observation(
-            dedupe_key=f"wait:{wait_id}",
-            chat_id=chat_id,
-            topic_id=topic_id,
-            kind="timer",
-            payload={
-                "kind": "timer",
-                "status": status,
-                "wait_id": wait_id,
-                "wait_kind": str(wait["kind"]),
-                "purpose": str(wait["purpose"]),
-                "due_at": due_at,
-                "note": (
-                    "The timer you set earlier has come due. Nothing new may "
-                    "have been said since; reconsider what you were waiting to "
-                    "do about it."
-                    if due else
-                    "The window you set for this wait has closed without it "
-                    "being satisfied."
-                ),
-            },
-        )
-        self.store.resolve_wait(wait_id, status)
+        with self.store.batch():
+            active = self.store._query(
+                "SELECT 1 FROM agent_waits WHERE wait_id = ? AND status = 'active'",
+                (wait_id,),
+            )
+            if not active:
+                return None
+            intent = None
+            if wait["intent_id"] is not None:
+                intent = self.store.get_intent(
+                    str(wait["intent_id"]), chat_id=chat_id, topic_id=topic_id,
+                )
+                if intent is None or intent["status"] != "open":
+                    self.store.resolve_wait(wait_id, "cancelled")
+                    return None
+            self.store.append_synthetic_observation(
+                dedupe_key=f"wait:{wait_id}",
+                chat_id=chat_id,
+                topic_id=topic_id,
+                kind="timer",
+                payload={
+                    "kind": "timer", "status": status,
+                    "wait_id": wait_id, "wait_kind": str(wait["kind"]),
+                    "purpose": str(wait["purpose"]), "due_at": due_at,
+                    "intent_id": wait["intent_id"],
+                    "anchor_message_id": intent["anchor_message_id"] if intent is not None else None,
+                    "note": (
+                        "The timer you set earlier has come due. Reconsider this "
+                        "commitment using the latest observations."
+                        if due else
+                        "The window you set for this wait has closed without it "
+                        "being satisfied."
+                    ),
+                },
+            )
+            self.store.resolve_wait(wait_id, status)
         self.note_activity(chat_id, topic_id)
         log.info("timer fired %s wait_id=%s status=%s purpose=%r",
                  _label(self.chat_kinds, chat_id, topic_id), wait_id, status,
@@ -471,8 +484,8 @@ class AutonomousLoop:
         evaporated.
         """
         return not (handler.actions or handler.waits or handler.states
-                    or handler.outcome or getattr(handler, "intent_set", None)
-                    or getattr(handler, "intent_resolved", None))
+                    or handler.outcome or handler.intents_set
+                    or handler.intents_resolved)
 
     def _decision_reminder(self, payload: dict[str, Any], result: Any) -> dict[str, Any]:
         """One explicit second chance to decide, carrying what went wrong.
@@ -699,7 +712,7 @@ class AutonomousLoop:
         # The outcome is the agent's, never a default the application supplies.
         # `noted` covers a turn that only wrote state down; `undecided` is the
         # honest label for one that still chose nothing after being asked.
-        state_changed = bool(handler.states or handler.intent_set or handler.intent_resolved)
+        state_changed = bool(handler.states or handler.intents_set or handler.intents_resolved)
         outcome = handler.outcome or ("noted" if state_changed else "undecided")
         if outcome == "undecided":
             # Audit only - deliberately NOT a new observation. An observation
@@ -731,7 +744,9 @@ class AutonomousLoop:
 
         detail = {"activation": getattr(result, "detail", {}),
                   "observations": [o.sequence for o in observations],
-                  "episode_id": episode_id, "continuation": continuation}
+                  "episode_id": episode_id, "continuation": continuation,
+                  "intents_set": list(handler.intents_set),
+                  "intents_resolved": list(handler.intents_resolved)}
         self.store.close_workflow(workflow_id, "completed", outcome=outcome, detail=detail)
         self._settle_episode(chat_id, topic_id, episode_id, outcome=outcome)
 
@@ -765,20 +780,20 @@ class AutonomousLoop:
         observations, not a request to reply.
         """
         state = self.store.get_state(chat_id, topic_id)
-        # The scope's unfinished goal, if there is one. This is what makes a
-        # wake a continuation rather than a fresh decision task: without it the
-        # agent sees new events plus some key/value notes and has to guess why
-        # it is being called. Read on every turn, not only after a wait, since
-        # an intent outlives any particular wait.
-        intent = self.store.current_intent(chat_id, topic_id)
-        intent_payload = None
-        if intent is not None:
-            intent_payload = {
-                "intent_id": str(intent["intent_id"]),
-                "goal": str(intent["goal"]),
-                "opened_at": float(intent["created_at"]),
-                "expires_at": intent["expires_at"],
+        intents = self.store.open_intents(chat_id, topic_id)
+        intents_by_id = {str(row["intent_id"]): row for row in intents}
+        intent_payloads = [
+            {
+                "intent_id": str(row["intent_id"]),
+                "goal": str(row["goal"]),
+                "anchor_message_id": row["anchor_message_id"],
+                "owner_id": row["owner_id"],
+                "episode_id": row["episode_id"],
+                "opened_at": float(row["created_at"]),
+                "expires_at": row["expires_at"],
             }
+            for row in intents
+        ]
         # The logical work this scope is already in the middle of. This is the
         # difference between "you were woken" and "you were woken to continue
         # what you were doing": an activation opens a fresh decision task, an
@@ -795,8 +810,16 @@ class AutonomousLoop:
                 }
         waits = []
         for row in self.store.active_waits(chat_id, topic_id):
-            wait = {"wait_id": str(row["wait_id"]), "kind": str(row["kind"]),
-                    "purpose": str(row["purpose"])}
+            intent_id = row["intent_id"]
+            linked_intent = intents_by_id.get(str(intent_id)) if intent_id else None
+            wait = {
+                "wait_id": str(row["wait_id"]), "kind": str(row["kind"]),
+                "purpose": str(row["purpose"]), "due_at": row["due_at"],
+                "expires_at": row["expires_at"], "intent_id": intent_id,
+                "anchor_message_id": (
+                    linked_intent["anchor_message_id"] if linked_intent is not None else None
+                ),
+            }
             serialized_filter = row["event_types_json"]
             if serialized_filter:
                 stored_filter = json.loads(serialized_filter)
@@ -821,10 +844,14 @@ class AutonomousLoop:
             "state": state,
             "active_waits": waits,
             "matched_waits": list(matched_waits),
-            "open_intent": intent_payload,
+            "open_intents": intent_payloads,
             "note": (
                 "These are group observations, not an instruction to reply. "
-                "Decide whether to act; finish_silently is a valid outcome."
+                "Decide whether to act; finish_silently is a valid outcome. "
+                "Several commitments can be open in this topic. Select the one "
+                "you mean with anchor_message_id or intent_id; unrelated messages "
+                "do not replace it. A null anchor means the older commitment's "
+                "source was not recorded."
             ),
         }
 
@@ -942,9 +969,9 @@ class AutonomousLoop:
                                          telegram_message_id=telegram_id,
                                          sender_label=self.bot_name, sender_id=self.bot_user_id)
                 self._report_result(row, action_id, "sent", None)
-                # The message landed, so a goal it claimed is now complete. Done
-                # after delivery for the reason in `_close_intent_for_action`.
-                self._close_intent_for_action(action_id)
+                # Delivery closes only the linked commitment in finish_action;
+                # settle the aggregate episode after that transaction commits.
+                self._settle_delivered_intent(action_id)
             elif name == "unknown":
                 self.store.finish_action(action_id, "unknown", error=error)
                 self._report_result(row, action_id, "unknown", error)
@@ -972,7 +999,7 @@ class AutonomousLoop:
         """
         if not episode_id:
             return
-        if self.store.current_intent(chat_id, topic_id) is not None:
+        if self.store.open_intents(chat_id, topic_id):
             return
         if self.store.active_waits(chat_id, topic_id):
             return
@@ -980,44 +1007,16 @@ class AutonomousLoop:
             log.info("episode closed %s episode=%s reason=%s",
                      _label(self.chat_kinds, chat_id, topic_id), episode_id, outcome)
 
-    def _close_intent_for_action(self, action_id: str) -> None:
-        """Close the goal a message said it completes - but only once it landed.
-
-        The model marks the message with `resolves_intent`; the goal closes
-        here, not at tool time. A reply can still be dropped as stale, and
-        closing on acceptance would mark a goal done for a sentence nobody saw,
-        leaving nothing to revisit it.
-        """
-        try:
-            rows = self.store._query(
-                "SELECT intent_id FROM actions WHERE action_id = ?", (action_id,))
-        except Exception as exc:
-            # Storage trouble must not take down the sender, but staying silent
-            # about it is how a goal ends up stranded.
-            log.error("could not read the intent for action %s (error_type=%s)",
-                      action_id, type(exc).__name__)
+    def _settle_delivered_intent(self, action_id: str) -> None:
+        """Settle aggregate work after the delivery transaction closes its goal."""
+        row = self.store.get_action(action_id)
+        if row is None or row["status"] != "sent" or not row["resolves_intent"]:
             return
-        intent_id = str(rows[0]["intent_id"]) if rows and rows[0]["intent_id"] else None
-        if not intent_id:
-            return
-        # `finish_action` closes the goal in the same transaction as the status
-        # change, so this call is usually a no-op - and that is exactly why the
-        # episode settlement cannot be nested inside the "did I close it" branch.
-        # Once the goal is closed, nothing keeps the episode alive.
-        if self.store.resolve_intent(intent_id, how="send_message"):
-            log.info("intent closed action_id=%s intent_id=%s", action_id, intent_id)
-        if self.store.intent_is_open(intent_id):
-            return
-        scope = self.store._query(
-            "SELECT chat_id, topic_id FROM actions WHERE action_id = ?", (action_id,))
-        if not scope:
-            return
-        episode = self.store.current_episode(
-            int(scope[0]["chat_id"]), scope[0]["topic_id"])
+        chat_id, topic_id = int(row["chat_id"]), row["topic_id"]
+        episode = self.store.current_episode(chat_id, topic_id)
         if episode is not None:
             self._settle_episode(
-                int(scope[0]["chat_id"]), scope[0]["topic_id"],
-                str(episode["episode_id"]), outcome="delivered",
+                chat_id, topic_id, str(episode["episode_id"]), outcome="delivered",
             )
 
     def _report_intent_expiry(self, intent: Any) -> None:
@@ -1036,6 +1035,8 @@ class AutonomousLoop:
                 payload={
                     "intent_id": str(intent["intent_id"]),
                     "goal": str(intent["goal"]),
+                    "anchor_message_id": intent["anchor_message_id"],
+                    "owner_id": intent["owner_id"],
                     "note": (
                         "This goal reached its deadline and is closed. You do not "
                         "have to act on it; if it still matters, set it again."
@@ -1107,17 +1108,12 @@ class _ActionHandler:
         self.actions: list[str] = []
         self.waits: list[str] = []
         self.states: list[str] = []
-        # Intent bookkeeping for this turn. Kept separate from `states`: an
-        # intent is a goal that survives the turn, `update_state` is a note.
-        self.intent_set: str | None = None
-        self.intent_resolved: str | None = None
-        # The goal `send_message` was told to complete with this message. Kept
-        # on the handler too so a turn can report it without re-reading storage.
-        self.pending_intent_resolution: str | None = None
+        self.intents_set: list[str] = []
+        self.intents_resolved: list[str] = []
         # A model response can contain repeated identical send_message calls.
         # Reuse the first staged action within this activation so one decision
         # cannot put the same reply into Telegram twice.
-        self._staged_messages: dict[tuple[str, int | None, str | None], str] = {}
+        self._staged_messages: dict[tuple[str, int | None, str | None, bool], str] = {}
         self.outcome: str | None = None
 
     async def __call__(self, name: str, arguments: dict[str, Any], context: Any,
@@ -1140,6 +1136,30 @@ class _ActionHandler:
             return self._resolve_intent(arguments)
         return ({"status": "rejected", "reason": "unknown_tool",
                  "executed": False}, "rejected")
+
+    def _intent_reference(
+        self, arguments: dict[str, Any], *, required: bool = False,
+        open_only: bool = True,
+    ) -> tuple[Any | None, str | None]:
+        intent_id = arguments.get("intent_id")
+        anchor = arguments.get("anchor_message_id")
+        if intent_id is not None and anchor is not None:
+            return None, "invalid_payload"
+        if intent_id is None and anchor is None:
+            return None, "invalid_payload" if required else None
+        if intent_id is not None:
+            if not isinstance(intent_id, str) or not intent_id.strip():
+                return None, "invalid_payload"
+            row = self._loop.store.get_intent(
+                intent_id, chat_id=self.chat_id, topic_id=self.topic_id,
+            )
+        else:
+            if type(anchor) is not int or anchor < 1:
+                return None, "invalid_payload"
+            row = self._loop.store.intent_for_anchor(self.chat_id, self.topic_id, anchor)
+        if row is None or (open_only and row["status"] != "open"):
+            return None, "unknown_intent"
+        return row, None
 
     def _send_message(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
         freshness = str(arguments.get("freshness") or "default")
@@ -1171,18 +1191,15 @@ class _ActionHandler:
             expires_at = self._loop._clock() + self._loop.bounded_action_ttl
         else:
             expires_at = None
-        # Read the goal *before* recording the action: the id is stored with
-        # the action so a crash after delivery can still close it. Read after,
-        # and a message marked `resolves_intent` would carry nothing.
-        intent_to_close: str | None = None
-        if arguments.get("resolves_intent") is True:
-            current = self._loop.store.current_intent(self.chat_id, self.topic_id)
-            if current is not None:
-                intent_to_close = str(current["intent_id"])
-        self.pending_intent_resolution = intent_to_close
+        intent, reason = self._intent_reference(arguments)
+        resolves_intent = arguments.get("resolves_intent") is True
+        if reason is not None or (resolves_intent and intent is None):
+            return ({"status": "rejected", "executed": False,
+                     "reason": reason or "invalid_payload"}, "rejected")
+        intent_id = str(intent["intent_id"]) if intent is not None else None
         message_text = str(arguments["text"])
         reply_to = arguments.get("reply_to")
-        dedupe_key = (message_text.strip(), reply_to, intent_to_close)
+        dedupe_key = (message_text.strip(), reply_to, intent_id, resolves_intent)
         existing_action = self._staged_messages.get(dedupe_key)
         if existing_action is not None:
             return ({
@@ -1195,10 +1212,6 @@ class _ActionHandler:
             }, "accepted")
 
         action_id = _new_id("act")
-        if intent_to_close is not None and self.episode_id:
-            # Tie the goal to the episode that produced it, so "what was I in
-            # the middle of" and "what am I trying to do" name one thing.
-            self._loop.store.attach_episode_intent(self.episode_id, intent_to_close)
         created = self._loop.store.prepare_action(
             action_id=action_id,
             workflow_id=self.workflow_id,
@@ -1210,7 +1223,7 @@ class _ActionHandler:
             freshness=freshness,
             max_unobserved=cap,
             expires_at=expires_at,
-            intent_id=intent_to_close,
+            intent_id=intent_id, resolves_intent=resolves_intent,
         )
         self._staged_messages[dedupe_key] = action_id
         self.actions.append(action_id)
@@ -1220,10 +1233,15 @@ class _ActionHandler:
         # be discarded as stale, and then nothing would try again.
         return ({"status": "accepted", "action_id": action_id,
                  "executed": False, "delivery": "pending",
-                 "resolves_intent": intent_to_close is not None,
+                 "intent_id": intent_id,
+                 "anchor_message_id": intent["anchor_message_id"] if intent is not None else None,
+                 "resolves_intent": resolves_intent,
                  "detail": ("recorded" if created else "already recorded")}, "accepted")
 
     def _wait_event(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        intent, reason = self._intent_reference(arguments)
+        if reason is not None:
+            return ({"status": "rejected", "executed": False, "reason": reason}, "rejected")
         wait_id = _new_id("wait")
         expires_at = _seconds_from_iso(arguments.get("expires_at"))
         self._loop.store.add_wait(
@@ -1232,13 +1250,19 @@ class _ActionHandler:
             event_types=arguments.get("event_types"),
             sender_id=arguments.get("sender_id"), expires_at=expires_at,
             episode_id=self.episode_id,
+            intent_id=str(intent["intent_id"]) if intent is not None else None,
         )
         self.waits.append(wait_id)
         self.outcome = self.outcome or "waiting"
-        return ({"status": "accepted", "wait_id": wait_id,
-                 "executed": False}, "accepted")
+        return ({"status": "accepted", "wait_id": wait_id, "executed": False,
+                 "intent_id": str(intent["intent_id"]) if intent is not None else None,
+                 "anchor_message_id": intent["anchor_message_id"] if intent is not None else None},
+                "accepted")
 
     def _wait_until(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        intent, reason = self._intent_reference(arguments)
+        if reason is not None:
+            return ({"status": "rejected", "executed": False, "reason": reason}, "rejected")
         wait_id = _new_id("wait")
         due_at = _seconds_from_iso(arguments["at"])
         expires_at = _seconds_from_iso(arguments.get("expires_at"))
@@ -1246,44 +1270,51 @@ class _ActionHandler:
             wait_id=wait_id, chat_id=self.chat_id, topic_id=self.topic_id,
             kind="until", purpose=str(arguments.get("purpose") or "reconsider"),
             due_at=due_at, expires_at=expires_at, episode_id=self.episode_id,
+            intent_id=str(intent["intent_id"]) if intent is not None else None,
         )
         self.waits.append(wait_id)
         self.outcome = self.outcome or "waiting"
-        return ({"status": "accepted", "wait_id": wait_id,
-                 "executed": False}, "accepted")
-
-    def _set_intent(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
-        store = self._loop.store
-        goal = str(arguments["goal"]).strip()
-        expires_at = _seconds_from_iso(arguments.get("expires_at"))
-        intent_id = _new_id("int")
-        store.replace_intent(intent_id=intent_id, chat_id=self.chat_id,
-                             topic_id=self.topic_id, goal=goal, expires_at=expires_at)
-        if self.episode_id:
-            store.attach_episode_intent(self.episode_id, intent_id)
-        self.intent_set = intent_id
-        return ({"status": "accepted", "intent_id": intent_id,
-                 "executed": False,
-                 "detail": "this goal is shown to you on every later wake"},
+        return ({"status": "accepted", "wait_id": wait_id, "executed": False,
+                 "intent_id": str(intent["intent_id"]) if intent is not None else None,
+                 "anchor_message_id": intent["anchor_message_id"] if intent is not None else None},
                 "accepted")
 
+    def _set_intent(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        if (arguments.get("anchor_message_id") is None) == (arguments.get("intent_id") is None):
+            return ({"status": "rejected", "executed": False,
+                     "reason": "invalid_payload"}, "rejected")
+        try:
+            intent = self._loop.store.replace_intent(
+                intent_id=_new_id("int"), chat_id=self.chat_id, topic_id=self.topic_id,
+                goal=str(arguments["goal"]).strip(),
+                expires_at=_seconds_from_iso(arguments.get("expires_at")),
+                anchor_message_id=arguments.get("anchor_message_id"),
+                replaces_intent_id=arguments.get("intent_id"), episode_id=self.episode_id,
+            )
+        except ValueError as exc:
+            return ({"status": "rejected", "executed": False, "reason": str(exc)}, "rejected")
+        intent_id = str(intent["intent_id"])
+        self.intents_set.append(intent_id)
+        return ({"status": "accepted", "intent_id": intent_id, "executed": False,
+                 "anchor_message_id": intent["anchor_message_id"],
+                 "owner_id": intent["owner_id"],
+                 "detail": "this commitment is shown on later wakes with its source"}, "accepted")
+
     def _resolve_intent(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
-        store = self._loop.store
-        current = store.current_intent(self.chat_id, self.topic_id)
-        if current is None:
-            # Nothing open is not an error worth failing a turn over, but it
-            # must not be reported as "closed" either.
-            return ({"status": "accepted", "executed": False,
-                     "detail": "no open goal"}, "accepted")
+        intent, reason = self._intent_reference(arguments, required=True, open_only=False)
+        if reason is not None:
+            return ({"status": "rejected", "executed": False, "reason": reason}, "rejected")
+        intent_id = str(intent["intent_id"])
         status = "abandoned" if arguments.get("abandoned") is True else "resolved"
-        closed = store.resolve_intent(
-            str(current["intent_id"]),
-            how=str(arguments.get("reason") or "agent"), status=status,
+        closed = self._loop.store.resolve_intent(
+            intent_id, how=str(arguments.get("reason") or "agent"), status=status,
         )
         if closed:
-            self.intent_resolved = str(current["intent_id"])
+            self.intents_resolved.append(intent_id)
         return ({"status": "accepted", "executed": False, "closed": closed,
-                 "detail": "goal closed; nobody was told"}, "accepted")
+                 "intent_id": intent_id, "anchor_message_id": intent["anchor_message_id"],
+                 "detail": "commitment closed; nobody was told" if closed else "already closed"},
+                "accepted")
 
     def _update_state(self, arguments: dict[str, Any]) -> tuple[dict[str, Any], str]:
         expires_at = _seconds_from_iso(arguments.get("expires_at"))

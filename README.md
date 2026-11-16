@@ -39,9 +39,21 @@ There is no keyword rule and no participation score. Parsed messages from allowe
 | `wait_for_event` | end now, wake on a future observation matching optional event-kind and sender filters |
 | `wait_until` | end now, be woken at a wall-clock time |
 | `update_state` | remember a small note for later turns |
-| `set_intent` | record the current participation intent |
-| `resolve_intent` | resolve a recorded participation intent |
+| `set_intent` | record or replace one commitment anchored to a source message |
+| `resolve_intent` | close one explicitly selected commitment |
+
 Sender filters only control whether a durable wait is satisfied; they do not prevent otherwise model-eligible observations from waking the model or reduce model calls.
+
+A chat/topic can keep several commitments open together. Each records its source
+message and sender; starting Bob's request does not replace Alice's unfinished
+request. The model selects a commitment with `anchor_message_id` or `intent_id`
+when setting, resolving, waiting, or associating a reply. A progress reply keeps
+it open; `send_message` with `resolves_intent: true` closes only that selected
+commitment after confirmed delivery. Failed or unknown delivery leaves it open.
+Linked timers survive unrelated chat until due, cancelled, or expired. Legacy
+goals with no recorded source remain available by ID. In the console, `intents`
+shows open commitments, their sources, and linked waits for the watched scope.
+
 Each chat/topic scope has its own Core session. Startup takes an exclusive lease
 for that session, restores its last committed model transcript before the actor
 starts, and reserves event sequence IDs past persisted history. Restore covers
@@ -118,7 +130,8 @@ are logged instead of performed.
 
 On a TTY, the console starts by default; `--no-console` keeps the run log-only,
 and `--console` forces command input. Type `help` for commands such as `status`,
-`chats`, and `watch`.
+`chats`, `watch`, and `intents`. After `watch <chat_id> [topic_id]`, use
+`intents [n]` to inspect each commitment's source message, owner, and active wait count.
 
 **Secrets only ever come from the environment.** A token written into the config
 file is ignored on purpose — a token in a committed file ends up in every backup

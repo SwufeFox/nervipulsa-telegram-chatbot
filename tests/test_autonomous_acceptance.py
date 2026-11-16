@@ -175,14 +175,16 @@ def test_open_goal_resumes_from_new_topic_event_and_closes_on_send(tmp_path):
             return ModelResponse(content='', model='scripted', tool_calls=[
                 ToolCall(id='set-goal', name='set_intent', arguments={
                     'goal': 'wait for the deployment owner to share the heap result',
+                    'anchor_message_id': 701,
                 }),
                 ToolCall(id='wait-for-owner', name='wait_for_event', arguments={
                     'purpose': 'wait for the deployment owner',
                     'sender_id': fixtures.ALICE,
+                    'anchor_message_id': 701,
                 }),
             ])
         return call('send_message', text='The heap result points to the cache.',
-                    resolves_intent=True)
+                    resolves_intent=True, anchor_message_id=701)
 
     async def scenario():
         bot, store, clock, transport, agent, backend = build(
@@ -191,7 +193,7 @@ def test_open_goal_resumes_from_new_topic_event_and_closes_on_send(tmp_path):
             await bot.start()
             await run_input(bot, clock, update(text='We need the heap result before deciding.'))
             scope = (fixtures.TEST_CHAT, fixtures.TOPIC_A)
-            assert store.current_intent(*scope)['goal'].startswith('wait for the deployment owner')
+            assert store.open_intents(*scope)[0]['goal'].startswith('wait for the deployment owner')
             assert store.active_waits(*scope)
 
             await run_input(bot, clock, update(
@@ -199,7 +201,7 @@ def test_open_goal_resumes_from_new_topic_event_and_closes_on_send(tmp_path):
             assert len(backend.requests) == 2
             continuation = json.dumps(backend.requests[1].messages, ensure_ascii=False)
             assert 'heap result' in continuation
-            assert store.current_intent(*scope) is None
+            assert store.open_intents(*scope) == []
             assert store.active_waits(*scope) == []
             assert [item['text'] for item in transport.sends] == [
                 'The heap result points to the cache.'

@@ -168,6 +168,18 @@ execution. Per-observation handlers are bound and submitted serially within the
 scope, then unbound, so a concurrent workflow cannot use another workflow's
 handler.
 
+Commitments are application records, not separate Core sessions. A scope exposes
+`open_intents`, including each commitment's ID, source `anchor_message_id`,
+derived `owner_id`, and aggregate episode. `set_intent` and `resolve_intent`
+require exactly one source anchor or intent ID. `send_message` and `wait_*` may
+select one commitment; omitted selectors mean an independent action or wait.
+`resolves_intent: true` requires an explicit selector and takes effect only in
+the successful delivery transaction. Replacing one goal gives it a new identity,
+so an older in-flight send cannot close its replacement. Legacy goals with no
+recorded source remain unanchored and can be selected by ID. These records and
+their migration belong to the application SQLite store.
+
+
 ## Application-owned guarantees
 
 Core does not provide these Telegram/application guarantees:
@@ -184,6 +196,8 @@ Core does not provide these Telegram/application guarantees:
 | topic/chat isolation | Runtime, session id, action catalog, and hook scoped by `(chat_id, topic_id)` |
 | closed autonomous tool set; no Python execution | `NervipulsaAgent` catalog and exposed-schema checks |
 | cancellation drains owned work before closing storage | `run_live` stops poll/timer/console tasks in `finally`; `GroupAgent.stop` stops dispatchers, drains activations, then closes agents |
+| independent commitments and linked waits within one scope | `Store.replace_intent`, per-source uniqueness, scoped selectors, and `agent_intents.episode_id` |
+| completion closes only the selected commitment after confirmed delivery | `Store.finish_action` atomically records `sent`, resolves the linked goal when requested, and cancels its waits |
 
 ## Guarantees that do not exist
 

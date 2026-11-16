@@ -304,13 +304,12 @@ def _build(config_path: Path, *, workspace: Path, model: str | None,
         # is what it was before - an independent activation.
         def _no_episode(**_kwargs: Any) -> dict[str, Any]:
             return {"episode_id": None, "chat_id": 0, "topic_id": None,
-                    "state": "open", "reason": None, "intent_id": None,
+                    "state": "open", "reason": None,
                     "opened_at": 0.0, "updated_at": 0.0, "closed_at": None}
 
         bot.autonomy.store.open_episode = _no_episode  # type: ignore[method-assign]
         bot.autonomy.store.current_episode = lambda *a, **k: None  # type: ignore[method-assign]
         bot.autonomy.store.close_episode = lambda *a, **k: False  # type: ignore[method-assign]
-        bot.autonomy.store.attach_episode_intent = lambda *a, **k: None  # type: ignore[method-assign]
         bot.autonomy.store.episode_activations = lambda *a, **k: []  # type: ignore[method-assign]
         bot.autonomy.store.open_episodes = lambda *a, **k: []  # type: ignore[method-assign]
         bot.autonomy._settle_episode = lambda *a, **k: None  # type: ignore[method-assign]

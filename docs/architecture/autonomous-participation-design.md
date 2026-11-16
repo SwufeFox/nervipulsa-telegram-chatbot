@@ -120,99 +120,94 @@ Agent 不仅可以在未被 @ 时发现未解的问题并补充有效信息，�
 
 ## 逻辑工作单元的延续（continuation）
 
-**状态：已实现（2026-10-29）。** 之前只有 intent：跨激活保存的目标数据，每次唤醒仍然
-新建一个 workflow，数据里没有任何东西说明"这两次激活是同一件事"。现在补上了
-`workflow_episodes`——逻辑工作单元的持久身份，详见下面的"实现记录"与
-`docs/evaluations/continuation-investigation-2026-10-29.md`。
+**状态：已实现，更新于 2026-11-16。** `workflow_episodes` 记录一个话题持续有工作可做的
+时期，`agent_intents` 记录各条独立承诺。一个工作单元可以包含多条承诺；承诺以来源消息
+区分，不再用一个话题唯一的目标覆盖交错对话。
 
-**问题。** 一次 workflow 等于一次模型激活。`wait_for_event` / `wait_until` 只登记了一个
-唤醒条件，没有留下"我当时正在做什么"。于是每次唤醒都是重新构造一个短暂的决策任务：
-Agent 看到的是新观察 + 一堆状态键，而不是一个持有未完成意图的执行上下文。表现上是
-"每隔一段时间被叫醒、重新决定是否说话"，而不是"一直在参与同一场对话"。
+一次 workflow 对应一次模型激活；一次 episode 可以跨多次激活。每个 `(chat_id, topic_id)`
+仍只有一个 Core Runtime 和至多一个 open episode，共享群聊上下文。模型根据发起者、
+原始消息、回复关系和未完成承诺判断新观察属于哪件事，应用不做关键词或分类器分流。
 
-**不追求的东西。** 不是让模型常驻运行，也不是无限消耗 token。事件唤醒推理本身是合理的。
-要改的只是：唤醒的是**同一个持续存在的逻辑 Agent**。
-
-**最小模型。** 每个 `(chat_id, topic_id)` 至多一条 *active intent*：
+**承诺模型。** 同一 scope 最多有 32 条 open intent；每个已记录来源消息至多一条：
 
 ```
 agent_intents(
   intent_id, chat_id, topic_id,
-  goal,            -- 她自己写的："等林贴出日志，看是否还报 Code 62"
-  status,          -- open | resolved | abandoned
-  opened_at, updated_at,
-  expires_at,      -- 兜底，防止陈旧意图永久污染上下文
-  resolved_by      -- send_message / wait_satisfied / explicit / expired
+  anchor_message_id, -- 原始消息；旧数据没有记录时为 NULL
+  owner_id,          -- 从该 scope 的来源消息取得，不由模型编造
+  episode_id,        -- 所属话题工作单元，可关联多个 intent
+  goal, status,
+  created_at, updated_at, expires_at, resolved_by
 )
+agent_waits.intent_id → 可选的承诺关联
+actions.intent_id     → 可选的承诺关联
+actions.resolves_intent → 这条发送是否在确认送达后完成该承诺
 ```
 
-与现有结构的区别：
-
-| | 现在 | 加入 intent 之后 |
-| --- | --- | --- |
-| 唤醒时看到 | 新观察 + `agent_state` 键值 | 上面这些 **加上** 未完成意图全文 |
-| workflow 之间 | 彼此独立 | workflow 记录它运行时的 `intent_id`，可回溯同一逻辑线程 |
-| 等待到期 | 只发 timer 事件 | timer 事件带上意图，明确"你上次在等这个" |
-| 结束 | workflow 关闭即结束 | 意图可以跨多个 workflow 存活，直到显式解除或过期 |
+模型每轮看到 `open_intents` 数组及各自的来源、发起者和目标；新消息观察同时携带
+`reply_to_message_id`。旧库没有来源的目标保留为空来源，仍可按准确 ID 处理。
 
 **不假装它是持久进程。** intent 是**数据**，不是活着的协程。它保证唤醒时上下文连续，
 不保证事件顺序之外的任何执行连续性。这一点必须写在实现里，否则又会变成"看起来像
 Agent、其实是状态机"。
 
-**解除方式**（都要可观测，不能静默）：
+**变更和解除：** `set_intent`、`resolve_intent` 必须明确选择原消息锚点或意图 ID。
+更新同一锚点只替换那条承诺，目标变化时分配新 ID，避免旧的在途发送结束新目标。
+替换、显式解除和过期会取消该承诺关联的等待及尚未领取的回复，并留下行动结果。
+`send_message` 可以只是关联的过程回复；只有同时声明 `resolves_intent: true` 且确认
+送达才原子关闭对应目标。`failed`、`unknown`、工作单元失败都不冒充完成，未知发送
+不自动重试。调用未选择承诺的发送或等待不隐式关联到某个“当前目标”。
 
-- `resolve_intent`：她自己判断已经不需要继续了；
-- `send_message` 里带 `resolves_intent: true`：说完就算完成；
-- 到期：记为 `expired`，并在下一次渲染中明确告知，不留悬空；
-- 工作单元失败不解除意图——没做成不等于不想做。
-
-**与 `wait_*` 的关系。** 等待回答的是"什么时候再叫我"，intent 回答的是"叫醒我之后我还
-在干什么"。两者独立：可以不等待而有未完成意图，也可以等待而无意图。把两者混成一个
-字段会让"我只是想晚点看"和"我有件事没做完"无法区分。
+**等待。** `wait_*` 可选择关联某一承诺。事件等待可按发起者和事件类型过滤，但这不阻止
+其他消息唤醒模型。关联承诺的定时等待不会被中途普通消息消耗；到期、取消或过期才结算，
+到期观察携带承诺 ID 和原始消息锚点。未关联承诺的等待保留原来的可中断行为。
 
 ### 实现记录：`workflow_episodes`（2026-10-29）
 
-intent 解决了"目标跨激活可见"，但没有解决**身份**：`workflows` 每次都是新的一行，
-数据里没有东西说"这两次激活是同一件事"。补的是这一层。
+episode 提供话题内连续工作的持久身份，不承担单条对话的身份；各条对话以 intent 的
+来源消息和 ID 区分。
 
 ```
 workflow_episodes(
   episode_id, chat_id, topic_id,
   state,      -- open | closed
   reason,     -- 关闭原因
-  intent_id,  -- 这一轮工作自己声明的目标（可为空）
   opened_at, updated_at, closed_at
 )
 workflows.episode_id  → 每次激活归属于哪个逻辑工作单元
 agent_waits.episode_id → 这次等待是在为哪个工作单元等
+agent_intents.episode_id → 同一工作单元内的各条独立承诺
 ```
 
 - **开启/加入是同一个操作**（`open_episode`）。部分唯一索引保证每个 scope 至多一个
   open episode；并发的第二次调用会**采用**赢家的身份，而不是另造一个。
 - **模型能看到这是延续。** 渲染的 payload 增加 `episode: {episode_id, opened_at,
-  activations, continuation}`；`continuation: true` 表示这次唤醒属于同一件事，而不是
-  重新开始判断。日志同样打印 `episode=` 与 `continuation=`。
+  activations, continuation}`；`continuation: true` 表示这个话题仍有延续的工作，
+  不表示这条新消息属于某个唯一的对话。日志同样打印 `episode=` 与 `continuation=`。
 - **关闭条件是窄的**：只有当没有未完成意图、也没有活跃等待时才关闭。新消息**不算**
   理由——在热闹的群里新消息永远存在，把它当理由会让一个 episode 开好几天，
   "延续"就又失去意义。
 - **重启恢复**：`running_workflows` 照旧标记为中断，但 episode **故意保留**。启动时
   先用持久事实核对一遍（还有 open goal 或 active wait 才留下），再打印每个仍在的
   episode 及其已有激活数，这样"中断后继续"和"全新开始"可区分。
-- **投递后才关闭目标**：`send_message` 带 `resolves_intent` 时，目标只在这条消息真的
-  送达后关闭；并被丢弃的回复不会替她说"已经说完了"。
+- **投递后才关闭目标**：明确选择承诺且带 `resolves_intent: true` 的发送，只在确认
+  送达的事务里关闭那条目标和关联等待；其他未完成目标保持原样。
 
 **仍然只是数据，不是常驻进程。** episode 保证唤醒时身份与上下文连续，不保证事件顺序
 之外的执行连续性。
 
-**验证。** `tests/test_episode_continuation.py`（9 项）覆盖：等待/定时器唤醒加入同一
-episode、首次激活不是延续、无事可做时关闭、并发开启采用赢家、NULL topic 下唯一性、
-送达后关闭目标与 episode、重启后 episode 保留、旧库迁移补列。
-`tests/test_episode_restart_leak.py` 补的是**崩在两次写之间**的边界：投递已关掉目标、
-episode 还没关，重启后这一行看着像「还在等」。旧实现在这个状态下会把话题里下一句无关的
-话渲染成 `continuation`；现在启动时按「是否还有 open goal 或 active wait」重新推导，
-无事可做的 episode 直接关闭，再让新观察进来。App 全量 406 passed，运行时加载本地 Core
-`5f65658`；当时 `pyproject.toml` 仍固定 `7618bd0`。发布后已将 pin 同步至
-`5f65658`，当前依赖状态见 `docs/INTEGRATION_CONTRACT.md`。
+**验证入口。** `tests/test_agent_intents.py` 覆盖多来源唯一性、容量、替换、迁移和发送边界；
+`tests/test_conversation_commitments.py` 使用真实 Core Runtime 和脚本模型，覆盖 Alice/Bob
+交错请求、过程回复、重启、跨话题拒绝、定时等待和未知送达。
+`tests/test_episode_continuation.py`、`tests/test_episode_restart_leak.py` 保留工作单元的
+延续及投递后崩溃收尾边界。上述本地验证不能证明真实模型会稳定地选对对话归属。
+
+六个新增回归场景已通过，其中五个实际启动 Core Runtime；模型由脚本控制，数据保存在
+临时 SQLite。另已实跑控制台 `watch`、`intents`、`waits`，确认结束 Bob 的承诺后，
+Alice 的承诺和等待仍在。
+
+完整套件执行 471 项：470 passed，1 项因过期回执的固定文案断言失败。移除文案绑定并
+保留取消状态、过期原因和持久回执检查后，`tests/test_speak_in_busy_group.py` 复验为 7 passed。
 
 ## Core 与 Telegram 应用的边界
 

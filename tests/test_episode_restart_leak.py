@@ -35,10 +35,10 @@ def test_reply_that_says_it_completes_a_goal_still_recovers_after_restart(tmp_pa
                 content="", model="scripted",
                 tool_calls=[
                     ToolCall(id="c-intent", name="set_intent",
-                             arguments={"goal": "查清楚 502 的根因"}),
+                             arguments={"goal": "查清楚 502 的根因", "anchor_message_id": 201}),
                     ToolCall(id="c-send", name="send_message",
                              arguments={"text": "查完了，是网关超时",
-                                        "resolves_intent": True}),
+                                        "resolves_intent": True, "anchor_message_id": 201}),
                 ],
             )
         return call("finish_silently")
@@ -47,14 +47,14 @@ def test_reply_that_says_it_completes_a_goal_still_recovers_after_restart(tmp_pa
         bot, store, _clock, transport, _payloads = build(tmp_path, answer)
         # The process dies between the two writes: delivery resolves the goal
         # in its own transaction, and the episode close never runs.
-        bot.autonomy._settle_episode = lambda *a, **k: None
+        bot.autonomy._settle_delivered_intent = lambda *a, **k: None
         await bot.start()
         try:
             await bot.step([msg(201, "502 到底怎么回事")])
             await bot.autonomous_step(force=True)
             assert transport.sends and transport.sends[0]["text"] == "查完了，是网关超时"
             scope = (fixtures.TEST_CHAT, fixtures.TOPIC_A)
-            assert store.current_intent(*scope) is None
+            assert store.open_intents(*scope) == []
             stale = store.current_episode(*scope)
             assert stale is not None
             return str(stale["episode_id"])
@@ -78,7 +78,7 @@ def test_reply_that_says_it_completes_a_goal_still_recovers_after_restart(tmp_pa
             await bot.step([msg(202, "今天午饭吃什么")])
             await bot.autonomous_step(force=True)
             rendered = payloads[-1]
-            assert rendered.get("open_intent") is None
+            assert rendered.get("open_intents") == []
             episode = rendered.get("episode")
             # A fresh episode is fine; what must not happen is this message
             # being rendered as the continuation of the completed job.

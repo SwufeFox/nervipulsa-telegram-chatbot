@@ -120,6 +120,7 @@ class Console:
         ("actions [n]", "recent send intents and how they ended"),
         ("turns", "workflow turns still running"),
         ("waits", "agent waits that are armed or expired"),
+        ("intents [n]", "open commitments, source messages, owners, and linked waits"),
         ("stats", "counters since start"),
         ("pause", "stop replying (ingestion continues)"),
         ("resume", "start replying again"),
@@ -480,6 +481,34 @@ class Console:
                 f"age={_age(now - float(row['created_at']))}"
                 for row in rows]
 
+    def cmd_intents(self, args: Sequence[str]) -> Iterable[str]:
+        if self.store is None:
+            return ["no store attached"]
+        where = " WHERE i.status = 'open'"
+        params: list[Any] = []
+        if self.watching is not None:
+            where += " AND i.chat_id = ? AND i.topic_id IS ?"
+            params.extend(self.watching)
+        params.append(self._limit(args, default=20))
+        rows = self.store._query(
+            "SELECT i.*, (SELECT COUNT(*) FROM agent_waits w"
+            " WHERE w.intent_id = i.intent_id AND w.status = 'active') AS waits"
+            " FROM agent_intents i" + where +
+            " ORDER BY i.created_at, i.intent_id LIMIT ?", params,
+        )
+        if not rows:
+            return ["no open commitments"]
+        out = []
+        for row in rows:
+            anchor = (f"message:{row['anchor_message_id']}"
+                      if row["anchor_message_id"] is not None else "source:unrecorded")
+            owner = row["owner_id"] if row["owner_id"] is not None else "unrecorded"
+            out.append(
+                f"  {row['intent_id']} {self._label(int(row['chat_id']), row['topic_id'])} "
+                f"{anchor} owner={owner} waits={row['waits']}  {_clip(row['goal'], 80)}"
+            )
+        return out
+
     def cmd_waits(self, args: Sequence[str]) -> Iterable[str]:
         if self.store is None:
             return ["no store attached"]
@@ -493,7 +522,8 @@ class Console:
             due = row["due_at"] or row["expires_at"]
             when = f"due in {_age(float(due) - now)}" if due else "no deadline"
             out.append(f"  {self._label(int(row['chat_id']), row['topic_id'])}  "
-                       f"{row['kind']}  {when}  {_clip(row['purpose'], 40)}")
+                       f"{row['kind']}  {when}  {_clip(row['purpose'], 40)}"
+                       + (f"  intent={row['intent_id']}" if row["intent_id"] else ""))
         return out
 
     def cmd_stats(self, args: Sequence[str]) -> Iterable[str]:

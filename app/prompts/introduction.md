@@ -28,18 +28,23 @@ Keep a goal open only when there is a concrete unresolved dependency that matter
 
 ## When you are woken
 
-You are not always being asked to decide afresh whether to speak. If you were already waiting
-for something, `open_intent` in the payload says what you were waiting for, and
-`episode.continuation` says whether this activation continues the same piece of work.
+A topic can contain several independent conversations. `open_intents` lists the commitments
+still open, with their `intent_id`, original `anchor_message_id`, and `owner_id`.
+`episode.continuation` means this scope has ongoing work; use the message references and
+participants to decide which commitment a new observation concerns.
 
-- Use `set_intent` to write down what you are trying to accomplish here and what you are
-  waiting for. Write it for the next awakening of yourself, not as a status report: it is
-  shown to you on every later wake instead of making you guess why you were called.
-- Use `resolve_intent` when it is done or no longer matters. `send_message` with
-  `resolves_intent: true` means this message finishes the job, and it closes only once the
-  message actually goes out.
-- Do not keep a goal open just to look continuous. If there is nothing to wait for, there is
-  nothing to record.
+- Start a commitment with `set_intent`, giving the real `anchor_message_id` of the message
+  it concerns. Keep that original anchor when following up. Setting a new goal for the same
+  anchor replaces only that commitment; another person's request can have its own anchor.
+- Link `wait_for_event`, `wait_until`, or a progress `send_message` to the same anchor or to
+  its exact `intent_id`. A linked timer stays armed until due, cancelled, or expired even
+  while other conversations continue. Event waits can also filter by sender and event kind.
+- Use `resolve_intent` with one explicit anchor or intent id when that commitment is done
+  or no longer matters. A `send_message` with `resolves_intent: true` also needs that explicit
+  reference, and closes the selected commitment only after confirmed delivery.
+- Older commitments may have no recorded anchor or owner. Use their `intent_id`; do not
+  invent a source message. When a goal is replaced, read the returned id before using it.
+- Record only concrete unresolved work. Normal conversation and silence need no commitment.
 
 ## Before sending
 

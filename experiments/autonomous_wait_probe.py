@@ -121,10 +121,10 @@ async def main() -> int:
         clock.advance(5)
         first = await bot.autonomous_step(force=True)
 
-        intent_row_after_first = store.current_intent(fixtures.TEST_CHAT, None)
-        intent_after_first = (
-            dict(intent_row_after_first) if intent_row_after_first is not None else None
-        )
+        intent_rows_after_first = store.open_intents(fixtures.TEST_CHAT, None)
+        intent_row_after_first = next(
+            (row for row in intent_rows_after_first if row["anchor_message_id"] == 940), None)
+        intent_after_first = dict(intent_row_after_first) if intent_row_after_first is not None else None
         waits_after_first = [dict(row) for row in store._query(
             "SELECT wait_id, kind, purpose, event_types_json, status FROM agent_waits")]
         sends_after_first = [p.get("text") for p in transport.sends]
@@ -142,10 +142,10 @@ async def main() -> int:
         clock.advance(5)
         second = await bot.autonomous_step(force=True)
 
-        intent_row_after_second = store.current_intent(fixtures.TEST_CHAT, None)
-        intent_after_second = (
-            dict(intent_row_after_second) if intent_row_after_second is not None else None
-        )
+        intent_rows_after_second = store.open_intents(fixtures.TEST_CHAT, None)
+        intent_row_after_second = next(
+            (row for row in intent_rows_after_second if row["anchor_message_id"] == 940), None)
+        intent_after_second = dict(intent_row_after_second) if intent_row_after_second is not None else None
         waits_after_second = [dict(row) for row in store._query(
             "SELECT wait_id, kind, purpose, event_types_json, status FROM agent_waits")]
         sends_after_second = [p.get("text") for p in transport.sends]
@@ -163,16 +163,16 @@ async def main() -> int:
         clock.advance(5)
         third = await bot.autonomous_step(force=True)
 
-        intent_row_after_third = store.current_intent(fixtures.TEST_CHAT, None)
-        intent_after_third = (
-            dict(intent_row_after_third) if intent_row_after_third is not None else None
-        )
+        intent_rows_after_third = store.open_intents(fixtures.TEST_CHAT, None)
+        intent_row_after_third = next(
+            (row for row in intent_rows_after_third if row["anchor_message_id"] == 940), None)
+        intent_after_third = dict(intent_row_after_third) if intent_row_after_third is not None else None
         waits_after_third = [dict(row) for row in store._query(
             "SELECT wait_id, kind, purpose, event_types_json, status FROM agent_waits")]
         workflows = [dict(row) for row in store._query(
             "SELECT workflow_id, episode_id, state, outcome FROM workflows ORDER BY rowid")]
         episodes = [dict(row) for row in store._query(
-            "SELECT episode_id, state, reason, intent_id FROM workflow_episodes ORDER BY rowid")]
+            "SELECT episode_id, state, reason FROM workflow_episodes ORDER BY rowid")]
 
         activations = []
         agent = bot._agents.get((fixtures.TEST_CHAT, None))
@@ -192,7 +192,7 @@ async def main() -> int:
         for payload in captured_payloads:
             episode = payload.get("episode")
             rendered_turns.append({
-                "open_intent": payload.get("open_intent"),
+                "open_intents": payload.get("open_intents"),
                 "observation_sequences": [
                     observation.get("sequence")
                     for observation in payload.get("observations", [])
@@ -248,7 +248,7 @@ async def main() -> int:
         answer_is_correct = (
             single_final_send and "Asia/Shanghai" in answer_texts[0]
         )
-        open_intent_after_bob = (
+        open_intents_after_bob = (
             intent_after_second is not None
             and intent_after_second.get("status") == "open"
         )
@@ -264,11 +264,8 @@ async def main() -> int:
         intent_closed_after_delivery = (
             intent_persisted_after_first
             and intent_after_third is None
-            and any(
-                str(row.get("intent_id")) == str(intent_after_first["intent_id"])
-                and str(row.get("episode_id")) in delivered_episode_ids
-                for row in episodes
-            )
+            and intent_after_first.get("episode_id") is not None
+            and str(intent_after_first["episode_id"]) in delivered_episode_ids
         )
         continuation_completed = (
             same_episode
@@ -276,7 +273,7 @@ async def main() -> int:
             and rendered_turns[1].get("episode_continuation") is True
             and rendered_turns[2].get("episode_continuation") is True
             and intent_persisted_after_first
-            and open_intent_after_bob
+            and open_intents_after_bob
             and alice_event_in_third_turn
             and no_premature_send_after_bob
             and intent_closed_after_delivery
@@ -313,7 +310,7 @@ async def main() -> int:
             "episodes": episodes,
             "same_episode_continued": same_episode,
             "intent_persisted_after_first": intent_persisted_after_first,
-            "open_intent_after_bob": open_intent_after_bob,
+            "open_intents_after_bob": open_intents_after_bob,
             "new_wait_ids_after_bob": sorted(new_active_wait_ids_after_bob),
             "bob_event_sequence": bob_sequence,
             "alice_event_sequence": alice_sequence,

@@ -38,7 +38,9 @@ MAX_STATE_KEY_CHARS = 100
 MAX_STATE_BYTES = 16 * 1024
 MAX_EVENT_TYPES = 20
 MAX_EVENT_TYPE_CHARS = 100
+MAX_INTENT_ID_CHARS = 128
 MAX_STATE_DEPTH = 8
+_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:\-]{1,%d}$" % MAX_EVENT_TYPE_CHARS)
 
 CATALOG_TOOL_NAMES = (
     "send_message",
@@ -50,7 +52,6 @@ CATALOG_TOOL_NAMES = (
     "resolve_intent",
 )
 
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:\-]{1,%d}$" % MAX_EVENT_TYPE_CHARS)
 
 ToolHandler = Callable[
     [str, dict[str, Any], Any, Any, Any],
@@ -65,6 +66,30 @@ def _nonempty(value: Any, limit: int) -> str | None:
     if not text or len(value) > limit:
         return None
     return value
+
+
+def _valid_selector(arguments: Mapping[str, Any], *, required: bool = False) -> bool:
+    anchor = arguments.get("anchor_message_id")
+    intent = arguments.get("intent_id")
+    if "anchor_message_id" in arguments and (type(anchor) is not int or anchor < 1):
+        return False
+    if "intent_id" in arguments and _nonempty(intent, MAX_INTENT_ID_CHARS) is None:
+        return False
+    count = int("anchor_message_id" in arguments) + int("intent_id" in arguments)
+    return count == 1 if required else count <= 1
+
+
+def _selector_properties() -> dict[str, Any]:
+    return {
+        "anchor_message_id": {
+            "type": "integer", "minimum": 1,
+            "description": "Optional source message selector in this chat and topic; use alone or omit.",
+        },
+        "intent_id": {
+            "type": "string", "minLength": 1, "maxLength": MAX_INTENT_ID_CHARS,
+            "description": "Optional exact commitment selector; use instead of anchor_message_id.",
+        },
+    }
 
 
 def _json_depth(value: Any, depth: int = 0) -> int:
@@ -189,25 +214,39 @@ class _SendMessage(_BaseTool):
                         "before this reply is dropped. Ignored otherwise."
                     ),
                 },
+                **_selector_properties(),
                 "resolves_intent": {
                     "type": "boolean",
                     "description": (
-                        "Set true when this message is the thing you were waiting to "
-                        "say, so the open goal is closed with it. Leave false if the "
-                        "goal continues after saying this."
+                        "Set true only when this delivered message completes the commitment selected by "
+                        "anchor_message_id or intent_id. A selector is required when true; false or "
+                        "omitted leaves the selected commitment open."
                     ),
                 },
             },
             "required": ["text"],
+            "not": {"required": ["anchor_message_id", "intent_id"]},
+            "allOf": [{
+                "if": {"properties": {"resolves_intent": {"const": True}},
+                       "required": ["resolves_intent"]},
+                "then": {"anyOf": [
+                    {"required": ["anchor_message_id"]},
+                    {"required": ["intent_id"]},
+                ]},
+            }],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
         if set(arguments) - {"text", "reply_to", "freshness", "max_unobserved_events",
-                             "resolves_intent"}:
+                             "resolves_intent", "anchor_message_id", "intent_id"}:
             return "invalid_payload"
         if "resolves_intent" in arguments and not isinstance(
                 arguments["resolves_intent"], bool):
+            return "invalid_payload"
+        if not _valid_selector(arguments):
+            return "invalid_payload"
+        if arguments.get("resolves_intent") is True and not _valid_selector(arguments, required=True):
             return "invalid_payload"
         if _nonempty(arguments.get("text"), MAX_MESSAGE_CHARS) is None:
             return "invalid_payload"
@@ -255,7 +294,8 @@ class _WaitForEvent(_BaseTool):
     Telegram messages use `message`; edits use `message_edit`. Omit
     `event_types` to accept either kind. `sender_id` optionally narrows the
     match to one Telegram user. `runtime.observation` is a wrapper label, not
-    an observation kind.
+    an observation kind. Optionally link this wait to one commitment with
+    `anchor_message_id` or `intent_id`; omit both for an independent wait.
     """
 
     name = "wait_for_event"
@@ -279,15 +319,20 @@ class _WaitForEvent(_BaseTool):
                     "description": "Optional Telegram user ID; only matching messages or edits satisfy the wait.",
                 },
                 "expires_at": {"type": "string", "maxLength": 64},
+                **_selector_properties(),
             },
             "required": ["purpose"],
+            "not": {"required": ["anchor_message_id", "intent_id"]},
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"purpose", "event_types", "sender_id", "expires_at"}:
+        if set(arguments) - {"purpose", "event_types", "sender_id", "expires_at",
+                             "anchor_message_id", "intent_id"}:
             return "invalid_payload"
         if _nonempty(arguments.get("purpose"), MAX_PURPOSE_CHARS) is None:
+            return "invalid_payload"
+        if not _valid_selector(arguments):
             return "invalid_payload"
         types = arguments.get("event_types")
         if types is not None:
@@ -308,7 +353,11 @@ class _WaitForEvent(_BaseTool):
 
 
 class _WaitUntil(_BaseTool):
-    """End this turn and wake up at a specific later time to reconsider."""
+    """Wake at a later time; optionally associate the timer with one commitment.
+
+    A linked timer fires when due or expires, not because an unrelated message
+    arrived. Omit both selectors to create an independent timer.
+    """
 
     name = "wait_until"
 
@@ -319,13 +368,17 @@ class _WaitUntil(_BaseTool):
                 "at": {"type": "string", "maxLength": 64},
                 "purpose": {"type": "string", "maxLength": MAX_PURPOSE_CHARS},
                 "expires_at": {"type": "string", "maxLength": 64},
+                **_selector_properties(),
             },
             "required": ["at"],
+            "not": {"required": ["anchor_message_id", "intent_id"]},
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"at", "purpose", "expires_at"}:
+        if set(arguments) - {"at", "purpose", "expires_at", "anchor_message_id", "intent_id"}:
+            return "invalid_payload"
+        if not _valid_selector(arguments):
             return "invalid_payload"
         if _aware_timestamp(arguments.get("at")) is None:
             return "invalid_payload"
@@ -379,15 +432,11 @@ class _UpdateState(_BaseTool):
 
 
 class _SetIntent(_BaseTool):
-    """Record what you are trying to accomplish here, so a later wake continues it.
+    """Create or replace one conversation commitment.
 
-    A wake is not a fresh conversation: you are the same participant, and this
-    is how that survives the gap. Write the goal as something you could act on
-    when you are woken - what you are waiting for, and what you would do about
-    it - not as a status report.
-
-    One goal per chat (or per topic). Calling this again replaces the current
-    goal rather than adding a second one.
+    Identify the source message with `anchor_message_id`, or name an existing
+    commitment with `intent_id` to replace that exact goal. One is required;
+    never rely on an implicit current goal.
     """
 
     name = "set_intent"
@@ -400,13 +449,20 @@ class _SetIntent(_BaseTool):
                          "description": "What you are trying to accomplish."},
                 "expires_at": {"type": "string", "maxLength": 64,
                                "description": "ISO-8601 with timezone. Optional."},
+                **_selector_properties(),
             },
             "required": ["goal"],
+            "oneOf": [
+                {"required": ["anchor_message_id"], "not": {"required": ["intent_id"]}},
+                {"required": ["intent_id"], "not": {"required": ["anchor_message_id"]}},
+            ],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"goal", "expires_at"}:
+        if set(arguments) - {"goal", "expires_at", "anchor_message_id", "intent_id"}:
+            return "invalid_payload"
+        if not _valid_selector(arguments, required=True):
             return "invalid_payload"
         if _nonempty(arguments.get("goal"), 1000) is None:
             return "invalid_payload"
@@ -416,7 +472,7 @@ class _SetIntent(_BaseTool):
 
 
 class _ResolveIntent(_BaseTool):
-    """Close the current goal. Use when it is genuinely finished, or dropped.
+    """Close the exact commitment selected by `anchor_message_id` or `intent_id`.
 
     Closing is not a report to anyone: nobody is told. Say so with
     `send_message` if the chat should know.
@@ -436,12 +492,19 @@ class _ResolveIntent(_BaseTool):
                         "The difference is recorded, nothing else changes."
                     ),
                 },
+                **_selector_properties(),
             },
+            "oneOf": [
+                {"required": ["anchor_message_id"], "not": {"required": ["intent_id"]}},
+                {"required": ["intent_id"], "not": {"required": ["anchor_message_id"]}},
+            ],
             "additionalProperties": False,
         }
 
     def validate(self, arguments: dict[str, Any], *, max_timeout: float) -> str | None:
-        if set(arguments) - {"reason", "abandoned"}:
+        if set(arguments) - {"reason", "abandoned", "anchor_message_id", "intent_id"}:
+            return "invalid_payload"
+        if not _valid_selector(arguments, required=True):
             return "invalid_payload"
         if "reason" in arguments and _nonempty(arguments["reason"], MAX_REASON_CHARS) is None:
             return "invalid_payload"

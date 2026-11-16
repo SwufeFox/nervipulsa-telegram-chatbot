@@ -99,7 +99,7 @@ def test_help_lists_every_command_and_typos_do_not_raise():
     try:
         console, _, _ = make(store)
         text = output(console, "help")
-        for command in ("status", "chats", "watch", "queue", "actions", "quit"):
+        for command in ("status", "chats", "watch", "queue", "actions", "intents", "quit"):
             assert command in text
 
         typo = output(console, "stauts")

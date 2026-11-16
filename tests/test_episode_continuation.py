@@ -97,11 +97,11 @@ def test_a_timer_wake_continues_the_same_episode(tmp_path):
 
     def answer(index, payload):
         if index == 1:
-            return call("set_intent", goal="十分钟后提醒她跑测试")
+            return call("set_intent", goal="十分钟后提醒她跑测试", anchor_message_id=101)
         if index == 2:
             # A real instant just after the fake clock, not a fixed year.
             at = datetime.fromtimestamp(clock.now + 600, tz=timezone.utc).isoformat()
-            return call("wait_until", at=at, purpose="提醒跑测试")
+            return call("wait_until", at=at, purpose="提醒跑测试", anchor_message_id=101)
         return call("finish_silently")
 
     async def scenario():
@@ -143,7 +143,7 @@ def test_episode_spans_activations_joined_by_a_wait(tmp_path):
     def answer(index, payload):
         seen.append(payload)
         if index == 1:
-            return call("set_intent", goal="等她把 dump 贴出来再判断")
+            return call("set_intent", goal="等她把 dump 贴出来再判断", anchor_message_id=201)
         return call("finish_silently")
 
     async def scenario():
@@ -281,9 +281,9 @@ def test_only_one_open_episode_per_scope_survives_null_topic(tmp_path):
 def test_a_delivered_message_closes_the_goal_and_the_episode(tmp_path):
     def answer(index, payload):
         if index == 1:
-            return call("set_intent", goal="回他一句")
+            return call("set_intent", goal="回他一句", anchor_message_id=501)
         if index == 2:
-            return call("send_message", text="回了", resolves_intent=True)
+            return call("send_message", text="回了", resolves_intent=True, anchor_message_id=501)
         return call("finish_silently")
 
     async def scenario():
@@ -293,14 +293,14 @@ def test_a_delivered_message_closes_the_goal_and_the_episode(tmp_path):
             await bot.step([msg(501, "问个事")])
             clock.advance(5)
             await bot.autonomous_step(force=True)
-            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is not None
+            assert store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A)
 
             await bot.step([msg(502, "人呢")])
             clock.advance(5)
             await bot.autonomous_step(force=True)
 
             assert transport.sends, "nothing was delivered"
-            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is None
+            assert store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A) == []
             assert store.current_episode(fixtures.TEST_CHAT, fixtures.TOPIC_A) is None
         finally:
             await bot.stop()

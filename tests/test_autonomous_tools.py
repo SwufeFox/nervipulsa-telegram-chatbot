@@ -1,7 +1,7 @@
 """Contract tests for the scoped tools an autonomous agent may call.
 
 These are deliberately about *boundaries*, not about behaviour quality:
-the catalog must expose only the five scoped tools, must reject malformed
+the catalog must expose only the seven scoped tools, must reject malformed
 arguments before the application sees them, and must never perform a side
 effect of its own.
 """
@@ -58,13 +58,28 @@ def test_catalog_exposes_only_the_scoped_tools():
     assert len(schemas) == len(CATALOG_TOOL_NAMES)
     assert all(schema["type"] == "function" for schema in schemas)
 
+def test_commitment_selectors_are_exposed_in_tool_schemas():
+    catalog, _ = build()
+    schemas = {item["function"]["name"]: item["function"]["parameters"]
+               for item in catalog.schemas(workspace="/tmp")}
+    for name in ("set_intent", "resolve_intent", "send_message",
+                 "wait_for_event", "wait_until"):
+        assert {"anchor_message_id", "intent_id"} <= set(schemas[name]["properties"])
 
-def test_send_message_accepts_a_valid_call_and_forwards_intent():
+
+@pytest.mark.parametrize("arguments", [
+    {"text": "hello"},
+    {"text": "hello", "anchor_message_id": 1},
+    {"text": "hello", "intent_id": "intent-1"},
+    {"text": "hello", "resolves_intent": True, "anchor_message_id": 1},
+    {"text": "hello", "resolves_intent": True, "intent_id": "intent-1"},
+])
+def test_send_message_accepts_a_valid_call_and_forwards_intent(arguments):
     catalog, calls = build()
-    receipt, state = invoke(catalog, "send_message", {"text": "hello"})
+    receipt, state = invoke(catalog, "send_message", arguments)
     assert state == "accepted"
     assert receipt["status"] == "accepted"
-    assert calls == [("send_message", {"text": "hello"}, "act-1", "call-1")]
+    assert calls == [("send_message", arguments, "act-1", "call-1")]
 
 
 @pytest.mark.parametrize("arguments", [
@@ -76,6 +91,11 @@ def test_send_message_accepts_a_valid_call_and_forwards_intent():
     {"text": "hi", "reply_to": True},
     {"text": "hi", "freshness": "whatever"},
     {"text": "hi", "max_unobserved_events": 5},  # only valid with bounded
+    {"text": "hi", "anchor_message_id": 1, "intent_id": "i"},
+    {"text": "hi", "anchor_message_id": 0},
+    {"text": "hi", "intent_id": ""},
+    {"text": "hi", "resolves_intent": True},
+    {"text": "hi", "anchor_message_id": None},
     {"text": "hi", "unexpected": 1},
 ])
 def test_send_message_rejects_malformed_arguments_before_the_handler(arguments):
@@ -102,6 +122,19 @@ def test_wait_tools_require_timezone_aware_timestamps():
     assert invoke(catalog, "wait_for_event", {
         "purpose": "see the fix", "event_types": ["message", "message"],
     })[1] == "rejected"
+    assert len(calls) == 2
+
+def test_wait_tools_allow_one_optional_commitment_selector():
+    catalog, calls = build()
+    assert invoke(catalog, "wait_for_event", {
+        "purpose": "wait for Alice", "anchor_message_id": 41,
+    })[1] == "accepted"
+    assert invoke(catalog, "wait_for_event", {
+        "purpose": "wait for Alice", "anchor_message_id": 41, "intent_id": "i",
+    })[1] == "rejected"
+    assert invoke(catalog, "wait_until", {
+        "at": "2026-10-28T18:00:00+08:00", "intent_id": "i",
+    })[1] == "accepted"
     assert len(calls) == 2
 
 

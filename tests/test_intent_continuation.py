@@ -103,9 +103,9 @@ def test_a_goal_set_in_one_turn_is_shown_in_the_next(tmp_path):
     def answer(index, payload):
         turns.append(payload)
         if index == 1:
-            return call("set_intent", goal="等林贴出日志，看是不是 Code 62")
+            return call("set_intent", goal="等林贴出日志，看是不是 Code 62", anchor_message_id=101)
         if index == 2:
-            return call("wait_for_event", purpose="等日志")
+            return call("wait_for_event", purpose="等日志", anchor_message_id=101)
         return call("finish_silently")
 
     async def scenario():
@@ -117,7 +117,7 @@ def test_a_goal_set_in_one_turn_is_shown_in_the_next(tmp_path):
             await bot.autonomous_step(force=True)
 
             # The goal is durable after the turn that set it.
-            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is not None
+            assert store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A)
 
             # A later, unrelated activation must see it.
             await bot.step([msg(102, "有人吗")])
@@ -125,9 +125,9 @@ def test_a_goal_set_in_one_turn_is_shown_in_the_next(tmp_path):
             await bot.autonomous_step(force=True)
 
             assert len(turns) >= 2, "the second turn never ran"
-            shown = turns[-1].get("open_intent")
-            assert shown is not None, "the goal was not rendered into the payload"
-            assert "Code 62" in shown["goal"]
+            shown = turns[-1].get("open_intents")
+            assert shown, "the goal was not rendered into the payload"
+            assert any("Code 62" in intent["goal"] for intent in shown)
             assert "Code 62" in bot.provider_requests[-1]
         finally:
             await bot.stop()
@@ -152,8 +152,8 @@ def test_no_goal_renders_as_null_not_missing(tmp_path):
             clock.advance(5)
             await bot.autonomous_step(force=True)
             assert seen
-            assert "open_intent" in seen[0]
-            assert seen[0]["open_intent"] is None
+            assert "open_intents" in seen[0]
+            assert seen[0]["open_intents"] == []
         finally:
             await bot.stop()
             store.close()
@@ -165,7 +165,7 @@ def test_setting_a_goal_twice_replaces_it(tmp_path):
     def answer(index, payload):
         goals = ["第一版目标", "第二版目标"]
         if index <= len(goals):
-            return call("set_intent", goal=goals[index - 1])
+            return call("set_intent", goal=goals[index - 1], anchor_message_id=301)
         return call("finish_silently")
 
     async def scenario():
@@ -191,7 +191,7 @@ def test_setting_a_goal_twice_replaces_it(tmp_path):
 
 def test_setting_a_goal_is_not_misreported_as_an_undecided_skip(tmp_path):
     def answer(_index, _payload):
-        return call("set_intent", goal="等 Alice 贴出 CronJob YAML")
+        return call("set_intent", goal="等 Alice 贴出 CronJob YAML", anchor_message_id=351)
 
     async def scenario():
         bot, store, clock, transport, payloads = build(tmp_path, answer)
@@ -202,7 +202,7 @@ def test_setting_a_goal_is_not_misreported_as_an_undecided_skip(tmp_path):
             results = await bot.autonomous_step(force=True)
 
             assert results and results[0].outcome == "noted"
-            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is not None
+            assert store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A)
             assert store._query("SELECT sequence FROM observation_skips") == []
             assert transport.sends == []
         finally:
@@ -217,9 +217,9 @@ def test_a_goal_closes_only_after_the_message_is_delivered(tmp_path):
 
     def answer(index, payload):
         if index == 1:
-            return call("set_intent", goal="要回他一句")
+            return call("set_intent", goal="要回他一句", anchor_message_id=401)
         if index == 2:
-            return call("send_message", text="回你了", resolves_intent=True)
+            return call("send_message", text="回你了", resolves_intent=True, anchor_message_id=401)
         return call("finish_silently")
 
     async def scenario():
@@ -235,12 +235,13 @@ def test_a_goal_closes_only_after_the_message_is_delivered(tmp_path):
 
             # The intent id must have been written with the action, or a crash
             # after delivery could never close it.
-            rows = store._query("SELECT intent_id, status FROM actions")
-            assert rows and rows[0]["intent_id"], "the action did not record its goal"
+            rows = store._query("SELECT intent_id, resolves_intent, status FROM actions")
+            assert rows and rows[0]["intent_id"] and rows[0]["resolves_intent"] == 1, \
+                "the action did not record its selected completion intent"
 
             # Delivered, so the goal is now closed.
             assert transport.sends, "nothing was delivered"
-            assert store.current_intent(fixtures.TEST_CHAT, fixtures.TOPIC_A) is None
+            assert store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A) == []
         finally:
             await bot.stop()
             store.close()
@@ -251,15 +252,20 @@ def test_a_goal_closes_only_after_the_message_is_delivered(tmp_path):
 def test_a_cancelled_reply_leaves_the_goal_open(tmp_path):
     store = Store(tmp_path / "app.db")
     try:
-        assert store.open_intent(intent_id="i", chat_id=1, topic_id=None, goal="reply")
+        from app.store import StoredMessage
+        store.record_message(
+            StoredMessage(1, 10, None, 7, "member", False, "reply", 1.0), update_id=10)
+        assert store.open_intent(intent_id="i", chat_id=1, topic_id=None,
+                                 goal="reply", anchor_message_id=10)
         store.prepare_action(action_id="a", workflow_id=None, chat_id=1, topic_id=None,
-                             text="reply", observed_through=0, intent_id="i")
+                             text="reply", observed_through=0, intent_id="i",
+                             resolves_intent=True)
         store.append_synthetic_observation(dedupe_key="new", chat_id=1, topic_id=None,
                                            kind="message", payload={})
         assert store.claim_action("a") == "stale"
         assert store.finish_action("a", "cancelled", error="needs refresh")
         assert store.get_action("a")["status"] == "cancelled"
-        assert store.current_intent(1, None)["intent_id"] == "i"
+        assert store.get_intent("i", chat_id=1, topic_id=None)["intent_id"] == "i"
     finally:
         store.close()
 
@@ -273,13 +279,23 @@ def test_the_tool_reports_what_it_did(tmp_path):
         assert tool is not None
         return tool.validate(arguments, max_timeout=30)
 
-    assert validate("set_intent", {"goal": "做一件小事"}) is None
-    assert validate("set_intent", {"goal": ""}) == "invalid_payload"
-    assert validate("set_intent", {"goal": "x", "extra": 1}) == "invalid_payload"
-    assert validate("set_intent", {"goal": "x", "expires_at": "17:00"}) == "invalid_payload"
-    assert validate("set_intent", {"goal": "x", "expires_at": "2030-01-01T00:00:00+08:00"}) is None
+    assert validate("set_intent", {"goal": "做一件小事"}) == "invalid_payload"
+    assert validate("set_intent", {"goal": "做一件小事", "anchor_message_id": 1}) is None
+    assert validate("set_intent", {"goal": "x", "intent_id": "intent-1"}) is None
+    assert validate("set_intent", {"goal": "x", "anchor_message_id": 1,
+                                    "intent_id": "intent-1"}) == "invalid_payload"
+    assert validate("set_intent", {"goal": "", "anchor_message_id": 1}) == "invalid_payload"
+    assert validate("set_intent", {"goal": "x", "extra": 1,
+                                    "anchor_message_id": 1}) == "invalid_payload"
+    assert validate("set_intent", {"goal": "x", "expires_at": "17:00",
+                                    "anchor_message_id": 1}) == "invalid_payload"
+    assert validate("set_intent", {"goal": "x", "expires_at": "2030-01-01T00:00:00+08:00",
+                                    "anchor_message_id": 1}) is None
 
-    assert validate("resolve_intent", {}) is None
-    assert validate("resolve_intent", {"abandoned": True}) is None
-    assert validate("resolve_intent", {"abandoned": "yes"}) == "invalid_payload"
-    assert validate("resolve_intent", {"nope": 1}) == "invalid_payload"
+    assert validate("resolve_intent", {}) == "invalid_payload"
+    assert validate("resolve_intent", {"intent_id": "i", "abandoned": True}) is None
+    assert validate("resolve_intent", {"anchor_message_id": 4,
+                                        "abandoned": "yes"}) == "invalid_payload"
+    assert validate("resolve_intent", {"anchor_message_id": 4,
+                                        "intent_id": "i"}) == "invalid_payload"
+    assert validate("resolve_intent", {"nope": 1, "intent_id": "i"}) == "invalid_payload"
