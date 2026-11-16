@@ -1,16 +1,12 @@
 # 自主群聊 Agent：感知、唤醒与行动循环
 
-状态：设计草案，2026-10-28。本文是目标架构，不代表已经实现或通过实验。
+状态：最初设计草案，2026-10-28；2026-11-16 补充经验记忆集成契约。早期设计与实验记录保留为历史，当前接口以 [Integration Contract](../INTEGRATION_CONTRACT.md) 和下文的记忆契约为准；新增能力的验证由集成后的实际结果说明。
 
 ## 目标与现状
 
 群聊 Agent 应持续接收平台实际交付的事件，并在获得计算资源时自主判断该观察、等待、主动参与，还是结束本轮。被 @、被回复和没有 @ 都是上下文信号；它们不直接决定 Agent 必须说话或不能思考。
 
-当前实现不是这样：[GroupAgent](../../app/bot.py) 先调用 [ParticipationPolicy](../../app/policy.py)，静默时不会启动模型；只有策略决定回复，才把有限历史和当前窗口渲染成提示词。自主参与的固定分数和阈值、提及的强制回复，都是模型调用前的社交决策。消息落库后有可能在较晚的回复中作为历史出现，但落库不等于 Agent 已经看见。
-
-Core 当前的公开文本入口是 `Runtime.submit_text`，固定事件路由和校验不提供任意外部结构化观察入口。`Transcript.project` 也只投影已识别的事件；仅将一个事件写进日志或注册路由不足以保证模型看到它。当前空的模型响应被判为 `response_invalid`，不能直接改称主动沉默。Bot 的每个话题 Runtime 目前使用空工具目录，发言由应用代替模型执行。Core 的 journal 不能单凭现有实现自动恢复会话 transcript。
-
-这些是本轮源码检查的结论，不是新设计的验收结果。此前离线对话实验也不能证明主动参与能力。
+最初检查时，[GroupAgent](../../app/bot.py) 使用 [ParticipationPolicy](../../app/policy.py) 在模型调用前评分、强制提及回复；Core 当时也缺少结构化观察、工具提交钩子与 transcript 恢复入口。这是 2026-10-28 的历史基线，不是当前生产路径。现在每个 `(chat_id, topic_id)` 使用独立 Runtime、结构化观察、闭合应用工具目录和持久 inbox/outbox；旧策略仅用于离线对照。Core 的已提交模型视图恢复与应用观察/行动恢复仍是两件事，不存在跨库事务。
 
 ## 基本原则
 
@@ -66,14 +62,16 @@ Bot 自己的确认消息、其他 Bot 的消息和群成员消息必须保留�
 
 ### 4. Agent 决策与行动
 
-下面是能力语义的示例名称，**不是现有 API**：
+当前闭合目录是以下十一个应用工具，不提供 Python、shell、网络或文件读取能力：
 
-- `observe` / `read_context`：在权限和上下文预算内读取事件与状态。
-- `update_state`：记录、修订或删除带来源和有效期的状态。
-- `wait_for_event`：登记对未来事件的等待并结束本轮；等待不占用模型。
-- `wait_until`：登记未来重新观察的时间、目的和有效期；到期后重新判断，不是预先授权发送。
-- `send_message`：在当前 scope 内提出要发送的内容、可选回复目标和有效期。
-- `finish_silently`：正常完成本轮；不产生可见群消息。
+- `send_message`：登记发送意图，可关联承诺及准确的记忆版本；不等于已经送达。
+- `finish_silently`：明确结束且不发送。
+- `wait_for_event` / `wait_until`：等待事件或时间后重新判断，可关联承诺和记忆。
+- `update_state`：保留小段通用状态，不替代有来源的结构化记忆。
+- `set_intent` / `resolve_intent`：记录或关闭明确选中的独立承诺。
+- `remember`：创建或按原 ID 和版本修订经验、人物、兴趣、偏好。
+- `recall_memories` / `read_history`：读取有限记忆或实际观察，回执交回同一 workflow 继续判断。
+- `forget_memory`：退出后续召回，保留历史审计；不是删除聊天。
 
 无需把 Agent 的内部思考或普通文本自动当作群消息。只有明确的发言工具调用才构成对外行动；工具在同一个自主工作单元中接收意图，适配器检查权限、安全、速率和目标，然后提交 outbox。Agent 可在一个工作单元里阅读、更新状态并决定发送，也可结束而不发言。工具接受意图不代表 Telegram 已送达；异步完成结果可能在工作单元结束后才产生，并以同一行动 ID 关联到后续观察。
 
@@ -124,9 +122,9 @@ Agent 不仅可以在未被 @ 时发现未解的问题并补充有效信息，�
 时期，`agent_intents` 记录各条独立承诺。一个工作单元可以包含多条承诺；承诺以来源消息
 区分，不再用一个话题唯一的目标覆盖交错对话。
 
-一次 workflow 对应一次模型激活；一次 episode 可以跨多次激活。每个 `(chat_id, topic_id)`
-仍只有一个 Core Runtime 和至多一个 open episode，共享群聊上下文。模型根据发起者、
-原始消息、回复关系和未完成承诺判断新观察属于哪件事，应用不做关键词或分类器分流。
+一个 workflow 可以包含初次激活及显式读取后的有界继续推理；episode 则可以跨多个 workflow。
+每个 `(chat_id, topic_id)` 仍只有一个 Core Runtime 和至多一个 open episode，共享该话题上下文。
+模型根据发起者、原始消息、回复关系和未完成承诺判断新观察属于哪件事，应用不做关键词或分类器分流。
 
 **承诺模型。** 同一 scope 最多有 32 条 open intent；每个已记录来源消息至多一条：
 
@@ -160,7 +158,7 @@ Agent、其实是状态机"。
 
 **等待。** `wait_*` 可选择关联某一承诺。事件等待可按发起者和事件类型过滤，但这不阻止
 其他消息唤醒模型。关联承诺的定时等待不会被中途普通消息消耗；到期、取消或过期才结算，
-到期观察携带承诺 ID 和原始消息锚点。未关联承诺的等待保留原来的可中断行为。
+到期观察携带承诺 ID 和原始消息锚点。仅关联记忆的定时等待也保留到到期、取消或过期；两者都未关联的等待保留原来的可中断行为。
 
 ### 实现记录：`workflow_episodes`（2026-10-29）
 
@@ -208,6 +206,34 @@ Alice 的承诺和等待仍在。
 
 完整套件执行 471 项：470 passed，1 项因过期回执的固定文案断言失败。移除文案绑定并
 保留取消状态、过期原因和持久回执检查后，`tests/test_speak_in_busy_group.py` 复验为 7 passed。
+
+## 有来源、可修订的经验记忆（2026-11-16 集成契约）
+
+本节描述已接入的接口与行为。本轮定向验证已覆盖 311 个用例，其中 12 个新增场景实际启动 Core Runtime、使用脚本模型和临时 SQLite；控制台也已实跑来源、修订、待复核与遗忘路径。脚本模型链路不能证明真实模型的记忆或社交质量，前文其他测试数量属于各自历史版本。
+
+完整套件执行 735 项，结果为 734 passed、1 项旧提醒文案断言失败。移除文案绑定，并准确记录只读循环未形成决定的审计原因后，决策提醒与读取预算相关的 5 项复验通过；保留恰好一次提醒、未决定不计沉默、读取有界及不自激的行为检查。
+
+**记忆与任务分开。** `experience`、`person`、`interest`、`preference` 四类记录按精确 chat/topic 隔离。值得记住的共同经历、明确表达的个人偏好，以及 Agent 在实际聊天中形成的自身兴趣，可以在承诺结束后保留；不要求每条消息建档，也不要求为了回访编造任务。身份与狐狸的自然语气不变，不编造亲身经历、关系、感情或投票者身份。信息的 `observed` / `inferred` 标记区分直接证据和推断，来源文字与记忆都不能覆盖系统指令。
+
+**真实来源与版本。** schema v5 增加当前记录与不可变旧版本，保留旧库数据但不从通用状态笔记虚构来源。每条记录包含同 scope 内真实、已接受且不晚于冻结高水位的 `source_sequences`，以及人物、标签、重要性、版本、状态、有效期和 `needs_review`。来源提供实际消息/发送者/时间及至多 240 字符的原文摘录和截断标记。人物必须由来源作者或被来源明确回复的同话题消息作者支持；匿名反馈不提供人物身份。每 scope 最多 1,024 条活跃记忆，容量满时明确拒绝新建，不静默淘汰，原 ID 修订仍可进行。
+
+`remember(summary, kind, source_sequences, ...)` 创建记忆；修订必须同时给出原 `memory_id` 和 `expected_revision`。可选字段为 `person_ids`、`tags`、`certainty`、`importance`、`expires_at`。来源、scope、人物和版本在变更前一起校验；已提交工具调用在应用 `autonomous_calls` 缓存回执，重放不再增长版本。`forget_memory(memory_id, expected_revision, reason?)` 使记录退出常规召回，不承诺抹掉聊天或审计。`memory_history` 给操作者查看旧版本；`/purge` 才删除该聊天的记录、版本、关联和摘录。
+
+**自动上下文与主动读取。** 每轮 `memories` 最多六条、总计 6,000 字符，条目携带相关原因、版本、不确定性和来源截断标记，`memory_context` 说明筛选范围。选择依据参与者、字面文本、回复/来源引用和自身兴趣偏好，只选择证据，不决定是否说话。检索使用大小写折叠词与中文相邻双字：当前记忆在有界集合中过滤排序，原始观察查询使用参数化、转义的 SQLite LIKE。它不是嵌入或语义搜索，不能保证找全或理解原文。
+
+`recall_memories` 可按 `query`、`person_id`、`kind`、`tags`、`memory_id`、`source_message_id` 过滤；`read_history` 可按 `query`、`person_id`、`message_id`、`through_sequence` 过滤。两者 `limit` 默认 5、最多 10，先限制 scope、冻结高水位和过滤条件再限量。回复旧消息时可直接用 `reply_to_message_id` 查询实际原文并获得观察序号，不猜序号。历史只读已接受的会话/来源观察，选取最新匹配后按时间顺序返回；精确检查某序号仍需核对返回的 `sequence`。
+
+记忆工具回执（包括新建记录的 ID）回到同一个 workflow，最多继续三轮模型推理、执行六次读取；原观察只消费一次，每次 Core 激活沿用 scope 与提交钩子。已提出发送、等待或明确结束后不再追加延续。写记忆算已记录的决定，也可同一响应 `finish_silently` 结束私下记事；只读循环耗尽仍审计为 `undecided`。每次应用提交计入 `model_calls`，工作流保留逐次激活明细，provider 重试/尝试仍由 Core 记录。普通无工具文字仍保留一次决策提醒。
+
+**记忆关联回访与发送。** `wait_for_event` / `wait_until` 可带 `memory_id`，并可同时关联 intent。记忆关联定时器跨闲聊和重启保留，到时呈现当前记忆让 Agent 重新判断；没有必须发帖的义务。原 ID 的修订保留回访，遗忘和过期原子取消关联等待与 pending 发送；未使用记忆的过期本身不唤醒模型。
+
+依赖记忆的 `send_message` 必须同时带 `memory_id` 和 `memory_revision`，独立于承诺选择。登记与 `pending → sending` 领取都检查该记忆仍活跃、版本一致且不需复核。修订、遗忘、过期、来源编辑都会取消关联 pending 发送并留下 action_result；已 sending/unknown 的行动不能因此重试。来源编辑保留旧来源与版本，标记 `needs_review`，保留回访让模型核对后修订或退掉。发送不会自动遗忘记忆，承诺完成仍按独立规则处理。
+
+若模型推理期间原消息已收到更新，随后以旧来源写入的记忆也会标为待复核；同时提供最新编辑的来源后才能成为当前版本的依据，避免迟到的写入把已更正的信息重新当成现状。
+
+**实时匿名反馈与控制台。** 已确认 sent 的自主 action 和旧 sends 都可成为赞踩目标；失败、unknown 或别的聊天不行。真实票变更与反馈观察一起提交，带实际回复文字、票差和独立可空的 `action_id` / `decision_id`，不存反应者身份；无变化不创建模型观察。输入/轮询提交后才调度目标 topic，即使没有下一条人类消息也可看到反馈。它是关于那条回复的弱证据，可支持谨慎修订偏好，不代表某个人的要求，更不强制回复。只读报告涵盖两种来源，检查旧快照字段而不迁移它。
+
+控制台 `watch <chat_id> [topic_id]` 后，`memories [n]` 列 scoped 记忆，`memory <id>` 查看内容、修订和来源，`history [n]` 查看已接受的观察；等待和行动显示关联记忆 ID。依赖仍固定为 Core `5b0fe9c075379f5ae84d876c9bfd0d43e7d314d9` 与 PTB `22.8`。Core 仅恢复已提交模型视图；应用恢复 inbox/outbox、记忆和等待，不能恢复进行中的推理或承诺跨库存储原子性。
 
 ## Core 与 Telegram 应用的边界
 
@@ -286,7 +312,7 @@ Agent：finish_silently()
 **App（本仓库）** — 自主循环：
 
 - `app/autonomy.py`：观察批次、`workflow_id`、游标推进、等待、状态、动作意图与 outbox。
-- `app/autonomous_tools.py`：仅暴露 `send_message`、`finish_silently`、`wait_for_event`、`wait_until`、`update_state`、`set_intent`、`resolve_intent` 七个闭合工具；工具只登记意图，不产生 Telegram 副作用。
+- `app/autonomous_tools.py`：当前暴露上文列出的十一个闭合应用工具；最初目录后来加入承诺与经验记忆工具。工具只登记应用意图或读取 scoped 证据，不直接产生 Telegram 副作用。
 - 每个 `(chat_id, topic_id)` 有独立 Runtime、稳定 session id、工具目录与 response commit hook；启动检查拒绝未授权工具，包括 `python_exec`。
 - 未指定 `event_types` 的 `wait_for_event` 只由入站 `message` / `message_edit` 满足；`timer`、`intent_expired`、`action_result` 等合成观察需显式指定。
 - 结构化观察里的 `matched_waits` 显示命中的 wait id、purpose 和事件 kind/sequence；失败的模型激活不会消费等待，同一批观察重试时会重新计算匹配。

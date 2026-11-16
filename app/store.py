@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import math
 import threading
 import time
 from contextlib import contextmanager
@@ -38,7 +39,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence
 
-SCHEMA_VERSION = 4
+from app.memory import (
+    MEMORY_KINDS, MEMORY_CERTAINTIES, MAX_MEMORY_ID_CHARS,
+    MAX_MEMORY_SUMMARY_CHARS, MAX_MEMORY_SOURCES, MAX_MEMORY_PEOPLE,
+    MAX_MEMORY_TAGS, MAX_MEMORY_TAG_CHARS, MAX_ACTIVE_MEMORIES,
+    MAX_RECALL_RESULTS, MAX_RECALL_QUERY_CHARS, MAX_SOURCE_QUOTE_CHARS,
+    search_terms, like_pattern,
+)
+
+SCHEMA_VERSION = 5
 MAX_OPEN_INTENTS = 32
 MAX_INTENT_ID_LENGTH = 200
 
@@ -420,6 +429,9 @@ class Store:
         self._conn.executescript(SCHEMA)
         self._migrate_observation_cursors()
         self._migrate_conversation_continuity()
+        self._migrate_experience_memory()
+        self._conn.create_function("casefold", 1, lambda value: str(value or "").casefold(),
+                                   deterministic=True)
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -486,11 +498,56 @@ class Store:
                          " WHERE status = 'open' AND anchor_message_id IS NOT NULL"
                          " AND topic_id IS NULL")
             conn.execute("CREATE INDEX IF NOT EXISTS actions_intent ON actions(intent_id, status)")
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (str(SCHEMA_VERSION),),
-            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+    def _migrate_experience_memory(self) -> None:
+        """Upgrade memory and feedback together; publish v5 only after success."""
+        conn = self._conn
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for table, name, definition in (
+                ("agent_waits", "memory_id", "TEXT"),
+                ("actions", "memory_id", "TEXT"),
+                ("actions", "memory_revision", "INTEGER"),
+            ):
+                columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+            conn.execute("CREATE TABLE IF NOT EXISTS memories ("
+                         "memory_id TEXT PRIMARY KEY, chat_id INTEGER NOT NULL, topic_id INTEGER,"
+                         "revision INTEGER NOT NULL, status TEXT NOT NULL, expires_at REAL,"
+                         "snapshot_json TEXT NOT NULL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS memories_scope ON memories(chat_id, topic_id, status)")
+            conn.execute("CREATE TABLE IF NOT EXISTS memory_revisions ("
+                         "memory_id TEXT NOT NULL, revision INTEGER NOT NULL, chat_id INTEGER NOT NULL,"
+                         "topic_id INTEGER, snapshot_json TEXT NOT NULL, PRIMARY KEY(memory_id, revision))")
+            conn.execute("CREATE TABLE IF NOT EXISTS memory_sources ("
+                         "memory_id TEXT NOT NULL, sequence INTEGER NOT NULL,"
+                         "PRIMARY KEY(memory_id, sequence))")
+            conn.execute("CREATE INDEX IF NOT EXISTS memory_sources_sequence ON memory_sources(sequence)")
+            conn.execute("CREATE INDEX IF NOT EXISTS actions_memory ON actions(memory_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS waits_memory ON agent_waits(memory_id, status)")
+            columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(feedback_events)")}
+            if columns["decision_id"]["notnull"] or "action_id" not in columns:
+                conn.execute("ALTER TABLE feedback_events RENAME TO feedback_events_v4")
+                conn.execute("CREATE TABLE feedback_events (update_id INTEGER PRIMARY KEY,"
+                             "chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, decision_id TEXT,"
+                             "old_vote TEXT CHECK(old_vote IN ('up','down') OR old_vote IS NULL),"
+                             "new_vote TEXT CHECK(new_vote IN ('up','down') OR new_vote IS NULL),"
+                             "created_at REAL NOT NULL, action_id TEXT)")
+                action = "action_id" if "action_id" in columns else "NULL"
+                conn.execute("INSERT INTO feedback_events SELECT update_id, chat_id, message_id,"
+                             f"decision_id, old_vote, new_vote, created_at, {action} FROM feedback_events_v4")
+                conn.execute("DROP TABLE feedback_events_v4")
+            conn.execute("CREATE INDEX IF NOT EXISTS feedback_events_decision"
+                         " ON feedback_events(decision_id, created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS feedback_events_action"
+                         " ON feedback_events(action_id, created_at)")
+            conn.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(SCHEMA_VERSION),))
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -636,6 +693,274 @@ class Store:
                     (activation.id, call.id, call.name,
                      json.dumps(call.arguments, ensure_ascii=False, allow_nan=False)),
                 )
+
+    @staticmethod
+    def _positive(value: Any) -> bool:
+        return type(value) is int and value > 0
+
+    @staticmethod
+    def _bounded(value: Any, maximum: int) -> bool:
+        return isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+
+    def _memory(self, conn: sqlite3.Connection, memory_id: str, chat_id: int,
+                topic_id: int | None) -> dict[str, Any] | None:
+        row = conn.execute("SELECT snapshot_json FROM memories WHERE memory_id = ? AND chat_id = ?"
+                           " AND topic_id IS ?", (memory_id, chat_id, topic_id)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _active_memory(self, conn: sqlite3.Connection, memory_id: str, chat_id: int,
+                       topic_id: int | None, *, now: float | None = None) -> dict[str, Any]:
+        memory = self._memory(conn, memory_id, chat_id, topic_id)
+        moment = self._now() if now is None else now
+        if memory is None or memory['status'] != 'active' or (
+            memory['expires_at'] is not None and memory['expires_at'] <= moment
+        ):
+            raise ValueError('unknown_memory')
+        return memory
+
+    def _save_memory(self, conn: sqlite3.Connection, memory: dict[str, Any]) -> None:
+        conn.execute("INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(memory_id)"
+                     " DO UPDATE SET revision=excluded.revision, status=excluded.status,"
+                     " expires_at=excluded.expires_at, snapshot_json=excluded.snapshot_json",
+                     (memory['memory_id'], memory['chat_id'], memory['topic_id'], memory['revision'],
+                      memory['status'], memory['expires_at'], json.dumps(memory, ensure_ascii=False, allow_nan=False)))
+
+    def _cancel_memory_actions(self, conn: sqlite3.Connection, memory_id: str, reason: str) -> None:
+        for row in conn.execute("SELECT * FROM actions WHERE memory_id = ? AND status = 'pending'",
+                                (memory_id,)).fetchall():
+            conn.execute("UPDATE actions SET status='cancelled', error=?, updated_at=? WHERE action_id=?"
+                         " AND status='pending'", (reason, self._now(), row['action_id']))
+            self._record_action_result(conn, action_id=row['action_id'], chat_id=row['chat_id'],
+                                       topic_id=row['topic_id'], status='cancelled', text=row['text'], error=reason)
+
+    def remember_memory(self, *, memory_id: str, chat_id: int, topic_id: int | None,
+                        summary: str, kind: str, source_sequences: list[int], observed_through: int,
+                        expected_revision: int | None = None, person_ids: list[int] | None = None,
+                        tags: list[str] | None = None, certainty: str = 'inferred', importance: int = 2,
+                        expires_at: float | None = None) -> dict[str, Any]:
+        people = [] if person_ids is None else person_ids
+        labels = [] if tags is None else tags
+        if (not self._bounded(memory_id, MAX_MEMORY_ID_CHARS)
+                or type(chat_id) is not int or (topic_id is not None and type(topic_id) is not int)
+                or not self._bounded(summary, MAX_MEMORY_SUMMARY_CHARS)
+                or kind not in MEMORY_KINDS or certainty not in MEMORY_CERTAINTIES
+                or type(importance) is not int or not 1 <= importance <= 5
+                or not self._positive(observed_through)
+                or (expected_revision is not None and not self._positive(expected_revision))
+                or not isinstance(labels, list) or len(labels) > MAX_MEMORY_TAGS
+                or any(not self._bounded(tag, MAX_MEMORY_TAG_CHARS) for tag in labels)
+                or len(set(labels)) != len(labels)
+                or (expires_at is not None and (type(expires_at) not in (int, float)
+                                               or not math.isfinite(expires_at)))):
+            raise ValueError('invalid_memory')
+        if (not isinstance(source_sequences, list) or not 1 <= len(source_sequences) <= MAX_MEMORY_SOURCES
+                or any(not self._positive(seq) or seq > observed_through for seq in source_sequences)
+                or len(set(source_sequences)) != len(source_sequences)):
+            raise ValueError('invalid_source')
+        if (not isinstance(people, list) or len(people) > MAX_MEMORY_PEOPLE
+                or any(not self._positive(person) for person in people)
+                or len(set(people)) != len(people) or (kind == 'person' and not people)):
+            raise ValueError('invalid_person')
+        with self._write(immediate=True) as conn:
+            exists = conn.execute('SELECT 1 FROM memories WHERE memory_id=?', (memory_id,)).fetchone()
+            previous = self._memory(conn, memory_id, chat_id, topic_id)
+            if (exists and previous is None) or (previous is None and expected_revision is not None):
+                raise ValueError('unknown_memory')
+            if previous is not None and (expected_revision != previous['revision'] or previous['status'] != 'active'
+                    or (previous['expires_at'] is not None and previous['expires_at'] <= self._now())):
+                raise ValueError('memory_revision_conflict')
+            sources = []
+            supported: set[int] = set()
+            for sequence in source_sequences:
+                row = conn.execute('SELECT * FROM observation_events WHERE sequence=? AND chat_id=? AND topic_id IS ?',
+                                   (sequence, chat_id, topic_id)).fetchone()
+                if row is None or row['kind'] not in {'message', 'message_edit', 'bot_message', 'feedback', 'action_result'}:
+                    raise ValueError('invalid_source')
+                payload = json.loads(row['payload_json'])
+                sender = payload.get('sender_id') if row['kind'] != 'feedback' else None
+                if self._positive(sender):
+                    supported.add(sender)
+                reply_to = payload.get('reply_to_message_id', payload.get('reply_to'))
+                if self._positive(reply_to):
+                    author = conn.execute('SELECT sender_id FROM messages WHERE chat_id=? AND topic_id IS ? AND message_id=?',
+                                          (chat_id, topic_id, reply_to)).fetchone()
+                    if author and self._positive(author[0]):
+                        supported.add(author[0])
+                text = payload.get('text') or payload.get('reply_text') or ''
+                text = text if isinstance(text, str) else ''
+                sources.append(dict(sequence=sequence, type=row['kind'], message_id=payload.get('message_id'),
+                                    sender_id=sender, received_at=row['received_at'], text=text[:MAX_SOURCE_QUOTE_CHARS],
+                                    truncated=len(text) > MAX_SOURCE_QUOTE_CHARS))
+            if not set(people) <= supported:
+                raise ValueError('invalid_person')
+            message_sources: dict[int, int] = {}
+            for source in sources:
+                if source['type'] in {'message', 'message_edit', 'bot_message'} and type(source['message_id']) is int:
+                    message_id = source['message_id']
+                    message_sources[message_id] = max(message_sources.get(message_id, 0), source['sequence'])
+            needs_review = False
+            if message_sources:
+                placeholders = ','.join('?' for _ in message_sources)
+                latest_edits = conn.execute(
+                    "SELECT json_extract(payload_json, '$.message_id') AS message_id, MAX(sequence) AS sequence"
+                    " FROM observation_events WHERE chat_id=? AND topic_id IS ? AND kind='message_edit'"
+                    f" AND json_extract(payload_json, '$.message_id') IN ({placeholders}) GROUP BY message_id",
+                    (chat_id, topic_id, *message_sources),
+                )
+                needs_review = any(row['sequence'] > message_sources[row['message_id']] for row in latest_edits)
+            if previous is None:
+                count = conn.execute("SELECT COUNT(*) FROM memories WHERE chat_id=? AND topic_id IS ? AND status='active'"
+                                     ' AND (expires_at IS NULL OR expires_at>?)', (chat_id, topic_id, self._now())).fetchone()[0]
+                if count >= MAX_ACTIVE_MEMORIES:
+                    raise ValueError('memory_capacity_exceeded')
+            now = self._now()
+            memory = dict(memory_id=memory_id, revision=previous['revision'] + 1 if previous else 1,
+                          chat_id=chat_id, topic_id=topic_id, kind=kind, summary=summary, certainty=certainty,
+                          importance=importance, person_ids=list(people), tags=list(labels),
+                          source_sequences=list(source_sequences), sources=sources, status='active', needs_review=needs_review,
+                          created_at=previous['created_at'] if previous else now, updated_at=now, expires_at=expires_at)
+            self._save_memory(conn, memory)
+            conn.execute('INSERT INTO memory_revisions VALUES (?, ?, ?, ?, ?)',
+                         (memory_id, memory['revision'], chat_id, topic_id, json.dumps(memory, ensure_ascii=False, allow_nan=False)))
+            conn.execute('DELETE FROM memory_sources WHERE memory_id=?', (memory_id,))
+            conn.executemany('INSERT INTO memory_sources VALUES (?, ?)', ((memory_id, seq) for seq in source_sequences))
+            if previous:
+                self._cancel_memory_actions(conn, memory_id, 'memory_revision_conflict')
+            return memory
+
+    def get_memory(self, memory_id: str, *, chat_id: int, topic_id: int | None,
+                   include_inactive: bool = False) -> dict[str, Any] | None:
+        with self._lock:
+            memory = self._memory(self._conn, memory_id, chat_id, topic_id)
+            if memory and memory['status'] == 'active' and memory['expires_at'] is not None and memory['expires_at'] <= self._now():
+                memory['status'] = 'expired'
+            return memory if memory and (include_inactive or memory['status'] == 'active') else None
+
+    def _validate_read(self, query: str | None, person_id: int | None, limit: int) -> None:
+        if ((query is not None and not self._bounded(query, MAX_RECALL_QUERY_CHARS))
+                or (person_id is not None and not self._positive(person_id))
+                or type(limit) is not int or not 1 <= limit <= MAX_RECALL_RESULTS):
+            raise ValueError('invalid_memory')
+
+    def recall_memories(self, chat_id: int, topic_id: int | None, *, query: str | None = None,
+                        person_id: int | None = None, kind: str | None = None, tags: list[str] | None = None,
+                        memory_id: str | None = None, source_message_id: int | None = None,
+                        limit: int = 5, observed_through: int | None = None) -> list[dict[str, Any]]:
+        self._validate_read(query, person_id, limit)
+        if ((kind is not None and kind not in MEMORY_KINDS)
+                or (memory_id is not None and not self._bounded(memory_id, MAX_MEMORY_ID_CHARS))
+                or (source_message_id is not None and not self._positive(source_message_id))
+                or (observed_through is not None and (type(observed_through) is not int or observed_through < 0))
+                or (tags is not None and (not isinstance(tags, list) or not 1 <= len(tags) <= MAX_MEMORY_TAGS
+                    or any(not self._bounded(tag, MAX_MEMORY_TAG_CHARS) for tag in tags)))):
+            raise ValueError('invalid_memory')
+        rows = self._query("SELECT snapshot_json FROM memories WHERE chat_id=? AND topic_id IS ? AND status='active'"
+                           ' AND (expires_at IS NULL OR expires_at>?)', (chat_id, topic_id, self._now()))
+        terms = search_terms(query) if query else ()
+        matches = []
+        for row in rows:
+            memory = json.loads(row[0])
+            if ((person_id is not None and person_id not in memory['person_ids'])
+                    or (kind is not None and kind != memory['kind'])
+                    or (tags is not None and not set(tags) <= set(memory['tags']))
+                    or (memory_id is not None and memory_id != memory['memory_id'])
+                    or (source_message_id is not None and not any(source['message_id'] == source_message_id for source in memory['sources']))
+                    or (observed_through is not None and max(memory['source_sequences']) > observed_through)):
+                continue
+            text = (memory['summary'] + ' ' + ' '.join(memory['tags'])).casefold()
+            score = sum(term in text for term in terms)
+            if not terms or score:
+                matches.append((score, memory))
+        matches.sort(key=lambda item: (-item[0], -item[1]['importance'], -item[1]['updated_at'], item[1]['memory_id']))
+        return [memory for _, memory in matches[:limit]]
+
+    def memory_history(self, memory_id: str, *, chat_id: int, topic_id: int | None) -> list[dict[str, Any]]:
+        return [json.loads(row[0]) for row in self._query('SELECT snapshot_json FROM memory_revisions WHERE memory_id=?'
+                ' AND chat_id=? AND topic_id IS ? ORDER BY revision', (memory_id, chat_id, topic_id))]
+
+    def _retire_memory(self, conn: sqlite3.Connection, memory: dict[str, Any], status: str, reason: str) -> None:
+        memory['status'] = status
+        memory['updated_at'] = self._now()
+        self._save_memory(conn, memory)
+        conn.execute("UPDATE agent_waits SET status='cancelled', resolved_at=? WHERE memory_id=? AND status='active'",
+                     (self._now(), memory['memory_id']))
+        self._cancel_memory_actions(conn, memory['memory_id'], reason)
+
+    def forget_memory(self, memory_id: str, *, chat_id: int, topic_id: int | None,
+                      expected_revision: int, reason: str = 'agent') -> bool:
+        if (not self._bounded(memory_id, MAX_MEMORY_ID_CHARS) or not self._positive(expected_revision)
+                or not self._bounded(reason, 500)):
+            raise ValueError('invalid_memory')
+        with self._write(immediate=True) as conn:
+            memory = self._memory(conn, memory_id, chat_id, topic_id)
+            if memory is None:
+                raise ValueError('unknown_memory')
+            if memory['status'] != 'active':
+                return False
+            if memory['expires_at'] is not None and memory['expires_at'] <= self._now():
+                self._retire_memory(conn, memory, 'expired', 'memory_expired')
+                return False
+            if memory['revision'] != expected_revision:
+                raise ValueError('memory_revision_conflict')
+            self._retire_memory(conn, memory, 'forgotten', 'memory_forgotten: ' + reason)
+            return True
+
+    def expire_memories(self, now: float | None = None) -> list[str]:
+        moment = self._now() if now is None else now
+        with self._write(immediate=True) as conn:
+            memories = [json.loads(row[0]) for row in conn.execute("SELECT snapshot_json FROM memories WHERE status='active'"
+                        ' AND expires_at<=? ORDER BY memory_id', (moment,)).fetchall()]
+            for memory in memories:
+                self._retire_memory(conn, memory, 'expired', 'memory_expired')
+            return [memory['memory_id'] for memory in memories]
+
+    def read_history(self, chat_id: int, topic_id: int | None, *, query: str | None = None,
+                     person_id: int | None = None, through_sequence: int | None = None,
+                     message_id: int | None = None, observed_through: int, limit: int = 5) -> list[dict[str, Any]]:
+        self._validate_read(query, person_id, limit)
+        if (type(observed_through) is not int or observed_through < 0
+                or (through_sequence is not None and not self._positive(through_sequence))
+                or (message_id is not None and not self._positive(message_id))):
+            raise ValueError('invalid_source')
+        sql = ("SELECT * FROM observation_events WHERE chat_id=? AND topic_id IS ? AND sequence<=?"
+               " AND kind IN ('message','message_edit','bot_message','feedback','action_result')")
+        params: list[Any] = [chat_id, topic_id, min(observed_through, through_sequence) if through_sequence is not None else observed_through]
+        if person_id is not None:
+            sql += " AND kind!='feedback' AND json_extract(payload_json, '$.sender_id')=?"
+            params.append(person_id)
+        if message_id is not None:
+            sql += " AND json_extract(payload_json, '$.message_id')=?"
+            params.append(message_id)
+        terms = search_terms(query) if query else ()
+        if terms:
+            sql += ' AND (' + ' OR '.join("casefold(COALESCE(json_extract(payload_json, '$.text'), '') || ' ' ||"
+                    " COALESCE(json_extract(payload_json, '$.reply_text'), '')) LIKE ? ESCAPE '\\'" for _ in terms) + ')'
+            params.extend(like_pattern(term) for term in terms)
+        rows = self._query(sql + ' ORDER BY sequence DESC LIMIT ?', (*params, limit))
+        return [dict(sequence=row['sequence'], type=row['kind'], received_at=row['received_at'],
+                     payload=json.loads(row['payload_json'])) for row in reversed(rows)]
+
+    def get_autonomous_call(self, activation_id: str, call_id: str, *, chat_id: int,
+                            topic_id: int | None) -> dict[str, Any] | None:
+        rows = self._query('SELECT c.* FROM autonomous_calls c JOIN autonomous_responses r USING(activation_id)'
+                           ' WHERE c.activation_id=? AND c.call_id=? AND r.chat_id=? AND r.topic_id IS ?',
+                           (activation_id, call_id, chat_id, topic_id))
+        if not rows:
+            return None
+        row = rows[0]
+        return dict(name=row['name'], arguments=json.loads(row['arguments_json']), status=row['status'],
+                    receipt=json.loads(row['receipt_json']) if row['receipt_json'] is not None else None)
+
+    def finish_autonomous_call(self, activation_id: str, call_id: str, *, chat_id: int,
+                               topic_id: int | None, receipt: dict, status: str) -> None:
+        if not isinstance(receipt, dict) or not isinstance(status, str) or not status:
+            raise ValueError('invalid_receipt')
+        encoded = json.dumps(receipt, ensure_ascii=False, allow_nan=False)
+        with self._write() as conn:
+            if self.get_autonomous_call(activation_id, call_id, chat_id=chat_id, topic_id=topic_id) is None:
+                raise ValueError('unknown_autonomous_call')
+            conn.execute('UPDATE autonomous_calls SET receipt_json=?, status=? WHERE activation_id=? AND call_id=?',
+                         (encoded, status, activation_id, call_id))
 
     # -- autonomous observation stream -------------------------------------
 
@@ -967,7 +1292,7 @@ class Store:
         else:
             payload: dict[str, Any] = {"action_id": action_id, "status": status, "text": text[:500]}
             associated = conn.execute(
-                "SELECT a.intent_id, i.anchor_message_id FROM actions a"
+                "SELECT a.intent_id, a.memory_id, a.memory_revision, i.anchor_message_id FROM actions a"
                 " LEFT JOIN agent_intents i ON i.intent_id = a.intent_id"
                 " WHERE a.action_id = ?", (action_id,),
             ).fetchone()
@@ -975,6 +1300,9 @@ class Store:
                 payload["intent_id"] = associated["intent_id"]
                 if associated["anchor_message_id"] is not None:
                     payload["anchor_message_id"] = associated["anchor_message_id"]
+            if associated is not None and associated["memory_id"] is not None:
+                payload["memory_id"] = associated["memory_id"]
+                payload["memory_revision"] = associated["memory_revision"]
             if status == "unknown":
                 payload["note"] = "delivery unconfirmed: the message may already be visible in the group. It is not retried."
             elif status == "cancelled":
@@ -1062,7 +1390,7 @@ class Store:
         purpose: str, event_types: list[str] | None = None,
         sender_id: int | None = None, due_at: float | None = None,
         expires_at: float | None = None, episode_id: str | None = None,
-        intent_id: str | None = None,
+        intent_id: str | None = None, memory_id: str | None = None,
     ) -> None:
         event_filter = None
         if event_types is not None or sender_id is not None:
@@ -1076,13 +1404,15 @@ class Store:
                 " AND topic_id IS ? AND status = 'open'", (intent_id, chat_id, topic_id),
             ).fetchone() is None:
                 raise ValueError("unknown_intent")
+            if memory_id is not None:
+                self._active_memory(conn, memory_id, chat_id, topic_id)
             conn.execute(
                 "INSERT OR REPLACE INTO agent_waits (wait_id, chat_id, topic_id, kind,"
                 " purpose, event_types_json, due_at, expires_at, status, created_at,"
-                " resolved_at, episode_id, intent_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?)",
+                " resolved_at, episode_id, intent_id, memory_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?)",
                 (wait_id, chat_id, topic_id, kind, purpose, event_filter,
-                 due_at, expires_at, self._now(), episode_id, intent_id),
+                 due_at, expires_at, self._now(), episode_id, intent_id, memory_id),
             )
 
     # -- agent intents (continuation across activations) ---------------------
@@ -1364,7 +1694,7 @@ class Store:
             for observation in observations:
                 sequence, kind = observation[:2]
                 sender_id = observation[2] if len(observation) == 3 else None
-                if row["intent_id"] is not None and row["kind"] == "until":
+                if (row["intent_id"] is not None or row["memory_id"] is not None) and row["kind"] == "until":
                     continue
                 if self._wait_matches_event(row, kind, sender_id):
                     matched[wait_id] = {
@@ -1380,6 +1710,8 @@ class Store:
                                                  topic_id=topic_id)
                         if intent is not None and intent["anchor_message_id"] is not None:
                             matched[wait_id]["anchor_message_id"] = int(intent["anchor_message_id"])
+                    if row["memory_id"] is not None:
+                        matched[wait_id]["memory_id"] = row["memory_id"]
                     if sender_id is not None:
                         matched[wait_id]["event_sender_id"] = sender_id
                     break
@@ -1404,7 +1736,7 @@ class Store:
             if expires_at is not None and float(expires_at) <= now:
                 self.resolve_wait(wait_id, "expired")
                 continue
-            if row["intent_id"] is not None and row["kind"] == "until":
+            if (row["intent_id"] is not None or row["memory_id"] is not None) and row["kind"] == "until":
                 continue
             if self._wait_matches_event(row, kind, sender_id):
                 if self.resolve_wait(wait_id, "satisfied"):
@@ -1442,14 +1774,21 @@ class Store:
 
     # -- agent actions (intent before effect) -------------------------------
 
+
     def prepare_action(
         self, *, action_id: str, workflow_id: str | None, chat_id: int,
         topic_id: int | None, text: str, observed_through: int,
         reply_to: int | None = None, freshness: str = "strict",
         max_unobserved: int = 0, expires_at: float | None = None,
         intent_id: str | None = None, resolves_intent: bool = False,
+        memory_id: str | None = None, memory_revision: int | None = None,
     ) -> bool:
         """Record the intent once. Re-preparing the same ID is a no-op."""
+        if (memory_id is None) != (memory_revision is None):
+            raise ValueError("invalid_memory")
+        if memory_id is not None and (not self._bounded(memory_id, MAX_MEMORY_ID_CHARS)
+                                      or not self._positive(memory_revision)):
+            raise ValueError("invalid_memory")
         with self._write() as conn:
             if conn.execute("SELECT 1 FROM actions WHERE action_id = ?", (action_id,)).fetchone():
                 return False
@@ -1458,14 +1797,20 @@ class Store:
                 " AND topic_id IS ? AND status = 'open'", (intent_id, chat_id, topic_id),
             ).fetchone() is None:
                 raise ValueError("unknown_intent")
+            if memory_id is not None:
+                memory = self._active_memory(conn, memory_id, chat_id, topic_id)
+                if memory["revision"] != memory_revision:
+                    raise ValueError("memory_revision_conflict")
+                if memory["needs_review"]:
+                    raise ValueError("memory_needs_review")
             cursor = conn.execute(
                 "INSERT OR IGNORE INTO actions (action_id, workflow_id, chat_id, topic_id,"
                 " reply_to, text, observed_through, freshness, max_unobserved, status,"
-                " created_at, updated_at, expires_at, intent_id, resolves_intent)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
+                " created_at, updated_at, expires_at, intent_id, resolves_intent, memory_id, memory_revision)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
                 (action_id, workflow_id, chat_id, topic_id, reply_to, text,
                  observed_through, freshness, max_unobserved, self._now(), self._now(),
-                 expires_at, intent_id, int(resolves_intent)),
+                 expires_at, intent_id, int(resolves_intent), memory_id, memory_revision),
             )
             return cursor.rowcount == 1
 
@@ -1503,6 +1848,19 @@ class Store:
                         conn, action_id=action_id, chat_id=row["chat_id"], topic_id=row["topic_id"],
                         status="cancelled", text=row["text"], error="intent_closed_unexecuted",
                     )
+                    return "not-claimable"
+            if row["memory_id"] is not None:
+                try:
+                    memory = self._active_memory(conn, row["memory_id"], row["chat_id"], row["topic_id"], now=moment)
+                    if memory["revision"] != row["memory_revision"]:
+                        raise ValueError("memory_revision_conflict")
+                    if memory["needs_review"]:
+                        raise ValueError("memory_needs_review")
+                except ValueError as exc:
+                    conn.execute("UPDATE actions SET status='cancelled', error=?, updated_at=?"
+                                 " WHERE action_id=? AND status='pending'", (str(exc), moment, action_id))
+                    self._record_action_result(conn, action_id=action_id, chat_id=row["chat_id"],
+                                               topic_id=row["topic_id"], status="cancelled", text=row["text"], error=str(exc))
                     return "not-claimable"
             if row["workflow_id"] is not None:
                 workflow = conn.execute("SELECT state FROM workflows WHERE workflow_id = ?",
@@ -1690,88 +2048,57 @@ class Store:
             )
             return cursor.rowcount == 1
 
+    def feedback_target(self, chat_id: int, message_id: int) -> dict[str, Any] | None:
+        for table, identity in (("actions", "action_id"), ("sends", "decision_id")):
+            rows = self._query(f"SELECT topic_id, text, telegram_message_id, reply_to, {identity}"
+                               f" FROM {table} WHERE chat_id=? AND telegram_message_id=? AND status='sent'",
+                               (chat_id, message_id))
+            if rows:
+                row = rows[0]
+                return dict(topic_id=row['topic_id'], text=row['text'], message_id=row['telegram_message_id'],
+                            reply_to=row['reply_to'], action_id=row[identity] if table == 'actions' else None,
+                            decision_id=row[identity] if table == 'sends' else None)
+        return None
+
     def record_reaction_feedback(
         self, *, update_id: int, chat_id: int, message_id: int,
         old_vote: str | None, new_vote: str | None,
     ) -> str:
-        """Atomically persist a reaction update and its vote delta.
-
-        Actor identity is deliberately discarded. The old/new state reported by
-        Telegram is enough to maintain aggregate counts, including vote changes.
-        """
-        allowed = {None, "up", "down"}
-        if old_vote not in allowed or new_vote not in allowed:
-            return "invalid"
-        with self._write() as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (update_id, chat_id, message_id, self._now(), json.dumps({
-                    "kind": "message_reaction",
-                    "old_vote": old_vote,
-                    "new_vote": new_vote,
-                })),
-            )
+        """Commit an anonymous vote delta and scoped observation together."""
+        if old_vote not in (None, 'up', 'down') or new_vote not in (None, 'up', 'down'):
+            return 'invalid'
+        with self._write(immediate=True) as conn:
+            cursor = conn.execute('INSERT OR IGNORE INTO updates (update_id, chat_id, message_id, received_at, payload_json)'
+                                  ' VALUES (?, ?, ?, ?, ?)',
+                                  (update_id, chat_id, message_id, self._now(), json.dumps(dict(
+                                      kind='message_reaction', old_vote=old_vote, new_vote=new_vote))))
             if cursor.rowcount != 1:
-                return "duplicate"
-            sent = conn.execute(
-                "SELECT decision_id, topic_id FROM sends"
-                " WHERE chat_id = ? AND telegram_message_id = ? AND status = 'sent'",
-                (chat_id, message_id),
-            ).fetchone()
-            if sent is None:
-                return "unknown_target"
-            conn.execute(
-                "INSERT INTO observation_events"
-                " (update_id, chat_id, topic_id, kind, received_at, payload_json)"
-                " VALUES (?, ?, ?, 'feedback', ?, ?)",
-                (update_id, chat_id, sent["topic_id"], self._now(), json.dumps({
-                    "message_id": message_id, "old_vote": old_vote, "new_vote": new_vote,
-                })),
-            )
+                return 'duplicate'
+            target = self.feedback_target(chat_id, message_id)
+            if target is None:
+                return 'unknown_target'
             if old_vote == new_vote:
-                return "no_change"
-            conn.execute(
-                "INSERT INTO feedback_events"
-                " (update_id, chat_id, message_id, decision_id, old_vote, new_vote, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (update_id, chat_id, message_id, sent["decision_id"],
-                 old_vote, new_vote, self._now()),
-            )
-            return "recorded"
+                return 'no_change'
+            conn.execute('INSERT INTO feedback_events (update_id, chat_id, message_id, decision_id, action_id,'
+                         ' old_vote, new_vote, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                         (update_id, chat_id, message_id, target['decision_id'], target['action_id'],
+                          old_vote, new_vote, self._now()))
+            observation = dict(message_id=message_id, old_vote=old_vote, new_vote=new_vote,
+                               action_id=target['action_id'], decision_id=target['decision_id'],
+                               reply_text=target['text'],
+                               delta={'up': int(new_vote == 'up') - int(old_vote == 'up'),
+                                      'down': int(new_vote == 'down') - int(old_vote == 'down')})
+            conn.execute('INSERT INTO observation_events (update_id, chat_id, topic_id, kind, received_at, payload_json)'
+                         " VALUES (?, ?, ?, 'feedback', ?, ?)",
+                         (update_id, chat_id, target['topic_id'], self._now(), json.dumps(observation, ensure_ascii=False)))
+            return 'recorded'
 
     def feedback_report(self, chat_id: int | None = None) -> dict[str, Any]:
-        """Read-only current vote totals and per-reply aggregates."""
-        where = " WHERE s.chat_id = ?" if chat_id is not None else ""
-        params = (chat_id,) if chat_id is not None else ()
-        rows = self._query(
-            "SELECT f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text,"
-            " SUM(CASE WHEN f.new_vote = 'up' THEN 1 ELSE 0 END)"
-            " - SUM(CASE WHEN f.old_vote = 'up' THEN 1 ELSE 0 END) AS up,"
-            " SUM(CASE WHEN f.new_vote = 'down' THEN 1 ELSE 0 END)"
-            " - SUM(CASE WHEN f.old_vote = 'down' THEN 1 ELSE 0 END) AS down,"
-            " MAX(f.created_at) AS latest_at"
-            " FROM feedback_events f JOIN sends s ON s.decision_id = f.decision_id"
-            + where
-            + " GROUP BY f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text"
-            " ORDER BY latest_at DESC",
-            params,
-        )
-        items = [{
-            "decision_id": str(row["decision_id"]),
-            "chat_id": int(row["chat_id"]),
-            "topic_id": row["topic_id"],
-            "message_id": row["telegram_message_id"],
-            "text": str(row["text"]),
-            "up": int(row["up"] or 0),
-            "down": int(row["down"] or 0),
-            "latest_at": float(row["latest_at"]),
-        } for row in rows]
-        return {
-            "up": sum(item["up"] for item in items),
-            "down": sum(item["down"] for item in items),
-            "items": items,
-        }
+        """Read-only totals for confirmed replies from both send paths."""
+        from app.feedback import feedback_report
+
+        with self._lock:
+            return feedback_report(self._conn, chat_id)
 
     def has_update(self, update_id: int) -> bool:
         return bool(self._query("SELECT 1 FROM updates WHERE update_id = ?", (update_id,)))
@@ -1821,6 +2148,21 @@ class Store:
                        if message.media_kind else {}),
                 }, ensure_ascii=False)),
             )
+            if status == "message_edit":
+                affected = conn.execute("SELECT DISTINCT m.snapshot_json FROM memories m"
+                                        " JOIN memory_sources s ON s.memory_id=m.memory_id"
+                                        " JOIN observation_events o ON o.sequence=s.sequence"
+                                        " WHERE m.chat_id=? AND m.topic_id IS ? AND m.status='active'"
+                                        " AND o.chat_id=? AND o.topic_id IS ?"
+                                        " AND json_extract(o.payload_json, '$.message_id')=?",
+                                        (message.chat_id, message.topic_id, message.chat_id, message.topic_id,
+                                         message.message_id)).fetchall()
+                for row in affected:
+                    memory = json.loads(row[0])
+                    memory["needs_review"] = True
+                    memory["updated_at"] = self._now()
+                    self._save_memory(conn, memory)
+                    self._cancel_memory_actions(conn, memory["memory_id"], "memory_needs_review")
             return status
 
     def record_message(self, message: StoredMessage, *, update_id: int) -> bool:
@@ -2196,6 +2538,11 @@ class Store:
     def purge_chat(self, chat_id: int) -> None:
         """Delete all conversation data for one chat. Keeps no excerpts."""
         with self._write() as conn:
+            conn.execute("DELETE FROM memory_sources WHERE memory_id IN (SELECT memory_id FROM memories WHERE chat_id=?)", (chat_id,))
+            conn.execute("DELETE FROM memory_revisions WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM memories WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM action_result_events WHERE sequence IN (SELECT sequence FROM observation_events WHERE chat_id=?)", (chat_id,))
+            conn.execute("DELETE FROM synthetic_observations WHERE sequence IN (SELECT sequence FROM observation_events WHERE chat_id=?)", (chat_id,))
             conn.execute("DELETE FROM observation_events WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM observation_skips WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM observation_cursors WHERE chat_id = ?", (chat_id,))
@@ -2208,6 +2555,8 @@ class Store:
             conn.execute("DELETE FROM agent_state WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM actions WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM feedback_events WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM workflow_episodes WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM agent_intents WHERE chat_id=?", (chat_id,))
             conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM turns WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM decisions WHERE chat_id = ?", (chat_id,))

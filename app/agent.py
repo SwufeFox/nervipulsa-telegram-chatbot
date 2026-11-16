@@ -5,7 +5,7 @@ Runtime per ``(chat_id, topic_id)``. That keeps the model transcript and tool
 binding inside a single chat/topic scope.
 
 The adapter accepts an injected tool catalog. Autonomous scopes receive the
-closed seven-tool action catalog from ``app.autonomous_tools``; callers without
+closed eleven-tool catalog from ``app.autonomous_tools``; callers without
 a catalog get ``EmptyToolCatalog`` and cannot act. Every Runtime has
 ``python_host=False``, so Python execution tools and interpreters are never
 available.

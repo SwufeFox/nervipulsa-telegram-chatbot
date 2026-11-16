@@ -20,6 +20,11 @@ version compatibility table only after those checks have completed.
 | --- | --- | --- |
 | 0.2.0 working tree | `5b0fe9c075379f5ae84d876c9bfd0d43e7d314d9` | Application: **453 passed** in 672.55s. Core: **300 passed, 5 failed, 17 warnings**. |
 
+These are previously recorded baseline results, not verification of the experience
+memory changes described below. Their scripted/integration acceptance and final
+results must be recorded after integration; no real-model memory quality claim
+is implied by the contract.
+
 The published pin was installed into `.venv` with `pip install -e ".[dev]"`;
 subprocess tests use that environment without path injection. Offline replay and
 the PowerShell launcher's `-Check` mode both passed.
@@ -159,14 +164,15 @@ not imply a disk retention limit.
 
 `GroupAgent._agent_for` creates one Runtime per `(chat_id, topic_id)` with a
 stable session id. Core's session lease prevents concurrent use of the same
-journal/session identity. Production autonomous scopes expose exactly seven
+journal/session identity. Production autonomous scopes expose exactly eleven
 application tools: `send_message`, `finish_silently`, `wait_for_event`,
-`wait_until`, `update_state`, `set_intent`, and `resolve_intent`. Startup checks
-the configured catalog and the Runtime's exposed schemas against that closed
-set. `python_host=False` ensures these actions cannot grant arbitrary Python
-execution. Per-observation handlers are bound and submitted serially within the
-scope, then unbound, so a concurrent workflow cannot use another workflow's
-handler.
+`wait_until`, `update_state`, `set_intent`, `resolve_intent`, `remember`,
+`recall_memories`, `read_history`, and `forget_memory`. Startup checks the configured
+catalog and Runtime schemas against that closed set. Unknown tools and Python
+remain rejected; `python_host=False` grants no executor. Each Core activation,
+including a read continuation, uses the same scope binding and response commit
+hook. Handlers are bound and submitted serially, then unbound, so concurrent
+workflows cannot use one another's handlers.
 
 Commitments are application records, not separate Core sessions. A scope exposes
 `open_intents`, including each commitment's ID, source `anchor_message_id`,
@@ -178,6 +184,113 @@ the successful delivery transaction. Replacing one goal gives it a new identity,
 so an older in-flight send cannot close its replacement. Legacy goals with no
 recorded source remain unanchored and can be selected by ID. These records and
 their migration belong to the application SQLite store.
+
+### Sourced experience memory (application contract)
+
+The application owns schema v5 memory records and immutable revision snapshots;
+Core does not own or restore them. Migration preserves prior data and generic
+`agent_state` notes without inventing provenance or converting them to memories.
+Memory never crosses `(chat_id, topic_id)`, including a nullable topic. There are
+at most 1,024 active memories per scope; creating at capacity rejects explicitly
+without silent eviction, while revision remains possible.
+
+Each JSON-safe record contains `memory_id`, `revision`, scope, `kind`
+(`experience`, `person`, `interest`, `preference`), `summary`, `certainty`
+(`observed`, `inferred`), importance, person IDs, tags, source sequences and
+hydrated sources, status, `needs_review`, and creation/update/expiry times.
+Sources carry real sequence/type/message/sender/time metadata and a literal
+excerpt of at most 240 characters with a truncation flag. Allowed evidence is
+accepted `message`, `message_edit`, `bot_message`, `feedback`, or `action_result`
+observations within this scope and no later than the frozen observation bound.
+Person IDs must be supported by source authors or authors of same-scope messages
+explicitly replied to by a source; anonymous votes never supply a person ID.
+`kind=person` requires supported person IDs. Inference is never promoted to
+observed fact, and source text remains untrusted data, not instructions.
+
+The model-facing additions and selectors are:
+
+| Tool | Arguments and behavior |
+| --- | --- |
+| `remember` | Required `summary`, `kind`, `source_sequences`; optional `person_ids`, `tags`, `certainty` (default `inferred`), `importance` (1–5, default 2), `expires_at` (aware ISO timestamp). Omit both `memory_id` and `expected_revision` to create; supply both to revise the same ID. |
+| `recall_memories` | Optional `query`, `person_id`, `kind`, `tags`, `memory_id`, `source_message_id`, `limit` (1–10, default 5). Read-only active, unexpired memory retrieval with evidence and review flags. |
+| `read_history` | Optional `query`, `person_id`, `message_id`, `through_sequence`, `limit` (1–10, default 5). Read-only accepted conversational/source observations, newest matching selection returned chronologically. |
+| `forget_memory` | Required `memory_id`, `expected_revision`; optional `reason`. Retires future recall, retaining conversation and audit history. |
+| `send_message` | Optional `memory_id` and `memory_revision` must appear together, independently of intent selectors and `resolves_intent`. |
+| `wait_for_event`, `wait_until` | Optional `memory_id`, which may coexist with an intent selector. |
+
+`source_message_id` and `message_id` are positive integer selectors combined
+with other filters before limiting. To follow an old `reply_to_message_id`,
+recall by its source message ID or read the actual message by `message_id` to
+obtain its observation sequence; do not guess a sequence from a Telegram ID.
+
+Argument validation rejects unknown fields, booleans in integer fields, unsupported
+sources/people, and stale revisions before mutation. Source lists contain 1–12
+unique positive sequences; people and tags are bounded to eight each. Summaries
+are bounded to 1,500 characters, IDs to 128, tags to 64, and queries to 256.
+Store operations are `remember_memory`, `get_memory`, `recall_memories`,
+`memory_history`, `forget_memory`, `expire_memories`, and `read_history`.
+Scope and the workflow's `observed_through` are supplied by the application,
+never model arguments. Recall applies all supplied filters together before
+limiting; literal query terms match summary/tags with OR semantics. History
+filters and limits before returning chronological records with actual parsed
+payloads. To inspect sequence S, read with `through_sequence=S, limit=1` and
+verify the returned sequence rather than assuming a match.
+
+Retrieval uses literal case-folded words and CJK bigrams. Current memories are
+filtered and ranked within the bounded collection; history queries use escaped,
+parameterized SQLite LIKE. Ranking uses matches, importance, recency and stable
+ID, without embeddings or semantic retrieval. Automatic context selects at most
+six records and 6,000 characters by participants, literal text, source references
+and own interests/preferences. Items retain relevance, uncertainty, revisions
+and honest clipping; `memory_context` explains the selection. This supplies
+evidence, never a social decision. Missing context does not prove nothing happened.
+
+Memory tool receipts, including IDs returned by writes, feed back to the **same
+workflow** for at most three further inference rounds and six executed reads.
+Original observations are consumed once; each application submission increments
+`model_calls`, and activation details retain the per-submission metrics. Core
+continues to own provider retry/attempt metrics. A terminal action, wait, or finish
+prevents an extra continuation. Writes count as noted decisions; read-only loop
+exhaustion remains audited `undecided`. Plain prose retains one undecided reminder.
+Read tools add no Telegram side effect; a private write can end with `finish_silently`.
+
+`remember_memory` requires the matching current revision to revise an existing
+ID. Committed Core mutation calls cache their receipts in scoped
+`autonomous_calls` using `get_autonomous_call` / `finish_autonomous_call` in the
+same application transaction, so replay cannot create a second revision.
+Unknown/foreign IDs and revision conflicts reject explicitly; unjournaled calls
+do not invent committed journal rows. Old versions remain available to scoped
+operator inspection through `memory_history`.
+
+A memory-linked timer survives unrelated chat and restart, presenting the current
+memory for reconsideration; updating the same ID keeps the revisit armed.
+Forgetting or expiry cancels linked active waits and pending sends atomically.
+Source message edits mark dependent memories `needs_review` and cancel pending
+sends, retaining waits so the model can reconsider. Revision also cancels pending
+sends. `prepare_action` and `claim_action` require the linked memory to be active,
+at the selected revision and not awaiting review before `pending → sending`.
+Cancelled actions produce durable results. Already `sending` or `unknown` actions
+are never cancelled or retried by a memory change. Sending neither resolves nor
+forgets the memory; intent completion remains independent. Unused memory expiry
+does not itself wake the model. `/purge` removes this chat's records, versions,
+links and excerpts; forgetting alone does not promise erasure.
+
+### Live feedback and operator inspection
+
+`feedback_target(chat_id, message_id)` finds confirmed autonomous actions first,
+then legacy sends; failed, unknown and foreign targets do not qualify. Reaction
+feedback preserves anonymous old/new votes and vote delta without actor identity.
+A real change atomically records feedback plus a scoped observation containing
+actual target text and separate nullable `action_id` / `decision_id`. No-change
+updates create no model observation. The target topic is scheduled only after
+durable input/poll commit, even without another human message. Feedback is weak
+evidence, not an obligation to post or proof of one person's preferences.
+
+The read-only feedback report covers both origins and inspects older snapshot
+columns without migrating them. Console `watch <chat_id> [topic_id]` selects the
+scope for `memories [n]`, `memory <id>` (details, revisions, sources), and
+`history [n]` (accepted observation history); waits/actions show linked memory
+IDs where applicable. Operator inspection does not grant the model file access.
 
 
 ## Application-owned guarantees

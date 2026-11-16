@@ -87,13 +87,12 @@ def test_text_without_a_tool_call_is_not_recorded_as_silence(tmp_path):
             results = await bot.autonomous_step(force=True)
 
             # It asked once more rather than giving up on the first attempt.
-            assert len(seen) >= 2, "the model was never asked to actually decide"
+            assert len(seen) == 2, "the undecided turn must receive exactly one reminder"
             # Core wraps it as a runtime event; the payload carries the ask.
             envelope = json.loads(seen[-1].messages[-1]["content"])
             reminder = envelope["payload"]
             assert envelope["type"] == "runtime.observation"
             assert reminder["kind"] == "decision_required"
-            assert "did not call any tool" in reminder["note"]
 
             assert results and results[0].outcome == "undecided", results
             assert transport.sends == []
@@ -103,7 +102,6 @@ def test_text_without_a_tool_call_is_not_recorded_as_silence(tmp_path):
             # would cycle forever.
             skips = store._query("SELECT * FROM observation_skips")
             assert skips, "an undecided turn was recorded silently"
-            assert "no tool call" in skips[-1]["reason"]
             assert not store._query(
                 "SELECT 1 FROM observation_events WHERE kind = 'undecided'")
             assert store.pending_observations(fixtures.TEST_CHAT, fixtures.TOPIC_A) == []

@@ -231,3 +231,82 @@ def test_normal_message_update_is_not_misread_as_feedback(
     assert store.stats()["messages"] == 1
     assert store.feedback_report() == {"up": 0, "down": 0, "items": []}
     store.close()
+
+
+def test_live_action_feedback_preserves_origin_and_anonymous_evidence(tmp_path):
+    store = Store(tmp_path / 'db.sqlite3')
+    store.prepare_action(action_id='live', workflow_id=None, chat_id=10, topic_id=4,
+                         text='orchid answer', observed_through=0, reply_to=1)
+    assert store.claim_action('live') == 'claimed'
+    assert store.finish_action('live', 'sent', telegram_message_id=900)
+    assert store.feedback_target(10, 900) == dict(topic_id=4, text='orchid answer', message_id=900,
+                                                 reply_to=1, action_id='live', decision_id=None)
+    assert store.feedback_target(20, 900) is None
+    assert store.record_reaction_feedback(update_id=70, chat_id=10, message_id=900,
+                                          old_vote=None, new_vote='up') == 'recorded'
+    observation = store.read_history(10, 4, observed_through=1000, query='orchid', limit=1)[0]
+    assert observation['type'] == 'feedback'
+    assert observation['payload'] == dict(message_id=900, old_vote=None, new_vote='up', action_id='live',
+                                          decision_id=None, reply_text='orchid answer', delta={'up': 1, 'down': 0})
+    assert store.record_reaction_feedback(update_id=71, chat_id=10, message_id=900,
+                                          old_vote='up', new_vote='up') == 'no_change'
+    assert store._query('SELECT * FROM observation_events WHERE update_id=71') == []
+    assert store.has_update(71)
+    assert store.record_reaction_feedback(update_id=72, chat_id=10, message_id=900,
+                                          old_vote='up', new_vote='down') == 'recorded'
+    report = store.feedback_report()
+    assert report['up'] == 0 and report['down'] == 1
+    assert report['items'][0]['action_id'] == 'live'
+    assert report['items'][0]['decision_id'] is None
+    assert load_report(store.path) == report
+    store.close()
+
+
+def test_feedback_never_accepts_unknown_or_failed_action_targets(tmp_path):
+    store = Store(tmp_path / 'db.sqlite3')
+    for index, status in enumerate(('unknown', 'failed'), start=1):
+        store.prepare_action(action_id=status, workflow_id=None, chat_id=10, topic_id=None,
+                             text='unconfirmed', observed_through=1000)
+        assert store.claim_action(status) == 'claimed'
+        assert store.finish_action(status, status, telegram_message_id=index)
+        assert store.feedback_target(10, index) is None
+        assert store.record_reaction_feedback(update_id=50 + index, chat_id=10, message_id=index,
+                                              old_vote=None, new_vote='up') == 'unknown_target'
+    assert store.feedback_report() == dict(up=0, down=0, items=[])
+    store.close()
+
+
+def test_report_reads_unmigrated_legacy_snapshot_without_writes(tmp_path):
+    path = tmp_path / 'old.sqlite3'
+    connection = sqlite3.connect(path)
+    connection.executescript('''
+        CREATE TABLE sends (decision_id TEXT PRIMARY KEY, chat_id INTEGER, topic_id INTEGER,
+                            telegram_message_id INTEGER, text TEXT, status TEXT);
+        CREATE TABLE feedback_events (update_id INTEGER PRIMARY KEY, chat_id INTEGER,
+            message_id INTEGER, decision_id TEXT NOT NULL, old_vote TEXT, new_vote TEXT, created_at REAL);
+        INSERT INTO sends VALUES ('legacy',10,NULL,900,'historic answer','sent');
+        INSERT INTO feedback_events VALUES (1,10,900,'legacy',NULL,'up',1);
+    ''')
+    connection.close()
+    original = path.read_bytes()
+    report = load_report(path)
+    assert path.read_bytes() == original
+    assert report == dict(up=1, down=0, items=[dict(action_id=None, decision_id='legacy', chat_id=10,
+        topic_id=None, message_id=900, text='historic answer', up=1, down=0, latest_at=1.0)])
+
+
+def test_both_feedback_origins_remain_distinct_even_when_ids_match(tmp_path):
+    store = Store(tmp_path / 'db.sqlite3')
+    sent_reply(store, 10, 900)
+    store.prepare_action(action_id='decision-1', workflow_id=None, chat_id=10, topic_id=4,
+                         text='live answer', observed_through=0)
+    assert store.claim_action('decision-1') == 'claimed'
+    assert store.finish_action('decision-1', 'sent', telegram_message_id=901)
+    for update, message in ((70, 900), (71, 901)):
+        assert store.record_reaction_feedback(update_id=update, chat_id=10, message_id=message,
+                                              old_vote=None, new_vote='up') == 'recorded'
+    report = store.feedback_report()
+    assert report['up'] == 2
+    assert {(item['decision_id'], item['action_id'], item['text']) for item in report['items']} == {
+        ('decision-1', None, 'answer'), (None, 'decision-1', 'live answer')}
+    store.close()

@@ -12,7 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def load_report(db_path: Path, chat_id: int | None = None) -> dict:
@@ -20,36 +25,9 @@ def load_report(db_path: Path, chat_id: int | None = None) -> dict:
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     try:
-        where = " WHERE s.chat_id = ?" if chat_id is not None else ""
-        params = (chat_id,) if chat_id is not None else ()
-        rows = connection.execute(
-            "SELECT f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text,"
-            " SUM(CASE WHEN f.new_vote = 'up' THEN 1 ELSE 0 END)"
-            " - SUM(CASE WHEN f.old_vote = 'up' THEN 1 ELSE 0 END) AS up,"
-            " SUM(CASE WHEN f.new_vote = 'down' THEN 1 ELSE 0 END)"
-            " - SUM(CASE WHEN f.old_vote = 'down' THEN 1 ELSE 0 END) AS down,"
-            " MAX(f.created_at) AS latest_at"
-            " FROM feedback_events f JOIN sends s ON s.decision_id = f.decision_id"
-            + where
-            + " GROUP BY f.decision_id, s.chat_id, s.topic_id, s.telegram_message_id, s.text"
-            " ORDER BY latest_at DESC",
-            params,
-        ).fetchall()
-        items = [{
-            "decision_id": row["decision_id"],
-            "chat_id": row["chat_id"],
-            "topic_id": row["topic_id"],
-            "message_id": row["telegram_message_id"],
-            "text": row["text"],
-            "up": int(row["up"] or 0),
-            "down": int(row["down"] or 0),
-            "latest_at": row["latest_at"],
-        } for row in rows]
-        return {
-            "up": sum(item["up"] for item in items),
-            "down": sum(item["down"] for item in items),
-            "items": items,
-        }
+        from app.feedback import feedback_report
+
+        return feedback_report(connection, chat_id)
     finally:
         connection.close()
 

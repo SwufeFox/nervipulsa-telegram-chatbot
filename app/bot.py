@@ -417,7 +417,7 @@ class GroupAgent:
                     highest = update_id if highest is None else max(highest, update_id)
                 reaction = parse_reaction_update(update)
                 if reaction is not None:
-                    self._ingest_reaction(reaction, tick, update)
+                    self._ingest_reaction(reaction, tick, update, after_commit=after_commit)
                     continue
                 self._ingest(update, tick, after_commit=after_commit)
 
@@ -479,7 +479,8 @@ class GroupAgent:
     # -- ingest ------------------------------------------------------------
 
     def _ingest_reaction(self, reaction: InboundReaction, tick: TickStats,
-                         update: dict[str, Any]) -> None:
+                         update: dict[str, Any], *,
+                         after_commit: list[Callable[[], None]] | None = None) -> None:
         if not self.config.allows_chat(reaction.chat_id):
             tick.unauthorized += 1
             chat = update.get("message_reaction", {}).get("chat", {})
@@ -495,6 +496,15 @@ class GroupAgent:
         )
         if result == "recorded":
             tick.feedback_updates += 1
+            if self.autonomy is not None:
+                target = self.store.feedback_target(reaction.chat_id, reaction.message_id)
+                if target is not None:
+                    def observe_feedback() -> None:
+                        self.autonomy.note_activity(reaction.chat_id, target["topic_id"])
+                    if after_commit is None:
+                        observe_feedback()
+                    else:
+                        after_commit.append(observe_feedback)
         elif result == "duplicate":
             tick.duplicates += 1
         else:

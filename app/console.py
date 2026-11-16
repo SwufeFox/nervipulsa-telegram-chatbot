@@ -31,6 +31,7 @@ import time
 from typing import Any, Callable, Iterable, Sequence
 
 from . import logwatch
+from .memory import MAX_RECALL_RESULTS
 
 # The exact shape `logwatch.scope()` renders. Parsing our own format is safe
 # because these strings are built in one place; relying on it for user input
@@ -121,6 +122,9 @@ class Console:
         ("turns", "workflow turns still running"),
         ("waits", "agent waits that are armed or expired"),
         ("intents [n]", "open commitments, source messages, owners, and linked waits"),
+        ("memories [n]", "sourced memories and interests in the watched conversation"),
+        ("memory <id>", "a watched memory's evidence, current status, and revisions"),
+        ("history [n]", "accepted conversation observations in the watched scope"),
         ("stats", "counters since start"),
         ("pause", "stop replying (ingestion continues)"),
         ("resume", "start replying again"),
@@ -465,7 +469,9 @@ class Console:
                        f"{str(row['status']):<9} "
                        f"{self._label(int(row['chat_id']), row['topic_id'])}  "
                        f"{_clip(row['text'], 40)}"
-                       + (f"  [{_clip(error, 50)}]" if error else ""))
+                       + (f"  [{_clip(error, 50)}]" if error else "")
+                       + (f"  memory={row['memory_id']}@{row['memory_revision']}"
+                          if row["memory_id"] else ""))
         return out
 
     def cmd_turns(self, args: Sequence[str]) -> Iterable[str]:
@@ -509,6 +515,83 @@ class Console:
             )
         return out
 
+    def cmd_memories(self, args: Sequence[str]) -> Iterable[str]:
+        if self.store is None:
+            return ["no store attached"]
+        if self.watching is None:
+            return ["watch <chat_id> [topic_id] before inspecting memories"]
+        memories = self.store.recall_memories(
+            *self.watching, limit=self._limit(args, default=10, ceiling=MAX_RECALL_RESULTS),
+        )
+        if not memories:
+            return ["no active memories in the watched conversation"]
+        return [
+            f"  {memory['memory_id']} r{memory['revision']} {memory['kind']} "
+            f"{memory['certainty']}"
+            + (" needs_review" if memory["needs_review"] else "")
+            + f" people={','.join(map(str, memory['person_ids'])) or 'self/context'}  "
+            + _clip(memory["summary"], 100)
+            for memory in memories
+        ]
+
+    def cmd_memory(self, args: Sequence[str]) -> Iterable[str]:
+        if self.store is None:
+            return ["no store attached"]
+        if self.watching is None:
+            return ["watch <chat_id> [topic_id] before inspecting a memory"]
+        if len(args) != 1:
+            return ["usage: memory <id>"]
+        memory = self.store.get_memory(
+            args[0], chat_id=self.watching[0], topic_id=self.watching[1], include_inactive=True,
+        )
+        if memory is None:
+            return ["no memory with that ID in the watched conversation"]
+        out = [
+            f"  {memory['memory_id']} r{memory['revision']} {memory['status']} "
+            f"{memory['kind']} {memory['certainty']}"
+            + (" needs_review" if memory["needs_review"] else ""),
+            f"  {memory['summary']}",
+            f"  people={','.join(map(str, memory['person_ids'])) or 'self/context'} "
+            f"tags={','.join(memory['tags']) or '-'} expires_at={memory['expires_at']}",
+        ]
+        for source in memory["sources"]:
+            out.append(
+                f"  source seq={source['sequence']} {source['type']} "
+                f"message={source['message_id']} sender={source['sender_id']}  "
+                + _clip(source["text"], 240)
+                + (" [excerpt]" if source["truncated"] else "")
+            )
+        for revision in self.store.memory_history(
+                args[0], chat_id=self.watching[0], topic_id=self.watching[1])[-5:]:
+            out.append(
+                f"  revision {revision['revision']} {revision['status']}: "
+                + _clip(revision["summary"], 100)
+            )
+        return out
+
+    def cmd_history(self, args: Sequence[str]) -> Iterable[str]:
+        if self.store is None:
+            return ["no store attached"]
+        if self.watching is None:
+            return ["watch <chat_id> [topic_id] before inspecting history"]
+        through = self.store._query(
+            "SELECT COALESCE(MAX(sequence), 0) AS sequence FROM observation_events"
+            " WHERE chat_id = ? AND topic_id IS ?", self.watching,
+        )[0]["sequence"]
+        events = self.store.read_history(
+            *self.watching, observed_through=int(through),
+            limit=self._limit(args, default=10, ceiling=MAX_RECALL_RESULTS),
+        )
+        if not events:
+            return ["no accepted conversation history in the watched scope"]
+        return [
+            f"  seq={event['sequence']} {event['type']} "
+            f"message={event['payload'].get('message_id')} "
+            f"sender={event['payload'].get('sender_id', 'anonymous/system')}  "
+            + _clip(str(event["payload"].get("text") or event["payload"].get("reply_text") or ""), 100)
+            for event in events
+        ]
+
     def cmd_waits(self, args: Sequence[str]) -> Iterable[str]:
         if self.store is None:
             return ["no store attached"]
@@ -523,7 +606,8 @@ class Console:
             when = f"due in {_age(float(due) - now)}" if due else "no deadline"
             out.append(f"  {self._label(int(row['chat_id']), row['topic_id'])}  "
                        f"{row['kind']}  {when}  {_clip(row['purpose'], 40)}"
-                       + (f"  intent={row['intent_id']}" if row["intent_id"] else ""))
+                       + (f"  intent={row['intent_id']}" if row["intent_id"] else "")
+                       + (f"  memory={row['memory_id']}" if row["memory_id"] else ""))
         return out
 
     def cmd_stats(self, args: Sequence[str]) -> Iterable[str]:
