@@ -65,4 +65,11 @@ Write-Host "  模式       $(if ($Check) {'只检查配置'} elseif ($DryRun) {'
 Write-Host "  Ctrl+C 退出" -ForegroundColor DarkGray
 Write-Host ""
 
-python @cliArgs
+$projectPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (Test-Path -LiteralPath $projectPython) {
+    & $projectPython @cliArgs
+}
+else {
+    python @cliArgs
+}
+exit $LASTEXITCODE

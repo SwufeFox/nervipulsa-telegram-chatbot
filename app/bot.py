@@ -355,15 +355,15 @@ class GroupAgent:
             )
 
     async def stop(self) -> None:
-        if self.autonomy is not None:
-            # A pass returns before its activations do. Closing the store or
-            # the agents underneath them turns a normal shutdown into a stream
-            # of "Cannot operate on a closed database" errors.
-            await self.autonomy.drain()
-        for task in list(self._workers):
+        # Stop dispatchers before taking the activation snapshot to drain;
+        # otherwise a pending pass can start work after that snapshot.
+        workers = tuple(self._workers)
+        for task in workers:
             task.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+        if self.autonomy is not None:
+            await self.autonomy.drain()
         for (chat_id, topic_id), agent in list(self._agents.items()):
             try:
                 await agent.stop()

@@ -389,80 +389,83 @@ async def run_live(config: AppConfig, system_prompt: str, *,
                           level=getattr(logging, config.log_level.upper(), logging.INFO))
         console_task = asyncio.create_task(console.run(stop), name="console")
 
-    while not stop.is_set():
-        if bot.stats.paused and not pause_logged:
-            print("paused: still recording messages, will not reply")
-            pause_logged = True
-        elif not bot.stats.paused:
-            pause_logged = False
-        try:
-            poll_task = asyncio.create_task(bot.poll_once(offset=offset, background=True))
-            stop_task = asyncio.create_task(stop.wait())
-            done, _ = await asyncio.wait((poll_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
-            if stop_task in done and not poll_task.done():
-                poll_task.cancel()
-                await asyncio.gather(poll_task, return_exceptions=True)
-                break
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
-            offset, tick = await poll_task
-            consecutive_failures = 0
-
-            # Draining a backlog: Telegram hands back a partial batch and, with
-            # a long poll still active, the next request would sit waiting for
-            # that window to expire even though more updates are already
-            # queued. Asking again immediately is what keeps a restart from
-            # spending minutes ingesting history. The loop is bounded so a
-            # flood cannot starve the scheduler or the stop signal.
-            drained = 0
-            while (not stop.is_set() and tick.updates and drained < 64
-                   and tick.errors == 0):
-                drained += 1
-                offset, extra = await bot.poll_once(offset=offset, background=True,
-                                                    timeout=0)
-                tick.updates += extra.updates
-                tick.errors += extra.errors
-                if not extra.updates:
-                    break
-                log_poll_ingress(extra, paused=bot.stats.paused)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # A polling loop that exits on one bad cycle is a bot that dies
-            # quietly. Back off and keep going; the durable inbox means nothing
-            # is lost by the delay.
-            consecutive_failures += 1
-            log.error("poll cycle failed (%d in a row; stage=poll error_type=%s)",
-                      consecutive_failures, type(exc).__name__)
-            delay = min(30.0, 2.0 ** min(consecutive_failures, 4))
+    poll_task: asyncio.Task | None = None
+    stop_task: asyncio.Task | None = None
+    graceful = False
+    try:
+        while not stop.is_set():
+            if bot.stats.paused and not pause_logged:
+                print("paused: still recording messages, will not reply")
+                pause_logged = True
+            elif not bot.stats.paused:
+                pause_logged = False
             try:
-                await asyncio.wait_for(stop.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                pass
-            continue
-        log_poll_ingress(tick, paused=bot.stats.paused)
+                poll_task = asyncio.create_task(bot.poll_once(offset=offset, background=True))
+                stop_task = asyncio.create_task(stop.wait())
+                done, _ = await asyncio.wait((poll_task, stop_task), return_when=asyncio.FIRST_COMPLETED)
+                if stop_task in done and not poll_task.done():
+                    poll_task.cancel()
+                    await asyncio.gather(poll_task, return_exceptions=True)
+                    break
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)
+                offset, tick = await poll_task
+                consecutive_failures = 0
 
-    timer.cancel()
-    await asyncio.gather(timer, return_exceptions=True)
-    if console_task is not None:
+                # Drain a backlog without letting repeated empty polls block
+                # model scheduling or the stop signal.
+                drained = 0
+                while (not stop.is_set() and tick.updates and drained < 64
+                       and tick.errors == 0):
+                    drained += 1
+                    offset, extra = await bot.poll_once(offset=offset, background=True,
+                                                        timeout=0)
+                    tick.updates += extra.updates
+                    tick.errors += extra.errors
+                    if not extra.updates:
+                        break
+                    log_poll_ingress(extra, paused=bot.stats.paused)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                consecutive_failures += 1
+                log.error("poll cycle failed (%d in a row; stage=poll error_type=%s)",
+                          consecutive_failures, type(exc).__name__)
+                delay = min(30.0, 2.0 ** min(consecutive_failures, 4))
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=delay)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+            log_poll_ingress(tick, paused=bot.stats.paused)
+        graceful = True
+    finally:
+        stop.set()
+        background = [timer, *[task for task in (poll_task, stop_task, console_task)
+                              if task is not None]]
+        for task in background:
+            if not task.done():
+                task.cancel()
+        outcomes = await asyncio.gather(*background, return_exceptions=True)
+        for task, outcome in zip(background, outcomes):
+            if isinstance(outcome, Exception):
+                log.warning("background task failed during shutdown (task=%s error_type=%s)",
+                            task.get_name(), type(outcome).__name__)
         try:
-            await console_task
-        except Exception as exc:
-            log.warning("console task failed (error_type=%s)", type(exc).__name__)
-    # Close any open debounce window so a message that arrived in the last few
-    # seconds is still decided rather than silently dropped on exit.
-    pending = bot.hold_open_turns()
-    print(f"\nshutting down; {pending} open turn(s) to process")
-    if pending:
-        try:
-            await asyncio.wait_for(bot.run_turns(), timeout=10)
-        except Exception as exc:  # never let shutdown raising hide the exit
-            log.warning("final turn pass failed (error_type=%s)", type(exc).__name__)
-    await bot.stop()
-    # Close PTB's HTTP session explicitly: an unclosed client keeps its
-    # connection pool (and the process) alive after the loop ends.
-    await client.close()
-    store.close()
+            if graceful:
+                pending = bot.hold_open_turns()
+                print(f"\nshutting down; {pending} open turn(s) to process")
+                if pending:
+                    try:
+                        await asyncio.wait_for(bot.run_turns(), timeout=10)
+                    except Exception as exc:
+                        log.warning("final turn pass failed (error_type=%s)", type(exc).__name__)
+            await bot.stop()
+        finally:
+            try:
+                await client.close()
+            finally:
+                store.close()
     return 0
 
 

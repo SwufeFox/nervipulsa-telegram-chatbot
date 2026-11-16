@@ -94,7 +94,7 @@ def child(mode, db, journal):
     main.Bot = lambda token: object()
     main.PythonTelegramBotTransport = Network
     main.build_agent_factory = lambda *args, **kwargs: lambda spec: Agent()
-    config = AppConfig(telegram_token='fake', allowed_chat_ids=(fixtures.TEST_CHAT,), bot_username='alma_bot', db_path=db, workspace=str(Path(db).parent), model='scripted', idle_seconds=0, min_action_interval_seconds=0)
+    config = AppConfig(telegram_token='fake', allowed_chat_ids=(fixtures.TEST_CHAT,), bot_username='alma_bot', db_path=db, workspace=str(Path(db).parent), model='scripted', idle_seconds=0, max_batch_seconds=0, min_action_interval_seconds=0)
 
     async def run():
         task = asyncio.create_task(main.run_live(config, load_default_profile()))

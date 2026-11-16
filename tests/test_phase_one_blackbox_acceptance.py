@@ -196,6 +196,7 @@ def test_successful_send_is_reflected_once_in_history(tmp_path):
 def test_live_polling_ingests_while_model_is_blocked(tmp_path, monkeypatch):
     from app import main
     from app.agent import AgentResult
+    from nervipulsa.ports import ToolCall
 
     async def scenario():
         entered, release, delivered = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -209,10 +210,14 @@ def test_live_polling_ingests_while_model_is_blocked(tmp_path, monkeypatch):
                 pass
             async def stop(self):
                 pass
-            async def ask(self, *, chat_id, prompt, tag):
+            async def observe(self, observation, *, tag, handler):
                 entered.set()
                 await release.wait()
-                return AgentResult(activation_id=tag, text="answer", status="committed")
+                await handler(
+                    "finish_silently", {}, None, None,
+                    ToolCall(id=tag, name="finish_silently", arguments={}),
+                )
+                return AgentResult(activation_id=tag, text=None, status="committed")
         class Network:
             def __init__(self, bot):
                 self.calls = 0
@@ -237,12 +242,13 @@ def test_live_polling_ingests_while_model_is_blocked(tmp_path, monkeypatch):
         monkeypatch.setattr(main, "build_agent_factory", lambda *a, **k: lambda spec: BlockingAgent())
         config = AppConfig(telegram_token="fake", allowed_chat_ids=(fixtures.TEST_CHAT,),
                            bot_username="alma_bot", debounce_seconds=0,
+                           idle_seconds=0, max_batch_seconds=0,
                            db_path=str(tmp_path / "live.sqlite3"), workspace=str(tmp_path),
                            model="scripted", proactive_enabled=False)
         task = asyncio.create_task(main.run_live(config, load_default_profile()))
         try:
-            await asyncio.wait_for(entered.wait(), 3)
-            await asyncio.wait_for(delivered.wait(), 1)
+            await entered.wait()
+            await delivered.wait()
             # Delivery alone is insufficient: the update must be durably ingested.
             for _ in range(100):
                 if any(m.message_id == 703 for m in stores[0].recent_messages(
@@ -260,7 +266,7 @@ def test_live_polling_ingests_while_model_is_blocked(tmp_path, monkeypatch):
                 pass
             for store in stores:
                 store.close()
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
 
 def test_live_same_batch_topics_send_independently(tmp_path, monkeypatch):
@@ -335,13 +341,14 @@ def test_live_same_batch_topics_send_independently(tmp_path, monkeypatch):
         monkeypatch.setattr(main, "build_agent_factory", lambda *a, **k: lambda spec: Agent())
         config = AppConfig(telegram_token="fake", allowed_chat_ids=(fixtures.TEST_CHAT,),
                            bot_username="alma_bot", debounce_seconds=0,
+                           idle_seconds=0, max_batch_seconds=0,
                            db_path=str(tmp_path / "topics.sqlite3"), workspace=str(tmp_path),
                            model="scripted", proactive_enabled=False,
                            min_action_interval_seconds=0)
         task = asyncio.create_task(main.run_live(config, load_default_profile()))
         try:
-            await asyncio.wait_for(entered_a.wait(), 3)
-            await asyncio.wait_for(sent_b.wait(), 3)
+            await entered_a.wait()
+            await sent_b.wait()
             assert not release_a.is_set() and not sent_a.is_set()
             assert len(batches) == 1 and len(batches[0]) == 2
             assert [(s["message_thread_id"], s["text"]) for s in sends] == [
@@ -349,7 +356,7 @@ def test_live_same_batch_topics_send_independently(tmp_path, monkeypatch):
             assert "alpha-only-marker" in prompts["A"] and "beta-only-marker" not in prompts["A"]
             assert "beta-only-marker" in prompts["B"] and "alpha-only-marker" not in prompts["B"]
             release_a.set()
-            await asyncio.wait_for(sent_a.wait(), 3)
+            await sent_a.wait()
             assert [(s["message_thread_id"], s["text"]) for s in sends] == [
                 (fixtures.TOPIC_B, "answer B"), (fixtures.TOPIC_A, "answer A")]
         finally:
@@ -361,12 +368,13 @@ def test_live_same_batch_topics_send_independently(tmp_path, monkeypatch):
                 pass
             for store in stores:
                 store.close()
-    asyncio.run(scenario())
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
 
 def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
     from app import main
     from app.agent import AgentResult
+    from nervipulsa.ports import ToolCall
 
     async def scenario():
         limit = 4  # GroupAgent's established worker limit.
@@ -375,6 +383,7 @@ def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
         active = peak = 0
         entered = []
         stores = []
+        bots = []
 
         class TrackedStore(Store):
             def __init__(self, path):
@@ -384,13 +393,12 @@ def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
         class Agent:
             async def start(self):
                 pass
-
             async def stop(self):
                 pass
-
-            async def ask(self, *, chat_id, prompt, tag):
+            async def observe(self, observation, *, tag, handler):
                 nonlocal active, peak
-                index = next(i for i in range(limit + 1) if f"topic-marker-{i}!" in prompt)
+                rendered = json.dumps(observation, ensure_ascii=False)
+                index = next(i for i in range(limit + 1) if f"topic-marker-{i}!" in rendered)
                 entered.append(index)
                 active += 1
                 peak = max(peak, active)
@@ -405,7 +413,11 @@ def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
                         await release_one.wait()
                     else:
                         await release_all.wait()
-                    return AgentResult(activation_id=tag, text=f"answer {index}", status="committed")
+                    await handler(
+                        "finish_silently", {}, None, None,
+                        ToolCall(id=tag, name="finish_silently", arguments={}),
+                    )
+                    return AgentResult(activation_id=tag, text=None, status="committed")
                 finally:
                     active -= 1
 
@@ -427,27 +439,33 @@ def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
                     return {"ok": True, "result": []}
                 return {"ok": True, "result": {"message_id": 2000}}
 
+        def build_bot(**kwargs):
+            bot = GroupAgent(**kwargs)
+            bots.append(bot)
+            return bot
+
         monkeypatch.setattr(main, "Store", TrackedStore)
         monkeypatch.setattr(main, "Bot", lambda token: object())
+        monkeypatch.setattr(main, "GroupAgent", build_bot)
         monkeypatch.setattr(main, "PythonTelegramBotTransport", Network)
         monkeypatch.setattr(main, "build_agent_factory", lambda *a, **k: lambda spec: Agent())
         config = AppConfig(telegram_token="fake", allowed_chat_ids=(fixtures.TEST_CHAT,),
                            bot_username="alma_bot", debounce_seconds=0,
+                           idle_seconds=0, max_batch_seconds=0,
                            db_path=str(tmp_path / "limit.sqlite3"), workspace=str(tmp_path),
                            model="scripted", proactive_enabled=False)
         task = asyncio.create_task(main.run_live(config, load_default_profile()))
         try:
-            await asyncio.wait_for(saturated.wait(), 3)
+            await saturated.wait()
             assert active == limit and peak == limit and len(set(entered)) == limit
-            try:
-                await asyncio.wait_for(extra_entered.wait(), 0.3)
-            except asyncio.TimeoutError:
-                pass
-            else:
-                raise AssertionError("more than four topic models ran concurrently")
+            # A complete extra scheduling pass must leave the fifth topic
+            # queued while every slot is occupied. This measures capacity,
+            # independent of SQLite/startup latency or an arbitrary sleep.
+            await bots[0].autonomy.tick(force=True, await_tasks=False)
+            assert not extra_entered.is_set(), "more than four topic models ran concurrently"
             assert active == limit and peak == limit
             release_one.set()
-            await asyncio.wait_for(all_entered.wait(), 3)
+            await all_entered.wait()
             assert len(set(entered)) == limit + 1
             assert peak == limit
         finally:
@@ -458,9 +476,12 @@ def test_live_model_concurrency_is_bounded_across_topics(tmp_path, monkeypatch):
                 await task
             except asyncio.CancelledError:
                 pass
+            assert active == 0
+            assert all(task.done() for task in bots[0].autonomy._active_topics.values())
             for store in stores:
                 store.close()
-    asyncio.run(scenario())
+    # Deadlock guard for the whole scenario; the assertions are event driven.
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
 
 def test_crash_after_open_turn_before_decision_recovers(tmp_path):

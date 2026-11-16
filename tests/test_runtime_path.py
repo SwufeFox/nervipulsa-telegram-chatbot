@@ -12,6 +12,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from nervipulsa.config import Settings
 from nervipulsa.ports import ModelResponse, ToolCall
 from nervipulsa.providers import ScriptedBackend
@@ -601,5 +603,118 @@ def test_real_runtime_recovers_from_invalid_reply_on_new_input(tmp_path: Path, s
             assert any(message.get("content") == "new message" for message in calls[1].messages)
         finally:
             await agent.stop()
+
+    run(body())
+
+
+def test_stable_session_has_one_owner_and_restores_after_release(tmp_path, system_prompt):
+    backend = PromptsSeenBackend()
+
+    def make_agent():
+        return NervipulsaAgent(
+            settings=Settings(model="scripted"), workspace=tmp_path / "shared",
+            system_prompt=system_prompt, backend=backend, timeout=5,
+            session_id="shared-scope", restore=True,
+        )
+
+    async def body():
+        owner, replacement = make_agent(), make_agent()
+        try:
+            await asyncio.gather(owner.start(), owner.start())
+            with pytest.raises(RuntimeError, match="already active"):
+                await replacement.start()
+            assert replacement.runtime is None
+            first = await owner.ask(chat_id=1, prompt="remember this marker", tag="first")
+            assert first.status == "committed"
+            await owner.stop()
+
+            await replacement.start()
+            assert replacement.restore_report["restored"] is True
+            second = await replacement.ask(chat_id=1, prompt="what did we discuss?", tag="second")
+            assert second.status == "committed"
+            assert "remember this marker" in json.dumps(backend.requests[-1].messages)
+            assert second.detail["input_event_id"] != first.detail["input_event_id"]
+        finally:
+            await owner.stop()
+            await replacement.stop()
+
+    run(body())
+
+
+def test_concurrent_observations_keep_their_workflow_handlers(tmp_path, system_prompt):
+    from app.autonomous_tools import AutonomousToolCatalog
+
+    async def body():
+        first_entered, release_first, second_submitted = (
+            asyncio.Event(), asyncio.Event(), asyncio.Event()
+        )
+        calls = []
+
+        async def respond(request):
+            envelope = json.loads(request.messages[-1]["content"])
+            label = envelope["payload"]["label"]
+            if label == "first":
+                first_entered.set()
+                await release_first.wait()
+            return ModelResponse(tool_calls=[
+                ToolCall(id=label, name="send_message", arguments={"text": label})
+            ])
+
+        def handler(label):
+            async def accept(name, arguments, context, activation, call):
+                calls.append((label, arguments["text"]))
+                return {"status": "accepted"}, "accepted"
+            return accept
+
+        agent = NervipulsaAgent(
+            settings=Settings(model="scripted"), workspace=tmp_path,
+            system_prompt=system_prompt, backend=ScriptedBackend(respond),
+            timeout=5, tool_catalog=AutonomousToolCatalog(),
+        )
+        await agent.start()
+        pending = []
+        try:
+            pending.append(asyncio.create_task(agent.observe(
+                {"label": "first"}, tag="first", handler=handler("first"),
+            )))
+            await asyncio.wait_for(first_entered.wait(), 5)
+
+            async def second():
+                second_submitted.set()
+                return await agent.observe(
+                    {"label": "second"}, tag="second", handler=handler("second"),
+                )
+
+            pending.append(asyncio.create_task(second()))
+            await asyncio.wait_for(second_submitted.wait(), 5)
+            release_first.set()
+            results = await asyncio.gather(*pending)
+            assert [result.status for result in results] == ["committed", "committed"]
+            assert calls == [("first", "first"), ("second", "second")]
+        finally:
+            release_first.set()
+            await asyncio.gather(*pending, return_exceptions=True)
+            await agent.stop()
+
+    run(body())
+
+
+def test_agent_rejects_an_incomplete_action_catalog(tmp_path, system_prompt):
+    from app.autonomous_tools import AutonomousToolCatalog
+
+    class IncompleteCatalog(AutonomousToolCatalog):
+        def schemas(self, *, workspace):
+            return [schema for schema in super().schemas(workspace=workspace)
+                    if schema["function"]["name"] != "send_message"]
+
+    async def body():
+        agent = NervipulsaAgent(
+            settings=Settings(model="scripted"), workspace=tmp_path,
+            system_prompt=system_prompt, backend=PromptsSeenBackend(),
+            tool_catalog=IncompleteCatalog(),
+        )
+        with pytest.raises(RuntimeError, match="exposed tools"):
+            await agent.start()
+        assert agent.runtime is None
 
     run(body())

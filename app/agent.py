@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from nervipulsa.config import Settings
-from nervipulsa.ports import ModelBackend, ModelRequest, ModelResponse, ProviderFailure
+from nervipulsa.ports import ModelBackend, ModelResponse, ProviderFailure
 from nervipulsa.providers import OpenAICompatibleBackend
 from nervipulsa.runtime import Runtime
 
@@ -91,11 +91,9 @@ class ScriptedAgent:
 class NervipulsaAgent:
     """Wraps one `Runtime` and turns a prompt into `AgentResult`.
 
-    The critical property is that a reply is read by *activation*, not by
-    listening to `assistant.message`. That matters because `assistant.message`
-    can be dropped when the UI mailbox fills (docs §3 G5). Reading the activation
-    ledger for the id we just waited on is unambiguous: it is either there or the
-    activation is still running.
+    Replies come from the activation correlated with the submitted input.
+    Core owns waiting, persistence, and session ownership; the application
+    binds only the current workflow's action handler.
     """
 
     def __init__(
@@ -155,75 +153,58 @@ class NervipulsaAgent:
 
             self._backend = VisionBackend(self._backend, vision_resolver, trusted)
         self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def runtime(self) -> Runtime | None:
         return self._runtime
 
     async def start(self) -> None:
-        if self._runtime is not None:
-            return
-        runtime = Runtime(
-            self._settings,
-            self._backend,
-            self._workspace,
-            tool_catalog=self._tool_catalog or EmptyToolCatalog(),
-            response_commit_hook=self._response_commit_hook,
-            system_prompt=self._system_prompt,
-            # The injected catalog may expose bounded application actions, but
-            # Python execution remains disabled. With no Python host, this
-            # Runtime starts no interpreter; ten forum topics therefore do not
-            # mean ten resident Python workers.
-            python_host=False,
-            session_id=self._session_id,
-        )
-        await runtime.start()
-        self._runtime = runtime
-        if self._restore:
-            # Restore only the model view. Mailbox frames, the activation
-            # ledger and pending effects stay untouched. An application
-            # observation submitted again receives a new event id, so this
-            # alone does not deduplicate cross-process re-delivery.
-            try:
-                self.restore_report = runtime.restore_transcript()
-            except Exception:
-                # A restore failure must not silently look like a fresh start:
-                # that would hide broken memory behind plausible behaviour.
-                await runtime.shutdown()
-                self._runtime = None
-                raise
-            if self.restore_report.get("restored"):
+        async with self._lifecycle_lock:
+            if self._runtime is not None:
+                return
+            from .autonomous_tools import CATALOG_TOOL_NAMES
+
+            allowed = set()
+            if self._tool_catalog is not None:
+                allowed = set(self._tool_catalog.names)
+                if allowed != set(CATALOG_TOOL_NAMES):
+                    raise RuntimeError(f"tool catalog exposes an unexpected set: {sorted(allowed)}")
+
+            runtime = Runtime(
+                self._settings,
+                self._backend,
+                self._workspace,
+                tool_catalog=self._tool_catalog if self._tool_catalog is not None else EmptyToolCatalog(),
+                response_commit_hook=self._response_commit_hook,
+                system_prompt=self._system_prompt,
+                python_host=False,
+                session_id=self._session_id,
+            )
+            exposed = [schema.get("function", {}).get("name") for schema in runtime.actor.tools]
+            if set(exposed) != allowed or len(exposed) != len(allowed):
+                raise RuntimeError(
+                    f"runtime exposed tools do not match the action catalog: "
+                    f"expected={sorted(allowed)}, exposed={exposed}"
+                )
+
+            # Core leases the session and restores its committed model view
+            # off the event loop before it starts accepting observations.
+            self.restore_report = await runtime.start(restore_transcript=self._restore)
+            self._runtime = runtime
+            if self.restore_report and self.restore_report.get("restored"):
                 log.info(
                     "restored model view for session %s: %s messages, %s ids",
                     self._session_id,
                     self.restore_report.get("restored_messages"),
                     self.restore_report.get("restored_event_ids"),
                 )
-        # Fail loudly at startup rather than on the first message. The only
-        # acceptable tool set is the closed action catalog: a stray python_exec
-        # (or any other executor) here would hand the model arbitrary code in
-        # the host process, which this application never does.
-        from .autonomous_tools import CATALOG_TOOL_NAMES
-
-        exposed = [schema.get("function", {}).get("name") for schema in runtime.actor.tools]
-        if self._tool_catalog is None:
-            allowed: set[str] = set()
-        else:
-            allowed = set(str(name) for name in getattr(self._tool_catalog, "names", ()))
-            if allowed != set(CATALOG_TOOL_NAMES):
-                await runtime.shutdown()
-                self._runtime = None
-                raise RuntimeError(f"tool catalog exposes an unexpected set: {sorted(allowed)}")
-        unexpected = [name for name in exposed if name not in allowed]
-        if unexpected:
-            await runtime.shutdown()
-            self._runtime = None
-            raise RuntimeError(f"runtime exposed tools to the model: {unexpected}")
 
     async def stop(self) -> None:
-        runtime, self._runtime = self._runtime, None
-        if runtime is not None:
-            await runtime.shutdown()
+        async with self._lifecycle_lock:
+            runtime, self._runtime = self._runtime, None
+            if runtime is not None:
+                await runtime.shutdown()
 
     async def ask(self, *, chat_id: int, prompt: str, tag: str) -> AgentResult:
         return await self._submit(prompt, tag=tag, observation=False)
@@ -238,114 +219,87 @@ class NervipulsaAgent:
         a structured prompt and the model cannot act - useful for diagnostics,
         wrong for production.
         """
-        if handler is not None and self._runtime is not None:
-            if self._tool_catalog is None:
-                # Fail closed: an observation that expects to be able to act
-                # must never silently fall back to "the model says text".
-                raise RuntimeError("autonomous observation requires a tool catalog")
-            self._tool_catalog.bind(handler)
-        try:
-            return await self._submit(observation, tag=tag, observation=True)
-        finally:
-            if handler is not None and self._tool_catalog is not None:
-                # The handler knows one workflow's watermark. Leaving it bound
-                # would let a later turn stage an action against a stale range.
-                self._tool_catalog.unbind()
+        return await self._submit(observation, tag=tag, observation=True, handler=handler)
 
-    async def _submit(self, payload: Any, *, tag: str, observation: bool) -> AgentResult:
-        """Submit one input and wait for the activation it produced.
-
-        Serialized per Runtime (one instance per chat/topic scope), so the
-        activation ledger lookup remains unambiguous.
-        """
-        if self._runtime is None:
-            raise RuntimeError("agent not started")
-        runtime = self._runtime
-
+    async def _submit(
+        self, payload: Any, *, tag: str, observation: bool, handler: Any | None = None,
+    ) -> AgentResult:
         async with self._lock:
-            delivery = runtime.submit_observation(payload) if observation else runtime.submit_text(payload)
-            if not delivery.accepted:
-                return AgentResult(
-                    activation_id="",
-                    text=None,
-                    status="rejected",
-                    detail={"reason": delivery.reason, "tag": tag},
+            runtime = self._runtime
+            if runtime is None:
+                raise RuntimeError("agent not started")
+            if handler is not None:
+                if self._tool_catalog is None:
+                    raise RuntimeError("autonomous observation requires a tool catalog")
+                self._tool_catalog.bind(handler)
+            try:
+                delivery = (
+                    runtime.submit_observation(payload) if observation
+                    else runtime.submit_text(payload)
                 )
-            input_event_id = delivery.event_id
-
-            activation = await self._await_activation(runtime, input_event_id)
-            if activation is None:
-                paused = runtime.actor.paused
-                if paused is not None and paused.status == "paused":
-                    # Distinguishable from a timeout: the actor refused to run,
-                    # which is an operator problem, not a slow provider.
+                if not delivery.accepted:
                     return AgentResult(
-                        activation_id=paused.id,
-                        text=None,
-                        status="paused",
+                        activation_id="", text=None, status="rejected",
+                        detail={"reason": delivery.reason, "tag": tag},
+                    )
+                input_event_id = delivery.event_id
+                activation = await runtime.wait_for_activation(
+                    input_event_id=input_event_id, timeout=self._timeout,
+                )
+                if activation is None:
+                    paused = runtime.actor.paused
+                    if paused is not None and paused.status == "paused":
+                        return AgentResult(
+                            activation_id=paused.id, text=None, status="paused",
+                            detail={
+                                "tag": tag,
+                                "input_event_id": input_event_id,
+                                "error_kind": paused.error_kind,
+                                "error_message": paused.error_message,
+                                "pause_hint": runtime.status().get("pause_hint"),
+                                "not_this_activation": True,
+                            },
+                        )
+                    return AgentResult(
+                        activation_id="", text=None, status="timeout",
                         detail={
-                            "tag": tag,
-                            "input_event_id": input_event_id,
-                            "error_kind": paused.error_kind,
-                            "error_message": paused.error_message,
-                            "not_this_activation": True,
+                            "tag": tag, "input_event_id": input_event_id,
+                            "timeout_seconds": self._timeout,
                         },
                     )
+
+                metrics = activation.context_metrics
+                detail = {
+                    "tag": tag,
+                    "input_event_id": input_event_id,
+                    "activation_status": activation.status,
+                    "error_kind": activation.error_kind,
+                    "usage": metrics.get("provider_usage"),
+                    "request_transcript_chars": metrics.get("request_transcript_chars"),
+                    "attempts": metrics.get("attempt_count", 0),
+                    "attempts_retained": len(metrics.get("attempts") or ()),
+                    "attempts_evicted": metrics.get("attempts_evicted", 0),
+                }
+                if activation.error_kind:
+                    detail["error_message"] = activation.error_message
+                    detail["pause_hint"] = runtime.status().get("pause_hint")
+                    return AgentResult(
+                        activation_id=activation.id, text=None, status="error", detail=detail,
+                    )
+
+                response = activation.response
+                text = response.content if isinstance(response, ModelResponse) else None
+                detail["tool_calls"] = [
+                    {"id": call.id, "name": call.name}
+                    for call in (response.tool_calls if response is not None else ())
+                ]
                 return AgentResult(
-                    activation_id="",
-                    text=None,
-                    status="timeout",
-                    detail={"tag": tag, "input_event_id": input_event_id,
-                            "timeout_seconds": self._timeout},
+                    activation_id=activation.id, text=text,
+                    status=activation.status, detail=detail,
                 )
-
-            metrics = dict(getattr(activation, "context_metrics", {}) or {})
-            detail = {
-                "tag": tag,
-                "input_event_id": input_event_id,
-                "activation_status": activation.status,
-                "error_kind": activation.error_kind,
-                "usage": metrics.get("provider_usage"),
-                "request_transcript_chars": metrics.get("request_transcript_chars"),
-                "attempts": len(metrics.get("attempts") or []),
-            }
-
-            if activation.error_kind:
-                return AgentResult(
-                    activation_id=activation.id, text=None,
-                    status="error", detail=detail,
-                )
-
-            response = getattr(activation, "response", None)
-            text = response.content if isinstance(response, ModelResponse) else None
-            detail["tool_calls"] = [
-                {"id": call.id, "name": call.name}
-                for call in (getattr(response, "tool_calls", None) or [])
-            ]
-            return AgentResult(
-                activation_id=activation.id, text=text,
-                status=activation.status, detail=detail,
-            )
-
-    async def _await_activation(
-        self, runtime: Runtime, input_event_id: str | None,
-    ) -> Any | None:
-        """Wait for the activation that consumed this input to settle.
-
-        Core owns the correlation: it indexes input event ids to the activation
-        that consumed them and wakes this wait on the state transition, so the
-        adapter needs no polling interval, no ledger length snapshot, and no
-        knowledge of how a paused activation is retried. The answer stays stable
-        across a retry because a retried activation keeps its input event ids.
-
-        `None` means waiting longer cannot help: the input was not consumed
-        before the deadline, or the actor is paused in a way only an explicit
-        retry clears. The caller reports those through the paused/timeout
-        branches, which carry Core's own pause reason.
-        """
-        return await runtime.wait_for_activation(
-            input_event_id=input_event_id, timeout=self._timeout,
-        )
+            finally:
+                if handler is not None:
+                    self._tool_catalog.unbind()
 
     # -- statistics --------------------------------------------------------
 
@@ -360,6 +314,7 @@ class NervipulsaAgent:
             "activations": runtime.actor.activation_count,
             "actor": status.get("actor"),
             "pause_reason": status.get("pause_reason"),
+            "pause_hint": status.get("pause_hint"),
             "transcript_chars": status.get("transcript_chars"),
             "context_limit_chars": status.get("context_limit_chars"),
             "events": runtime.event_count(),

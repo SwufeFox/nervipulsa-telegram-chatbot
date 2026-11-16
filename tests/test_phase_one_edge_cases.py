@@ -97,6 +97,7 @@ os._exit(75)
 
 def test_live_debounce_fires_while_next_long_poll_is_blocked(tmp_path, monkeypatch):
     from app import main
+    from nervipulsa.ports import ToolCall
 
     async def scenario():
         second_poll, release_poll, model_started = (asyncio.Event() for _ in range(3))
@@ -112,6 +113,10 @@ def test_live_debounce_fires_while_next_long_poll_is_blocked(tmp_path, monkeypat
                 # The model is the thing that must start early; speaking is
                 # irrelevant here, so finish without a message.
                 model_started.set()
+                await handler(
+                    "finish_silently", {}, None, None,
+                    ToolCall(id=tag, name="finish_silently", arguments={}),
+                )
                 return AgentResult(activation_id=tag, text=None, status="committed")
         class Network:
             def __init__(self, bot): self.calls = 0
@@ -137,16 +142,18 @@ def test_live_debounce_fires_while_next_long_poll_is_blocked(tmp_path, monkeypat
                            proactive_enabled=False)
         task = asyncio.create_task(main.run_live(config, load_default_profile()))
         try:
-            await asyncio.wait_for(second_poll.wait(), 2)
+            await second_poll.wait()
             assert not release_poll.is_set()
-            await asyncio.wait_for(model_started.wait(), 1.5)
+            await model_started.wait()
             assert not release_poll.is_set(), "model must start before long poll returns"
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             for store in stores:
                 store.close()
-    asyncio.run(scenario())
+    # The fake long poll never returns until released, so model entry proves
+    # the timer ran independently. The timeout guards deadlocks, not latency.
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
 
 def test_explicit_request_survives_same_topic_supplement_during_model(tmp_path):

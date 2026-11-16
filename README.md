@@ -39,8 +39,18 @@ There is no keyword rule and no participation score. Parsed messages from allowe
 | `wait_for_event` | end now, wake on a future observation matching optional event-kind and sender filters |
 | `wait_until` | end now, be woken at a wall-clock time |
 | `update_state` | remember a small note for later turns |
-
+| `set_intent` | record the current participation intent |
+| `resolve_intent` | resolve a recorded participation intent |
 Sender filters only control whether a durable wait is satisfied; they do not prevent otherwise model-eligible observations from waking the model or reduce model calls.
+Each chat/topic scope has its own Core session. Startup takes an exclusive lease
+for that session, restores its last committed model transcript before the actor
+starts, and reserves event sequence IDs past persisted history. Restore covers
+the model view only; the application's durable inbox and Telegram outbox own
+observation recovery and delivery. Core writes are asynchronous, so an accepted
+submission is not by itself proof that its journal commit has completed. Durable
+transcript snapshots continue to grow in SQLite even though in-memory history is
+bounded. See [the integration contract](docs/INTEGRATION_CONTRACT.md) and
+[runtime gaps](docs/RUNTIME_GAPS.md) for details.
 Ordinary assistant text is never delivered — only `send_message` posts. A turn
 that calls no tool has not decided anything: it is asked once more, explicitly,
 and only then recorded as `undecided` rather than being counted as silence.
@@ -53,7 +63,14 @@ Background and the known gaps are in
 
 ## Quick start (no credentials needed)
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer. Create an isolated environment:
+
+```bash
+python -m venv .venv
+```
+
+Activate it with `.\.venv\Scripts\Activate.ps1` in PowerShell, or
+`source .venv/bin/activate` on Linux/macOS, then install and run:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -66,6 +83,10 @@ python -m pytest -q             # the test suite
 `--replay` needs no Telegram token and no model key. It prints what the bot would
 have done with a handful of synthetic messages — useful for seeing the shape of
 it before wiring anything real.
+
+On Windows, `run-fox.ps1` uses `.venv\Scripts\python.exe` when present and
+propagates Python's exit code. Install dependencies into that environment so
+the launcher and subprocess tests use the same pinned Core revision.
 
 To see the replay produce an actual reply, tell it which chat is allowed (the
 fixtures use a fixed id):
