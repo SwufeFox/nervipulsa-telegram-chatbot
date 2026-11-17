@@ -11,8 +11,8 @@ reason code, not just dropped.
 It is also honest about what it is. Ask it whether it is a human and it says no.
 
 ```
-accepted update → durable observations → scoped batch + bounded memory context
-                → model tools/read continuation → durable outbox → Telegram
+accepted update → durable observations → recent dialogue + pending work
+                → model-chosen recall/history reads → durable outbox → Telegram
 ```
 
 ## What it is like to use
@@ -38,7 +38,7 @@ There is no keyword social rule and no participation score. Parsed messages from
 | `finish_silently` | end this turn without speaking |
 | `wait_for_event` | end now, wake on a future observation matching optional event-kind and sender filters |
 | `wait_until` | end now, be woken at a wall-clock time |
-| `update_state` | retain a small generic state note; it does not create sourced experience memory |
+| `update_state` | keep a small working note; it is not a second sourced long-term memory store |
 | `set_intent` | record or replace one commitment anchored to a source message |
 | `resolve_intent` | close one explicitly selected commitment |
 | `remember` | create or revise a sourced experience, person, interest, or preference memory |
@@ -75,18 +75,19 @@ message edits mark affected memories `needs_review`. Forgetting or expiry remove
 normal recall and cancels linked waits and pending sends; it does not erase
 conversation or audit history. `/purge` removes this chat's stored data.
 
-Automatic context selects at most six relevant memories within 6,000 characters,
-using participants, literal text, reply/source references, and own interests or
-preferences. It reports selection reasons, revisions, uncertainty, and clipped
-sources. Explicit recall/history reads return at most ten records each and allow
-up to three further model rounds and six total reads in the same workflow,
-unless a terminal send, wait, or finish already occurred. Original observations
-are consumed once. Read-only exhaustion is audited as `undecided`, not silence.
-Retrieval matches literal words and CJK bigrams; it has no embeddings or semantic
-recall guarantee, and selection never decides whether the bot should speak.
-For a long observation, the bounded literal query retains both its beginning
-and end, so a question before a log or a correction after it can select memory.
-This does not provide semantic recall or preserve every detail in the middle.
+Recent dialogue and pending work form the model's working context. Long-term memories are
+not automatically selected or injected, and there is no requirement to search on every
+message. The model chooses when earlier people, preferences, episodes, corrections or
+forgetting requests, or memory-linked revisits make retrieval useful. It uses `recall_memories`
+to find stored records and `read_history` to inspect accepted source text. Recall can be
+narrowed with `source_message_id`, `person_id`, memory `kind`, and literal `query` filters.
+Search matches literal words and CJK bigrams rather than meaning; each read returns at most
+ten records, with up to six reads and three further model rounds per workflow. Reads are
+bounded and may be incomplete. The model must consume each tool receipt before relying on its
+evidence; receipts support a bounded continuation, not an unlimited search or redelivery of
+the original observations. An empty result cannot establish that something never happened.
+Finding or saving a memory does not require a reply; the model may finish silently.
+`update_state` remains a working note; sourced long-term facts belong in `remember`.
 
 
 `wait_for_event` and `wait_until` may carry a `memory_id`, independently of an

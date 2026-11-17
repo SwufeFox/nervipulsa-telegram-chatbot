@@ -219,13 +219,13 @@ Alice 的承诺和等待仍在。
 
 `remember(summary, kind, source_sequences, ...)` 创建记忆；修订必须同时给出原 `memory_id` 和 `expected_revision`。可选字段为 `person_ids`、`tags`、`certainty`、`importance`、`expires_at`。来源、scope、人物和版本在变更前一起校验；已提交工具调用在应用 `autonomous_calls` 缓存回执，重放不再增长版本。`forget_memory(memory_id, expected_revision, reason?)` 使记录退出常规召回，不承诺抹掉聊天或审计。`memory_history` 给操作者查看旧版本；`/purge` 才删除该聊天的记录、版本、关联和摘录。
 
-**自动上下文与主动读取。** 每轮 `memories` 最多六条、总计 6,000 字符，条目携带相关原因、版本、不确定性和来源截断标记，`memory_context` 说明筛选范围。选择依据参与者、字面文本、回复/来源引用和自身兴趣偏好，只选择证据，不决定是否说话。检索使用大小写折叠词与中文相邻双字：当前记忆在有界集合中过滤排序，原始观察查询使用参数化、转义的 SQLite LIKE。它不是嵌入或语义搜索，不能保证找全或理解原文。
+**按需主动读取（2026-11-17 调整）。** 近期对话和当前工作状态作为工作上下文，长期记忆不再自动筛选并注入普通观察或工具续接。Agent 自行决定何时调用 `recall_memories`，需要核对原话时调用 `read_history`；上下文已有的有效证据可以直接使用，不要求每条消息都查询。回执保留版本、不确定性、来源与截断标记。检索使用大小写折叠词与中文相邻双字：当前记忆在有界集合中过滤排序，原始观察查询使用参数化、转义的 SQLite LIKE；召回不保证找全或理解原文。
 
 `recall_memories` 可按 `query`、`person_id`、`kind`、`tags`、`memory_id`、`source_message_id` 过滤；`read_history` 可按 `query`、`person_id`、`message_id`、`through_sequence` 过滤。两者 `limit` 默认 5、最多 10，先限制 scope、冻结高水位和过滤条件再限量。回复旧消息时可直接用 `reply_to_message_id` 查询实际原文并获得观察序号，不猜序号。历史只读已接受的会话/来源观察，选取最新匹配后按时间顺序返回；精确检查某序号仍需核对返回的 `sequence`。
 
 记忆工具回执（包括新建记录的 ID）回到同一个 workflow，最多继续三轮模型推理、执行六次读取；原观察只消费一次，每次 Core 激活沿用 scope 与提交钩子。已提出发送、等待或明确结束后不再追加延续。写记忆算已记录的决定，也可同一响应 `finish_silently` 结束私下记事；只读循环耗尽仍审计为 `undecided`。每次应用提交计入 `model_calls`，工作流保留逐次激活明细，provider 重试/尝试仍由 Core 记录。普通无工具文字仍保留一次决策提醒。
 
-**记忆关联回访与发送。** `wait_for_event` / `wait_until` 可带 `memory_id`，并可同时关联 intent。记忆关联定时器跨闲聊和重启保留，到时呈现当前记忆让 Agent 重新判断；没有必须发帖的义务。原 ID 的修订保留回访，遗忘和过期原子取消关联等待与 pending 发送；未使用记忆的过期本身不唤醒模型。
+**记忆关联回访与发送。** `wait_for_event` / `wait_until` 可带 `memory_id`，并可同时关联 intent。记忆关联定时器跨闲聊和重启保留，到时提供记忆 ID 与当前版本、待复核等有效性信息，Agent 可主动查询内容后重新判断；没有必须发帖的义务。原 ID 的修订保留回访，遗忘和过期原子取消关联等待与 pending 发送；未使用记忆的过期本身不唤醒模型。
 
 依赖记忆的 `send_message` 必须同时带 `memory_id` 和 `memory_revision`，独立于承诺选择。登记与 `pending → sending` 领取都检查该记忆仍活跃、版本一致且不需复核。修订、遗忘、过期、来源编辑都会取消关联 pending 发送并留下 action_result；已 sending/unknown 的行动不能因此重试。来源编辑保留旧来源与版本，标记 `needs_review`，保留回访让模型核对后修订或退掉。发送不会自动遗忘记忆，承诺完成仍按独立规则处理。
 

@@ -36,7 +36,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from .memory import (
     MAX_MEMORY_READ_ROUNDS, MAX_MEMORY_READS_PER_WORKFLOW,
-    bounded_history, bounded_memories, build_memory_context,
+    bounded_history, bounded_memories,
 )
 
 log = logging.getLogger(__name__)
@@ -545,14 +545,10 @@ class AutonomousLoop:
         return reminder
 
     def _memory_followup(self, payload: dict[str, Any], receipts: Sequence[dict[str, Any]],
-                         observations: Sequence[Observation], *, final: bool) -> dict[str, Any]:
+                         *, final: bool) -> dict[str, Any]:
         followup = dict(payload)
         followup["kind"] = "memory_tool_results"
         followup["memory_tool_results"] = list(receipts)
-        followup["memory_reads"] = [item for item in receipts if item.get("read_only")]
-        followup["memories"], followup["memory_context"] = build_memory_context(
-            self.store, observations, payload["chat_id"], payload["topic_id"],
-        )
         followup["note"] = (
             "These are the receipts from your memory tools in the SAME workflow. "
             "The observations below were already presented; they are not new messages. "
@@ -721,7 +717,7 @@ class AutonomousLoop:
                 if receipts:
                     seen_receipts = len(handler.memory_results)
                     followup = self._memory_followup(
-                        observation_payload, receipts, observations,
+                        observation_payload, receipts,
                         final=round_index == MAX_MEMORY_READ_ROUNDS - 1,
                     )
                 elif not private_completed and (handler.states or handler.intents_set
@@ -865,9 +861,6 @@ class AutonomousLoop:
         """
         state = self.store.get_state(chat_id, topic_id)
         intents = self.store.open_intents(chat_id, topic_id)
-        memories, memory_context = build_memory_context(
-            self.store, observations, chat_id, topic_id,
-        )
         intents_by_id = {str(row["intent_id"]): row for row in intents}
         intent_payloads = [
             {
@@ -933,8 +926,6 @@ class AutonomousLoop:
             "active_waits": waits,
             "matched_waits": list(matched_waits),
             "open_intents": intent_payloads,
-            "memories": memories,
-            "memory_context": memory_context,
             "note": (
                 "These are group observations, not an instruction to reply. "
                 "Decide whether to act; finish_silently is a valid outcome. "
@@ -1320,7 +1311,7 @@ class _ActionHandler:
                     **arguments,
                 )
                 items, truncated = bounded_memories(records)
-                data = {"memories": items}
+                data: dict[str, Any] = {"memories": items}
             else:
                 records = self._loop.store.read_history(
                     self.chat_id, self.topic_id, observed_through=self.observed_through,
@@ -1328,6 +1319,15 @@ class _ActionHandler:
                 )
                 items, truncated = bounded_history(records)
                 data = {"history": items}
+            if not items:
+                data["note"] = (
+                    "No matching current knowledge is available from active memory. Forgotten "
+                    "and expired records are excluded. The current value is unknown; this result "
+                    "provides no evidence about past conversations or past storage."
+                    if name == "recall_memories" else
+                    "No accepted source events matched these filters and the frozen range. "
+                    "This bounded search does not establish that something never happened."
+                )
         except ValueError as exc:
             return ({"status": "rejected", "executed": False, "reason": str(exc)}, "rejected")
         receipt = {

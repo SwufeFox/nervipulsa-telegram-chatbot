@@ -1,0 +1,555 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "prompt_sha256_prefix": "5d4a9224a25f",
+  "scope": "Targeted real model memory cases; full GroupAgent/Core with recording-only transport",
+  "long_term_memory_access": "explicit_recall",
+  "results": [
+    {
+      "case": "temporary_context",
+      "reply": "",
+      "sends": 0,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "对方明确说先别回复，且要求不长期保存，暂不发言也不记忆"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [],
+      "memories": [],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "silent"
+        }
+      ],
+      "elapsed_seconds": 12.5991
+    },
+    {
+      "case": "short_term_context",
+      "reply": "银杏-47。",
+      "sends": 1,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "reply_to": 2002,
+                "text": "银杏-47。"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "text": "银杏-47。",
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "memories": [],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "speak"
+        }
+      ],
+      "elapsed_seconds": 7.5988
+    },
+    {
+      "case": "memory_store",
+      "reply": "",
+      "sends": 0,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "remember",
+              "arguments": {
+                "certainty": "observed",
+                "importance": 2,
+                "kind": "preference",
+                "person_ids": [
+                  111111
+                ],
+                "source_sequences": [
+                  3
+                ],
+                "summary": "alice 喝咖啡不加糖",
+                "tags": [
+                  "咖啡",
+                  "偏好"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "偏好已记录，用户明确说不用回复，保持沉默"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [],
+      "memories": [
+        {
+          "memory_id": "mem_095465143bae404a",
+          "revision": 1,
+          "chat_id": -1001234567890,
+          "topic_id": 20,
+          "kind": "preference",
+          "summary": "alice 喝咖啡不加糖",
+          "certainty": "observed",
+          "importance": 2,
+          "person_ids": [
+            111111
+          ],
+          "tags": [
+            "咖啡",
+            "偏好"
+          ],
+          "source_sequences": [
+            3
+          ],
+          "sources": [
+            {
+              "sequence": 3,
+              "type": "message",
+              "message_id": 2003,
+              "sender_id": 111111,
+              "received_at": 1794923463.3808181,
+              "text": "@linGotFoxbot 我喝咖啡不加糖，这个偏好记一下就好，不用专门回复。",
+              "truncated": false
+            }
+          ],
+          "status": "active",
+          "needs_review": false,
+          "created_at": 1794923465.3808181,
+          "updated_at": 1794923465.3808181,
+          "expires_at": null
+        }
+      ],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "silent"
+        }
+      ],
+      "elapsed_seconds": 13.2884
+    },
+    {
+      "case": "memory_correction",
+      "reply": "",
+      "sends": 0,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "limit": 5,
+                "person_id": 111111,
+                "query": "咖啡"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "remember",
+              "arguments": {
+                "certainty": "observed",
+                "expected_revision": 1,
+                "kind": "preference",
+                "memory_id": "mem_095465143bae404a",
+                "person_ids": [
+                  111111
+                ],
+                "source_sequences": [
+                  4
+                ],
+                "summary": "alice 喝咖啡加半勺糖（更正：之前说不加糖是说错了）",
+                "tags": [
+                  "咖啡",
+                  "偏好"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "偏好已按 seq4 更正为加半勺糖，且对方明确说不用回复，保持沉默。"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [],
+      "memories": [
+        {
+          "memory_id": "mem_095465143bae404a",
+          "revision": 2,
+          "chat_id": -1001234567890,
+          "topic_id": 20,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖（更正：之前说不加糖是说错了）",
+          "certainty": "observed",
+          "importance": 2,
+          "person_ids": [
+            111111
+          ],
+          "tags": [
+            "咖啡",
+            "偏好"
+          ],
+          "source_sequences": [
+            4
+          ],
+          "sources": [
+            {
+              "sequence": 4,
+              "type": "message",
+              "message_id": 2004,
+              "sender_id": 111111,
+              "received_at": 1794923465.3808181,
+              "text": "@linGotFoxbot 更正一下：我喝咖啡其实加半勺糖，刚才说不加糖是我说错了。把那条偏好修正掉，不用回复。",
+              "truncated": false
+            }
+          ],
+          "status": "active",
+          "needs_review": false,
+          "created_at": 1794923465.3808181,
+          "updated_at": 1794923467.3808181,
+          "expires_at": null
+        }
+      ],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "silent"
+        }
+      ],
+      "elapsed_seconds": 19.4321
+    },
+    {
+      "case": "memory_recall",
+      "reply": "半勺。",
+      "sends": 1,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "limit": 5,
+                "person_id": 111111
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "memory_id": "mem_095465143bae404a",
+                "memory_revision": 2,
+                "reply_to": 2005,
+                "text": "半勺。"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "text": "半勺。",
+          "status": "sent",
+          "memory_id": "mem_095465143bae404a",
+          "memory_revision": 2
+        }
+      ],
+      "memories": [
+        {
+          "memory_id": "mem_095465143bae404a",
+          "revision": 2,
+          "chat_id": -1001234567890,
+          "topic_id": 20,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖（更正：之前说不加糖是说错了）",
+          "certainty": "observed",
+          "importance": 2,
+          "person_ids": [
+            111111
+          ],
+          "tags": [
+            "咖啡",
+            "偏好"
+          ],
+          "source_sequences": [
+            4
+          ],
+          "sources": [
+            {
+              "sequence": 4,
+              "type": "message",
+              "message_id": 2004,
+              "sender_id": 111111,
+              "received_at": 1794923465.3808181,
+              "text": "@linGotFoxbot 更正一下：我喝咖啡其实加半勺糖，刚才说不加糖是我说错了。把那条偏好修正掉，不用回复。",
+              "truncated": false
+            }
+          ],
+          "status": "active",
+          "needs_review": false,
+          "created_at": 1794923465.3808181,
+          "updated_at": 1794923467.3808181,
+          "expires_at": null
+        }
+      ],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "speak"
+        }
+      ],
+      "elapsed_seconds": 14.1321
+    },
+    {
+      "case": "memory_other_person",
+      "reply": "没记住，你一般加多少？",
+      "sends": 1,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "limit": 5,
+                "person_id": 222222,
+                "query": "咖啡 糖"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 2006,
+                "text": "没记住，你一般加多少？"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "没记住，你一般加多少？"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "text": "没记住，你一般加多少？",
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "memories": [
+        {
+          "memory_id": "mem_095465143bae404a",
+          "revision": 2,
+          "chat_id": -1001234567890,
+          "topic_id": 20,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖（更正：之前说不加糖是说错了）",
+          "certainty": "observed",
+          "importance": 2,
+          "person_ids": [
+            111111
+          ],
+          "tags": [
+            "咖啡",
+            "偏好"
+          ],
+          "source_sequences": [
+            4
+          ],
+          "sources": [
+            {
+              "sequence": 4,
+              "type": "message",
+              "message_id": 2004,
+              "sender_id": 111111,
+              "received_at": 1794923465.3808181,
+              "text": "@linGotFoxbot 更正一下：我喝咖啡其实加半勺糖，刚才说不加糖是我说错了。把那条偏好修正掉，不用回复。",
+              "truncated": false
+            }
+          ],
+          "status": "active",
+          "needs_review": false,
+          "created_at": 1794923465.3808181,
+          "updated_at": 1794923467.3808181,
+          "expires_at": null
+        }
+      ],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "speak"
+        }
+      ],
+      "elapsed_seconds": 19.8454
+    },
+    {
+      "case": "memory_forget",
+      "reply": "",
+      "sends": 0,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "limit": 10,
+                "person_id": 111111,
+                "query": "咖啡加糖"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "forget_memory",
+              "arguments": {
+                "expected_revision": 2,
+                "memory_id": "mem_095465143bae404a",
+                "reason": "alice 要求忘掉咖啡加糖偏好，不再记忆"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "已按要求遗忘该偏好，且对方明确要求不用回复"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [],
+      "memories": [],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "silent"
+        }
+      ],
+      "elapsed_seconds": 13.358
+    },
+    {
+      "case": "memory_after_forget",
+      "reply": "不知道，你没跟我说过。你平时加多少？",
+      "sends": 1,
+      "activations": [
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "person_id": 111111,
+                "query": "糖"
+              }
+            }
+          ]
+        },
+        {
+          "status": "committed",
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "不知道，你没跟我说过。你平时加多少？"
+              }
+            }
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "text": "不知道，你没跟我说过。你平时加多少？",
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "memories": [],
+      "workflows": [
+        {
+          "state": "completed",
+          "outcome": "speak"
+        }
+      ],
+      "elapsed_seconds": 11.9811
+    }
+  ],
+  "checks": {
+    "temporary_detail_stays_silent": true,
+    "temporary_detail_is_not_saved_long_term": true,
+    "short_term_context_retains_detail": true,
+    "preference_has_accepted_sources": true,
+    "correction_revises_same_record_after_recall": true,
+    "active_recall_uses_current_revision": true,
+    "other_person_does_not_inherit_preference": true,
+    "forget_retrieves_then_retires_record": true,
+    "private_memory_operations_stay_silent": true,
+    "forgotten_value_is_not_repeated_or_linked": true,
+    "no_multiple_sends": true,
+    "no_failed_or_deferred_workflows": true
+  }
+}

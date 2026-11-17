@@ -114,6 +114,17 @@ class Rig:
 
 def test_person_memory_outlives_finished_episode_and_restart(tmp_path):
     def answer(payload):
+        if payload["kind"] == "memory_tool_results":
+            receipt = payload["memory_tool_results"][-1]
+            if receipt["tool"] != "recall_memories":
+                return finish()
+            remembered = next((item for item in receipt["memories"]
+                               if fixtures.ALICE in item["person_ids"]), None)
+            return tools(("send_message", {
+                "text": "One sentence, as you prefer." if remembered else "What style do you prefer?",
+                **({"memory_id": remembered["memory_id"], "memory_revision": remembered["revision"]}
+                   if remembered else {}),
+            }))
         if text_of(payload) == "I prefer one short sentence":
             return tools(
                 ("remember", {
@@ -124,13 +135,9 @@ def test_person_memory_outlives_finished_episode_and_restart(tmp_path):
                 }),
                 ("finish_silently", {}),
             )
-        remembered = next((item for item in payload["memories"]
-                           if fixtures.ALICE in item["person_ids"]), None)
-        return tools(("send_message", {
-            "text": "One sentence, as you prefer." if remembered else "What style do you prefer?",
-            **({"memory_id": remembered["memory_id"], "memory_revision": remembered["revision"]}
-               if remembered else {}),
-        }))
+        if text_of(payload) == "Can you explain this?":
+            return tools(("recall_memories", {"person_id": fixtures.ALICE, "kind": "person"}))
+        return finish()
 
     async def scenario():
         first = Rig(tmp_path, answer)
@@ -205,16 +212,27 @@ def test_explicit_recall_and_history_continue_in_one_workflow(tmp_path):
 def test_edit_correction_preserves_history_and_cancels_old_pending_reply(tmp_path):
     def answer(payload):
         if payload["kind"] == "memory_tool_results":
-            return finish()
-        if source(payload)["type"] == "message_edit":
-            old = payload["memories"][0]
-            assert old["needs_review"] is True
-            return tools(("remember", {
-                "memory_id": old["memory_id"], "expected_revision": old["revision"],
-                "summary": "Alice uses Asia/Shanghai", "kind": "person",
-                "source_sequences": [source(payload)["sequence"]],
-                "person_ids": [fixtures.ALICE], "certainty": "observed",
+            receipt = payload["memory_tool_results"][-1]
+            if receipt["tool"] == "remember":
+                return finish()
+            memory = receipt["memories"][0]
+            if source(payload)["type"] == "message_edit":
+                assert memory["needs_review"] is True
+                return tools(("remember", {
+                    "memory_id": memory["memory_id"], "expected_revision": memory["revision"],
+                    "summary": "Alice uses Asia/Shanghai", "kind": "person",
+                    "source_sequences": [source(payload)["sequence"]],
+                    "person_ids": [fixtures.ALICE], "certainty": "observed",
+                }))
+            assert memory["needs_review"] is False
+            return tools(("send_message", {
+                "text": memory["summary"], "memory_id": memory["memory_id"],
+                "memory_revision": memory["revision"],
             }))
+        if source(payload)["type"] == "message_edit":
+            return tools(("recall_memories", {"source_message_id": 301}))
+        if text_of(payload) == "Which timezone am I using?":
+            return tools(("recall_memories", {"person_id": fixtures.ALICE, "kind": "person"}))
         if text_of(payload) == "I use UTC":
             return tools(
                 ("remember", {"summary": "Alice uses UTC", "kind": "person",
@@ -222,11 +240,7 @@ def test_edit_correction_preserves_history_and_cancels_old_pending_reply(tmp_pat
                               "person_ids": [fixtures.ALICE], "certainty": "observed"}),
                 ("finish_silently", {}),
             )
-        memory = payload["memories"][0]
-        return tools(("send_message", {
-            "text": memory["summary"], "memory_id": memory["memory_id"],
-            "memory_revision": memory["revision"],
-        }))
+        return finish()
 
     async def scenario():
         rig = Rig(tmp_path, answer)
@@ -273,14 +287,15 @@ def test_own_interest_revisit_survives_chat_and_restart_or_is_retired(tmp_path, 
                     "at": due, "purpose": "Revisit the cache behavior out of curiosity",
                     "memory_id": receipt["memory_id"],
                 }))
+            if receipt["tool"] == "recall_memories":
+                memory = receipt["memories"][0]
+                return tools(("send_message", {
+                    "text": "I am still curious whether that cache behavior recurred.",
+                    "memory_id": memory["memory_id"], "memory_revision": memory["revision"],
+                }))
             return finish()
         if any(item["type"] == "timer" for item in payload["observations"]):
-            memory = next(item for item in payload["memories"]
-                          if item["memory_id"] == remembered["memory_id"])
-            return tools(("send_message", {
-                "text": "I am still curious whether that cache behavior recurred.",
-                "memory_id": memory["memory_id"], "memory_revision": memory["revision"],
-            }))
+            return tools(("recall_memories", {"memory_id": remembered["memory_id"]}))
         if text_of(payload) == "The cache behavior was strange":
             return tools(("remember", {
                 "summary": "I want to understand whether the cache behavior recurs",
@@ -499,6 +514,17 @@ def test_committed_memory_mutation_replay_does_not_create_another_memory(tmp_pat
 
 def test_live_send_feedback_updates_later_behavior_without_an_acknowledgement(tmp_path, monkeypatch):
     def answer(payload):
+        if payload["kind"] == "memory_tool_results":
+            receipt = payload["memory_tool_results"][-1]
+            if receipt["tool"] == "recall_memories":
+                preference = next((item for item in receipt["memories"]
+                                  if item["kind"] == "preference"), None)
+                return tools(("send_message", {
+                    "text": "Which scheduler are you using?" if preference else "Set UTC directly.",
+                    **({"memory_id": preference["memory_id"], "memory_revision": preference["revision"]}
+                       if preference else {}),
+                }))
+            return finish()
         feedback = next((item for item in payload["observations"] if item["type"] == "feedback"), None)
         if feedback:
             assert feedback["payload"]["reply_text"] == "Use the scheduler timezone setting."
@@ -510,10 +536,9 @@ def test_live_send_feedback_updates_later_behavior_without_an_acknowledgement(tm
             )
         if text_of(payload) == "First timezone question":
             return tools(("send_message", {"text": "Use the scheduler timezone setting."}))
-        preference = next((item for item in payload["memories"] if item["kind"] == "preference"), None)
-        return tools(("send_message", {
-            "text": "Which scheduler are you using?" if preference else "Set UTC directly.",
-        }))
+        if text_of(payload) == "Another timezone question":
+            return tools(("recall_memories", {"kind": "preference", "query": "scheduler timezone"}))
+        return finish()
 
     async def scenario():
         rig = Rig(tmp_path, answer)
@@ -563,45 +588,63 @@ def test_live_send_feedback_updates_later_behavior_without_an_acknowledgement(tm
     run(scenario())
 
 
-@pytest.mark.parametrize("long_question", [
-    "background " * 40 + "Was the quartz valve replaced?",
-    "Was the quartz valve replaced? " + "background " * 40,
-])
-def test_question_at_either_end_selects_current_sourced_memory_in_full_batch(tmp_path, long_question):
+def test_fresh_request_excludes_stored_memory_until_explicit_recall(tmp_path):
+    relevant_summary = "The quartz valve was replaced"
+    unrelated_summary = "The storage room has a blue shelf"
+    relevant_source = "Maintenance log: a quartz valve was replaced last week."
+    unrelated_source = "Inventory log: the shelf in storage is painted blue."
     captured = {}
 
-    def answer(payload):
-        if text_of(payload) == "The quartz valve was replaced":
-            return tools(("remember", {
-                "summary": "The quartz valve was replaced", "kind": "experience",
-                "source_sequences": [source(payload)["sequence"]], "certainty": "observed",
-            }), ("finish_silently", {}))
-        messages = [item for item in payload["observations"]
-                    if item["type"] in {"message", "message_edit"}]
-        if len(messages) == 24:
-            captured.update(payload=payload, messages=messages)
-        return finish()
+    def consumer_answer(payload):
+        request_json = json.dumps(payload, ensure_ascii=False)
+        assert unrelated_summary not in request_json
+        if payload["kind"] == "memory_tool_results":
+            receipt = payload["memory_tool_results"][-1]
+            assert receipt["tool"] == "recall_memories"
+            captured["receipt"] = receipt
+            return finish()
+        assert relevant_summary not in request_json
+        captured["fresh_request"] = payload
+        return tools(("recall_memories", {"source_message_id": 1201}))
 
     async def scenario():
-        rig = Rig(tmp_path, answer)
-        await rig.start()
+        rig = Rig(tmp_path, consumer_answer)
         try:
-            await rig.deliver(1201, "The quartz valve was replaced")
-            for update in range(1202, 1226):
-                await rig.deliver(
-                    update, long_question if update == 1225 else "unrelated update",
-                    sender=fixtures.BOB, activate=False,
-                )
-            await rig.bot.autonomous_step(force=True)
-
-            assert len(captured["messages"]) == 24
-            assert captured["messages"][-1]["payload"]["text"] == long_question
-            memory = next(item for item in captured["payload"]["memories"]
-                          if item["summary"] == "The quartz valve was replaced")
+            rig.store.record_inbound_message(
+                StoredMessage(fixtures.TEST_CHAT, 1201, fixtures.TOPIC_A, fixtures.ALICE,
+                              "alice", False, relevant_source, rig.clock()),
+                update_id=1201, payload={},
+            )
+            rig.store.record_inbound_message(
+                StoredMessage(fixtures.TEST_CHAT, 1202, fixtures.TOPIC_A, fixtures.ALICE,
+                              "alice", False, unrelated_source, rig.clock()),
+                update_id=1202, payload={},
+            )
+            rig.store.remember_memory(
+                memory_id="quartz-memory", chat_id=fixtures.TEST_CHAT, topic_id=fixtures.TOPIC_A,
+                summary=relevant_summary, kind="experience", source_sequences=[1],
+                observed_through=1, certainty="observed",
+            )
+            rig.store.remember_memory(
+                memory_id="shelf-memory", chat_id=fixtures.TEST_CHAT, topic_id=fixtures.TOPIC_A,
+                summary=unrelated_summary, kind="experience", source_sequences=[2],
+                observed_through=2, certainty="observed",
+            )
+            assert {item["summary"] for item in rig.memories()} == {
+                relevant_summary, unrelated_summary,
+            }
+            await rig.start()
+            await rig.deliver(1203, "Was the quartz valve replaced?")
+            memory = captured["receipt"]["memories"][0]
+            assert [item["summary"] for item in captured["receipt"]["memories"]] == [
+                relevant_summary,
+            ]
             assert memory["revision"] == 1
             assert memory["certainty"] == "observed"
             assert memory["sources"][0]["message_id"] == 1201
-            assert memory["sources"][0]["text"] == "The quartz valve was replaced"
+            assert memory["sources"][0]["text"] == relevant_source
+            assert captured["fresh_request"]["kind"] != "memory_tool_results"
+            assert rig.bot.autonomy.model_calls == 2
         finally:
             await rig.close()
 

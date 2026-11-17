@@ -82,6 +82,17 @@ def _last_reply_id(outputs: list[dict], topic: int) -> int | None:
                  if item.get("message_thread_id") == topic), None)
 
 
+def _recalls_before(row: dict[str, Any], action: str) -> bool:
+    """Require a prior model response so lookup results could inform the action."""
+    recalled = False
+    for activation in row["activations"]:
+        names = {call["name"] for call in activation["tools"]}
+        if action in names:
+            return recalled
+        recalled = recalled or "recall_memories" in names
+    return False
+
+
 
 def _build_agent(spec: Any, *, settings: Settings, timeout: float) -> NervipulsaAgent:
     return NervipulsaAgent(
@@ -144,7 +155,7 @@ async def main() -> int:
     parser.add_argument("--prompt", type=Path, default=None,
                         help="a single profile file to use instead of the selected config profile")
     parser.add_argument("--extended", action="store_true",
-                        help="also evaluate material follow-ups, corrections, and fresh-view memory use")
+                        help="also evaluate material follow-ups, short-term context, and active memory recall")
     args = parser.parse_args()
 
     profile_config, prompt = _load_evaluation_setup(args.config, args.prompt)
@@ -381,6 +392,12 @@ async def main() -> int:
                 grounded_thanks = await speak_case("grounded_thanks", "thanks after an actual answer in this topic", [
                     (ALICE, "alice", "明白了，谢啦。"),
                 ], 19, reply_to_last=True)
+                temporary = await speak_case("temporary_context", "keep an unsaved detail in recent conversation without an acknowledgement", [
+                    (ALICE, "alice", f"@{bot_username} 这次临时核对的代号是银杏-47，只在本次对话里用，不用长期保存，现在也先别回复。"),
+                ], 21)
+                short_term = await speak_case("short_term_context", "answer from recent conversation without a long-term memory record", [
+                    (ALICE, "alice", f"@{bot_username} 这次核对的代号是什么？"),
+                ], 21)
                 remembered = await speak_case("memory_store", "save an explicit preference without an acknowledgement", [
                     (ALICE, "alice", f"@{bot_username} 我喝咖啡不加糖，这个偏好记一下就好，不用专门回复。"),
                 ], 20)
@@ -400,6 +417,7 @@ async def main() -> int:
                 stranger = await speak_case("memory_other_person", "do not assign Alice's preference to Bob", [
                     (BOB, "bob", f"@{bot_username} 我喝咖啡一般加多少糖？"),
                 ], 20)
+                await fresh_model_view(20)
                 forgotten = await speak_case("memory_forget", "retire the preference without posting an acknowledgement", [
                     (ALICE, "alice", f"@{bot_username} 把我咖啡加糖的那条偏好忘掉，别再记这件事，不用回复。"),
                 ], 20)
@@ -414,16 +432,22 @@ async def main() -> int:
                     "other_member_does_not_finish_the_wait": unrelated["sends"] == 0,
                     "supplied_material_is_answered_once": material["sends"] == 1 and "Asia/Shanghai" in material["reply"],
                     "grounded_thanks_does_not_multiply_replies": grounded_thanks["sends"] <= 1,
+                    "temporary_detail_initially_stays_silent": temporary["sends"] == 0,
+                    "temporary_detail_stays_out_of_long_term_memory": not temporary["active_memories"] and not short_term["active_memories"],
+                    "short_term_context_retains_the_detail": "银杏-47" in short_term["reply"],
                     "explicit_preference_was_sourced": bool(original and original["certainty"] == "observed" and original["source_sequences"]),
                     "private_memory_store_stays_silent": remembered["sends"] == 0,
-                    "correction_revises_the_same_memory": bool(current and original and current["revision"] > original["revision"]),
+                    "correction_revises_the_same_memory": bool(current and original
+                        and _recalls_before(revised, "remember") and current["revision"] > original["revision"]),
                     "private_memory_correction_stays_silent": revised["sends"] == 0,
-                    "recall_links_the_current_revision": bool(current and recalled["reply"] and any(
-                        item["status"] == "sent" and item["memory_id"] == current["memory_id"]
-                        and item["memory_revision"] == current["revision"] for item in recalled["actions"])),
+                    "recall_links_the_current_revision": bool(current and recalled["reply"]
+                        and _recalls_before(recalled, "send_message") and any(
+                            item["status"] == "sent" and item["memory_id"] == current["memory_id"]
+                            and item["memory_revision"] == current["revision"] for item in recalled["actions"])),
                     "other_person_question_produced_reply": bool(stranger["reply"]),
-                    "forgotten_memory_leaves_active_recall": bool(original and not any(
-                        item["memory_id"] == original["memory_id"] for item in forgotten["active_memories"])),
+                    "forgotten_memory_leaves_active_recall": bool(original
+                        and _recalls_before(forgotten, "forget_memory") and not any(
+                            item["memory_id"] == original["memory_id"] for item in forgotten["active_memories"])),
                     "private_forget_stays_silent": forgotten["sends"] == 0,
                     "forgotten_memory_is_not_linked_as_current": bool(after_forget["reply"] and not any(
                         original and item["memory_id"] == original["memory_id"] for item in after_forget["actions"])),
@@ -432,6 +456,7 @@ async def main() -> int:
                     {"case": "context_correction", "question": "采用补充的 Linux crontab 上下文，给出适用的检查，没有继续套用 Kubernetes 吗？"},
                     {"case": "material_followup", "question": "只回答收到的配置值，沿用原问题，没有把 Bob 的另一项配置混进来吗？"},
                     {"case": "grounded_thanks", "question": "对已经完成的交流自然收尾，没有再追问已知背景或重复答案吗？"},
+                    {"case": "short_term_context", "question": "接住了本次对话中的临时代号，并遵守不长期保存的要求吗？"},
                     {"case": "memory_recall", "question": "自然说出修正后的半勺糖，没有编造亲密关系、暴露记忆 ID 或复述整段证据吗？"},
                     {"case": "memory_other_person", "question": "没有把 Alice 的偏好说成 Bob 的；缺少信息时具体澄清了吗？"},
                     {"case": "memory_after_forget", "question": "没有把退役偏好或审计历史重新说成当前习惯吗？"},
@@ -506,6 +531,7 @@ async def main() -> int:
                 "extended": args.extended,
                 "timing_scope": "forced scheduler pass plus real model and recording-only transport; excludes live polling/debounce and Telegram network",
                 "fresh_view_memory_cases": args.extended,
+                "long_term_memory_access": "explicit_recall",
                 "runtime_limits": {
                     "request_timeout": defaults.request_timeout,
                     "context_limit": defaults.context_limit,

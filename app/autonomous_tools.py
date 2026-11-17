@@ -721,12 +721,16 @@ def _valid_read_filters(arguments: Mapping[str, Any]) -> bool:
 
 
 class _RecallMemories(_BaseTool):
-    """Read sourced memories in this chat and topic; all supplied filters must match.
+    """Actively retrieve sourced long-term memories in this chat and topic.
 
-    Omit filters for important recent memories. In a follow-up, read the tool
-    receipt before relying on newly retrieved information or deciding to speak.
-    Inspect evidence, certainty and `needs_review`; inferred or outdated content
-    is not confirmed fact. Reading creates no message, wait or commitment.
+    Ordinary context contains recent dialogue and work, with no automatic memory
+    selection. Choose whether recall is useful; all supplied filters must match.
+    Omit filters for important recent memories. Read the tool receipt before
+    relying on its evidence. Check certainty, revision and `needs_review`;
+    inferred or outdated content is not confirmed fact. Recall searches active,
+    unexpired records; an empty result cannot establish that someone never said
+    something, and forgotten records are excluded. This creates no message,
+    wait or commitment.
     """
 
     name = "recall_memories"

@@ -239,11 +239,12 @@ verify the returned sequence rather than assuming a match.
 Retrieval uses literal case-folded words and CJK bigrams. Current memories are
 filtered and ranked within the bounded collection; history queries use escaped,
 parameterized SQLite LIKE. Ranking uses matches, importance, recency and stable
-ID, without embeddings or semantic retrieval. Automatic context selects at most
-six records and 6,000 characters by participants, literal text, source references
-and own interests/preferences. Items retain relevance, uncertainty, revisions
-and honest clipping; `memory_context` explains the selection. This supplies
-evidence, never a social decision. Missing context does not prove nothing happened.
+ID, without embeddings or semantic retrieval. Long-term records are retrieved
+only when the model calls `recall_memories`; `read_history` retrieves source
+events. Ordinary snapshots and tool continuations do not select or inject
+long-term memories. Recent dialogue and current work remain the model's working
+context. Retrieved items retain uncertainty, revisions, sources and honest
+clipping. Missing or empty results do not prove that nothing happened.
 
 Memory tool receipts, including IDs returned by writes, feed back to the **same
 workflow** for at most three further inference rounds and six executed reads.
@@ -262,8 +263,9 @@ Unknown/foreign IDs and revision conflicts reject explicitly; unjournaled calls
 do not invent committed journal rows. Old versions remain available to scoped
 operator inspection through `memory_history`.
 
-A memory-linked timer survives unrelated chat and restart, presenting the current
-memory for reconsideration; updating the same ID keeps the revisit armed.
+A memory-linked timer survives unrelated chat and restart, presenting the memory
+ID and current validity metadata; the model can recall its contents before deciding.
+Updating the same ID keeps the revisit armed.
 Forgetting or expiry cancels linked active waits and pending sends atomically.
 Source message edits mark dependent memories `needs_review` and cancel pending
 sends, retaining waits so the model can reconsider. Revision also cancels pending
