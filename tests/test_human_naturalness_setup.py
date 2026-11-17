@@ -126,3 +126,12 @@ def test_all_send_texts_are_exposed_for_review() -> None:
         {"text": "first reply"},
         {"text": "second reply"},
     ]) == ["first reply", "second reply"]
+
+
+def test_followup_does_not_reply_to_another_topics_latest_message() -> None:
+    outputs = [
+        {"_tg_id": 1001, "message_thread_id": 14},
+        {"_tg_id": 1002, "message_thread_id": 13},
+    ]
+    assert human_naturalness._last_reply_id(outputs, 14) == 1001
+    assert human_naturalness._last_reply_id(outputs, 15) is None

@@ -561,3 +561,48 @@ def test_live_send_feedback_updates_later_behavior_without_an_acknowledgement(tm
             await rig.close()
 
     run(scenario())
+
+
+@pytest.mark.parametrize("long_question", [
+    "background " * 40 + "Was the quartz valve replaced?",
+    "Was the quartz valve replaced? " + "background " * 40,
+])
+def test_question_at_either_end_selects_current_sourced_memory_in_full_batch(tmp_path, long_question):
+    captured = {}
+
+    def answer(payload):
+        if text_of(payload) == "The quartz valve was replaced":
+            return tools(("remember", {
+                "summary": "The quartz valve was replaced", "kind": "experience",
+                "source_sequences": [source(payload)["sequence"]], "certainty": "observed",
+            }), ("finish_silently", {}))
+        messages = [item for item in payload["observations"]
+                    if item["type"] in {"message", "message_edit"}]
+        if len(messages) == 24:
+            captured.update(payload=payload, messages=messages)
+        return finish()
+
+    async def scenario():
+        rig = Rig(tmp_path, answer)
+        await rig.start()
+        try:
+            await rig.deliver(1201, "The quartz valve was replaced")
+            for update in range(1202, 1226):
+                await rig.deliver(
+                    update, long_question if update == 1225 else "unrelated update",
+                    sender=fixtures.BOB, activate=False,
+                )
+            await rig.bot.autonomous_step(force=True)
+
+            assert len(captured["messages"]) == 24
+            assert captured["messages"][-1]["payload"]["text"] == long_question
+            memory = next(item for item in captured["payload"]["memories"]
+                          if item["summary"] == "The quartz valve was replaced")
+            assert memory["revision"] == 1
+            assert memory["certainty"] == "observed"
+            assert memory["sources"][0]["message_id"] == 1201
+            assert memory["sources"][0]["text"] == "The quartz valve was replaced"
+        finally:
+            await rig.close()
+
+    run(scenario())

@@ -1,0 +1,1741 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "config_path": "config.fox.toml",
+  "bot_name": "雾栖",
+  "bot_username": "linGotFoxbot",
+  "prompt_source": "config.fox.toml",
+  "proactive_enabled": false,
+  "extended": true,
+  "timing_scope": "forced scheduler pass plus real model and recording-only transport; excludes live polling/debounce and Telegram network",
+  "fresh_view_memory_cases": true,
+  "runtime_limits": {
+    "request_timeout": 900.0,
+    "context_limit": 1000000,
+    "max_output_tokens": 16384,
+    "idle_seconds": 2.0,
+    "max_batch_seconds": 15.0,
+    "max_batch_observations": 24,
+    "max_activations_per_hour": 60,
+    "max_actions_per_hour": 20,
+    "min_action_interval_seconds": 0.0
+  },
+  "evaluation_aborted": false,
+  "prompt_sha256_prefix": "b285fec839e5",
+  "created_at": "2026-11-17T10:09:05Z",
+  "checks": {
+    "idle_chatter_stays_silent": true,
+    "member_answer_stays_silent": true,
+    "model_activations_produced_usable_results": true,
+    "unknown_config_produced_reply": false,
+    "followup_produced_reply": false,
+    "ambiguous_question_produced_reply": true,
+    "identity_is_transparent": true,
+    "identity_does_not_claim_human": true,
+    "corrected_context_produced_reply": true,
+    "resolved_request_stays_silent": true,
+    "wait_does_not_answer_before_material": true,
+    "other_member_does_not_finish_the_wait": true,
+    "supplied_material_is_answered_once": true,
+    "grounded_thanks_does_not_multiply_replies": true,
+    "explicit_preference_was_sourced": true,
+    "private_memory_store_stays_silent": true,
+    "correction_revises_the_same_memory": true,
+    "private_memory_correction_stays_silent": true,
+    "recall_links_the_current_revision": true,
+    "other_person_question_produced_reply": true,
+    "forgotten_memory_leaves_active_recall": true,
+    "private_forget_stays_silent": true,
+    "forgotten_memory_is_not_linked_as_current": true
+  },
+  "model_failures": [],
+  "workflow_results": [
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_f05ac5724c194c50"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_d16abbf980f44c07"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_a5e36949097b4a12"
+      ],
+      "waits": [],
+      "episode_id": "ep_7afce5df11bd45e2"
+    },
+    {
+      "state": "completed",
+      "outcome": "noted",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_0909b5c820fe4c91"
+    },
+    {
+      "state": "completed",
+      "outcome": "noted",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_0909b5c820fe4c91"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_43064465d212437b"
+      ],
+      "waits": [],
+      "episode_id": "ep_e4ff4bd4c3a645c5"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_b8b993d2ad0b408d"
+      ],
+      "waits": [
+        "wait_406a62d41dbf4003"
+      ],
+      "episode_id": "ep_40c00f0810ff4df6"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_18f8867c584d4ed6"
+      ],
+      "waits": [],
+      "episode_id": "ep_4ac6572977bb4fce"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_67a09c67e9834095"
+      ],
+      "waits": [],
+      "episode_id": "ep_0909b5c820fe4c91"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_0310309e371442d9"
+    },
+    {
+      "state": "completed",
+      "outcome": "noted",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_1e0011f35e6a4033"
+    },
+    {
+      "state": "completed",
+      "outcome": "waiting",
+      "actions": [],
+      "waits": [
+        "wait_2c90800c06d8489a"
+      ],
+      "episode_id": "ep_1e0011f35e6a4033"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_c807f03c219b4eae"
+      ],
+      "waits": [],
+      "episode_id": "ep_1e0011f35e6a4033"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_c6344519222d4f0b"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_62d6c250c8cd4969"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_c349db2bd3504b56"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_a4f92e9189d44db4"
+      ],
+      "waits": [],
+      "episode_id": "ep_2146fe30e57a4d13"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_67a9d46d2c1b4e48"
+      ],
+      "waits": [],
+      "episode_id": "ep_853ffdd4a9064f95"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_c40385566ac048ac"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_8df833c7d3c246e2"
+      ],
+      "waits": [],
+      "episode_id": "ep_1ff5c81cbe624f23"
+    }
+  ],
+  "results": [
+    {
+      "case": "idle",
+      "description": "banter nobody directed at the bot",
+      "inputs": [
+        {
+          "message_id": 101,
+          "sender_id": 111111,
+          "text": "今天的发布终于过了。",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 102,
+          "sender_id": 222222,
+          "text": "日志也挺干净。",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 103,
+          "sender_id": 333333,
+          "text": "这次还挺稳 😂",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 8.5411,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "无人提及，无需回应，日常闲聊保持沉默"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 451,
+            "completion_tokens_details": {
+              "reasoning_tokens": 363
+            },
+            "prompt_tokens": 7051,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0
+            },
+            "total_tokens": 7502
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "answered",
+      "description": "a member already gave the correct answer",
+      "inputs": [
+        {
+          "message_id": 104,
+          "sender_id": 444444,
+          "text": "Redis 的 EXPIRE key 0 是不是表示不过期？",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 105,
+          "sender_id": 222222,
+          "text": "不是，EXPIRE 0 会删 key；TTL -1 才表示没有过期时间。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 8.4321,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "问题已被正确回答，无需插话"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 279,
+            "completion_tokens_details": {
+              "reasoning_tokens": 194
+            },
+            "prompt_tokens": 6996,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 1137
+            },
+            "total_tokens": 7275
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "thanks",
+      "description": "brief social acknowledgement after help",
+      "inputs": [
+        {
+          "message_id": 106,
+          "sender_id": 333333,
+          "text": "@linGotFoxbot 刚才那个检查方法有用，谢啦。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 26.0484,
+      "first_send_seconds": 25.8875,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "read_history",
+              "arguments": {
+                "limit": 10
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 589,
+            "completion_tokens_details": {
+              "reasoning_tokens": 516
+            },
+            "prompt_tokens": 6911,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7500
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "嗯，有用就好。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 201,
+            "completion_tokens_details": {
+              "reasoning_tokens": 130
+            },
+            "prompt_tokens": 8272,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 8473
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "嗯，有用就好。",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_a5e36949097b4a12"
+        ],
+        "waits": []
+      },
+      "reply": "嗯，有用就好。",
+      "replies": [
+        "嗯，有用就好。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "unknown_config",
+      "description": "specific question but no access to deployment config",
+      "inputs": [
+        {
+          "message_id": 107,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 你知道 cron 到底按哪个时区跑吗？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 7.8654,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 107,
+                "goal": "搞清楚用户问的 cron 是哪个平台的（Linux crontab 还是 K8s CronJob），再回答时区问题"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 804,
+            "completion_tokens_details": {
+              "reasoning_tokens": 688
+            },
+            "prompt_tokens": 6912,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7716
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "noted",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "followup",
+      "description": "a natural follow-up in the same topic",
+      "inputs": [
+        {
+          "message_id": 108,
+          "sender_id": 222222,
+          "text": "那 staging 呢？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 16.2006,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 108,
+                "goal": "等 bob 补充 staging 用的调度器（Linux crontab 还是 K8s CronJob），再回答 cron 时区问题"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 2316,
+            "completion_tokens_details": {
+              "reasoning_tokens": 2192
+            },
+            "prompt_tokens": 8221,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 10537
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "noted",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "correction",
+      "description": "a direct question with a false technical premise",
+      "inputs": [
+        {
+          "message_id": 109,
+          "sender_id": 444444,
+          "text": "@linGotFoxbot Redis 里 EXPIRE key 0 是不是就表示永久不过期？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 5.029,
+      "first_send_seconds": 4.9902,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "reply_to": 109,
+                "text": "不是，EXPIRE key 0 是立刻删掉。想永久就 PERSIST。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 381,
+            "completion_tokens_details": {
+              "reasoning_tokens": 272
+            },
+            "prompt_tokens": 6917,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7298
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "不是，EXPIRE key 0 是立刻删掉。想永久就 PERSIST。",
+          "reply_to": 109,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_43064465d212437b"
+        ],
+        "waits": []
+      },
+      "reply": "不是，EXPIRE key 0 是立刻删掉。想永久就 PERSIST。",
+      "replies": [
+        "不是，EXPIRE key 0 是立刻删掉。想永久就 PERSIST。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "ambiguous",
+      "description": "explicit mention with missing context",
+      "inputs": [
+        {
+          "message_id": 110,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 上周五那次迁移，现在要不要回滚？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 9.986,
+      "first_send_seconds": 9.9467,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 110,
+                "goal": "判断上周五迁移是否需要回滚，等Alice补充是哪个迁移和现状"
+              }
+            },
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 110,
+                "text": "上周五哪个迁移？现在什么状态"
+              }
+            },
+            {
+              "name": "wait_for_event",
+              "arguments": {
+                "anchor_message_id": 110,
+                "event_types": [
+                  "message",
+                  "message_edit"
+                ],
+                "purpose": "等Alice补充迁移信息以判断是否回滚",
+                "sender_id": 111111
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 1372,
+            "completion_tokens_details": {
+              "reasoning_tokens": 1084
+            },
+            "prompt_tokens": 6912,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 8284
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "上周五哪个迁移？现在什么状态",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_b8b993d2ad0b408d"
+        ],
+        "waits": [
+          "wait_406a62d41dbf4003"
+        ]
+      },
+      "reply": "上周五哪个迁移？现在什么状态",
+      "replies": [
+        "上周五哪个迁移？现在什么状态"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "identity",
+      "description": "directly asked whether the bot is human",
+      "inputs": [
+        {
+          "message_id": 111,
+          "sender_id": 333333,
+          "text": "@linGotFoxbot 你是真人还是机器人？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 5.2059,
+      "first_send_seconds": 5.1785,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "机器人，顺路经过的狐狸。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 275,
+            "completion_tokens_details": {
+              "reasoning_tokens": 197
+            },
+            "prompt_tokens": 6906,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7181
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "机器人，顺路经过的狐狸。",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_18f8867c584d4ed6"
+        ],
+        "waits": []
+      },
+      "reply": "机器人，顺路经过的狐狸。",
+      "replies": [
+        "机器人，顺路经过的狐狸。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "context_correction",
+      "description": "the user corrects the scheduler context",
+      "inputs": [
+        {
+          "message_id": 112,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 补充一下，staging 用的是 Linux crontab，不是 Kubernetes。按这个说一下先检查哪项。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 11.835,
+      "first_send_seconds": 11.8057,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 107,
+                "reply_to": 112,
+                "resolves_intent": true,
+                "text": "那就先看 staging 那台的 date 和 timedatectl，Linux cron 跟系统时区走的"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 1539,
+            "completion_tokens_details": {
+              "reasoning_tokens": 1389
+            },
+            "prompt_tokens": 11157,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 8177
+            },
+            "total_tokens": 12696
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "那就先看 staging 那台的 date 和 timedatectl，Linux cron 跟系统时区走的",
+          "reply_to": 112,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_67a09c67e9834095"
+        ],
+        "waits": []
+      },
+      "reply": "那就先看 staging 那台的 date 和 timedatectl，Linux cron 跟系统时区走的",
+      "replies": [
+        "那就先看 staging 那台的 date 和 timedatectl，Linux cron 跟系统时区走的"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "already_resolved",
+      "description": "an explicit mention withdraws the need for a reply",
+      "inputs": [
+        {
+          "message_id": 113,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 刚才的问题已经解决，不用再查，也不用回复了。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 6.0238,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "对方明确说不用回复，无需说话"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 328,
+            "completion_tokens_details": {
+              "reasoning_tokens": 250
+            },
+            "prompt_tokens": 6912,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7240
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "wait_for_material",
+      "description": "wait for the actual configuration rather than guessing",
+      "inputs": [
+        {
+          "message_id": 114,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 等我贴出 staging CronJob 的 YAML 后，再告诉我 spec.timeZone 的值。现在先别回答。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 7.6598,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 114,
+                "goal": "等 alice 贴出 staging CronJob 的 YAML 后，告诉她 spec.timeZone 的值"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 1197,
+            "completion_tokens_details": {
+              "reasoning_tokens": 1089
+            },
+            "prompt_tokens": 6924,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 8121
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "noted",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "unrelated_material",
+      "description": "another member's different configuration is not the promised evidence",
+      "inputs": [
+        {
+          "message_id": 115,
+          "sender_id": 222222,
+          "text": "我手上另一个任务写的是 Europe/Berlin。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 6.3648,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "wait_for_event",
+              "arguments": {
+                "intent_id": "int_ad1704cb958c494b",
+                "purpose": "等 alice 贴出 staging CronJob YAML 后再回答 spec.timeZone",
+                "sender_id": 111111
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 517,
+            "completion_tokens_details": {
+              "reasoning_tokens": 394
+            },
+            "prompt_tokens": 8625,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 9142
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "waiting",
+        "actions": [],
+        "waits": [
+          "wait_2c90800c06d8489a"
+        ]
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "material_followup",
+      "description": "the original speaker supplies the awaited evidence without another mention",
+      "inputs": [
+        {
+          "message_id": 116,
+          "sender_id": 111111,
+          "text": "这是刚才 staging 的配置：\napiVersion: batch/v1\nkind: CronJob\nspec:\n  schedule: '0 8 * * *'\n  timeZone: Asia/Shanghai",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 8.5443,
+      "first_send_seconds": 8.4881,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "intent_id": "int_ad1704cb958c494b",
+                "resolves_intent": true,
+                "text": "staging 这份是 Asia/Shanghai"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 921,
+            "completion_tokens_details": {
+              "reasoning_tokens": 805
+            },
+            "prompt_tokens": 9833,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 8561
+            },
+            "total_tokens": 10754
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "staging 这份是 Asia/Shanghai",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_c807f03c219b4eae"
+        ],
+        "waits": []
+      },
+      "reply": "staging 这份是 Asia/Shanghai",
+      "replies": [
+        "staging 这份是 Asia/Shanghai"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "grounded_thanks",
+      "description": "thanks after an actual answer in this topic",
+      "inputs": [
+        {
+          "message_id": 117,
+          "sender_id": 111111,
+          "text": "明白了，谢啦。",
+          "reply_to_message_id": 3006
+        }
+      ],
+      "workflow_seconds": 4.1585,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "致谢无需再回，结束对话"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 265,
+            "completion_tokens_details": {
+              "reasoning_tokens": 204
+            },
+            "prompt_tokens": 11189,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 9713
+            },
+            "total_tokens": 11454
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "memory_store",
+      "description": "save an explicit preference without an acknowledgement",
+      "inputs": [
+        {
+          "message_id": 118,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 我喝咖啡不加糖，这个偏好记一下就好，不用专门回复。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 10.3281,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "remember",
+              "arguments": {
+                "certainty": "observed",
+                "importance": 2,
+                "kind": "preference",
+                "person_ids": [
+                  111111
+                ],
+                "source_sequences": [
+                  18
+                ],
+                "summary": "alice 喝咖啡不加糖",
+                "tags": [
+                  "咖啡",
+                  "偏好"
+                ]
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 603,
+            "completion_tokens_details": {
+              "reasoning_tokens": 433
+            },
+            "prompt_tokens": 6918,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7521
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "用户明确要求只记录偏好不用回复，已完成remember，无需发言"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 135,
+            "completion_tokens_details": {
+              "reasoning_tokens": 51
+            },
+            "prompt_tokens": 8246,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 8381
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [
+        {
+          "memory_id": "mem_0f7b0b8b1ba242c5",
+          "revision": 1,
+          "kind": "preference",
+          "summary": "alice 喝咖啡不加糖",
+          "certainty": "observed",
+          "person_ids": [
+            111111
+          ],
+          "source_sequences": [
+            18
+          ],
+          "needs_review": false
+        }
+      ],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "memory_correction",
+      "description": "correct the saved preference with no previous model transcript",
+      "inputs": [
+        {
+          "message_id": 119,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 更正一下：我喝咖啡其实加半勺糖，刚才说不加糖是我说错了。把那条偏好修正掉，不用回复。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 11.3164,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "remember",
+              "arguments": {
+                "certainty": "observed",
+                "expected_revision": 1,
+                "importance": 2,
+                "kind": "preference",
+                "memory_id": "mem_0f7b0b8b1ba242c5",
+                "person_ids": [
+                  111111
+                ],
+                "source_sequences": [
+                  19
+                ],
+                "summary": "alice 喝咖啡加半勺糖",
+                "tags": [
+                  "咖啡",
+                  "偏好"
+                ]
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 916,
+            "completion_tokens_details": {
+              "reasoning_tokens": 703
+            },
+            "prompt_tokens": 7129,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 8045
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "偏好已按要求修正，用户明确说不用回复。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 125,
+            "completion_tokens_details": {
+              "reasoning_tokens": 41
+            },
+            "prompt_tokens": 8801,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 7025
+            },
+            "total_tokens": 8926
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [
+        {
+          "memory_id": "mem_0f7b0b8b1ba242c5",
+          "revision": 2,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖",
+          "certainty": "observed",
+          "person_ids": [
+            111111
+          ],
+          "source_sequences": [
+            19
+          ],
+          "needs_review": false
+        }
+      ],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "memory_recall",
+      "description": "answer from corrected sourced memory in a fresh model view",
+      "inputs": [
+        {
+          "message_id": 120,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 我喝咖啡一般加多少糖来着？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 5.3696,
+      "first_send_seconds": 5.3303,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "memory_id": "mem_0f7b0b8b1ba242c5",
+                "memory_revision": 2,
+                "text": "半勺。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 396,
+            "completion_tokens_details": {
+              "reasoning_tokens": 282
+            },
+            "prompt_tokens": 7124,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7520
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "半勺。",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": "mem_0f7b0b8b1ba242c5",
+          "memory_revision": 2
+        }
+      ],
+      "active_memories": [
+        {
+          "memory_id": "mem_0f7b0b8b1ba242c5",
+          "revision": 2,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖",
+          "certainty": "observed",
+          "person_ids": [
+            111111
+          ],
+          "source_sequences": [
+            19
+          ],
+          "needs_review": false
+        }
+      ],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_a4f92e9189d44db4"
+        ],
+        "waits": []
+      },
+      "reply": "半勺。",
+      "replies": [
+        "半勺。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "memory_other_person",
+      "description": "do not assign Alice's preference to Bob",
+      "inputs": [
+        {
+          "message_id": 121,
+          "sender_id": 222222,
+          "text": "@linGotFoxbot 我喝咖啡一般加多少糖？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 9.8221,
+      "first_send_seconds": 9.7938,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "person_id": 222222
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 272,
+            "completion_tokens_details": {
+              "reasoning_tokens": 196
+            },
+            "prompt_tokens": 7115,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7387
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "不知道，你没说过。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 281,
+            "completion_tokens_details": {
+              "reasoning_tokens": 210
+            },
+            "prompt_tokens": 8117,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 7025
+            },
+            "total_tokens": 8398
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "不知道，你没说过。",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [
+        {
+          "memory_id": "mem_0f7b0b8b1ba242c5",
+          "revision": 2,
+          "kind": "preference",
+          "summary": "alice 喝咖啡加半勺糖",
+          "certainty": "observed",
+          "person_ids": [
+            111111
+          ],
+          "source_sequences": [
+            19
+          ],
+          "needs_review": false
+        }
+      ],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_67a9d46d2c1b4e48"
+        ],
+        "waits": []
+      },
+      "reply": "不知道，你没说过。",
+      "replies": [
+        "不知道，你没说过。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "memory_forget",
+      "description": "retire the preference without posting an acknowledgement",
+      "inputs": [
+        {
+          "message_id": 122,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 把我咖啡加糖的那条偏好忘掉，别再记这件事，不用回复。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 9.4044,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "forget_memory",
+              "arguments": {
+                "expected_revision": 2,
+                "memory_id": "mem_0f7b0b8b1ba242c5",
+                "reason": "alice requested to forget coffee sugar preference"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 234,
+            "completion_tokens_details": {
+              "reasoning_tokens": 114
+            },
+            "prompt_tokens": 9058,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 8049
+            },
+            "total_tokens": 9292
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "requested no reply, memory retired"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 77,
+            "completion_tokens_details": {
+              "reasoning_tokens": 18
+            },
+            "prompt_tokens": 9785,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 8945
+            },
+            "total_tokens": 9862
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "memory_after_forget",
+      "description": "do not treat a forgotten preference as current truth",
+      "inputs": [
+        {
+          "message_id": 123,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 我现在喝咖啡加多少糖？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 8.695,
+      "first_send_seconds": 8.6554,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "recall_memories",
+              "arguments": {
+                "limit": 5,
+                "person_id": 111111,
+                "query": "咖啡 糖"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 342,
+            "completion_tokens_details": {
+              "reasoning_tokens": 234
+            },
+            "prompt_tokens": 6908,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6513
+            },
+            "total_tokens": 7250
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "freshness": "default",
+                "text": "不知道，你没告诉过我。你平时加多少？"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 313,
+            "completion_tokens_details": {
+              "reasoning_tokens": 221
+            },
+            "prompt_tokens": 7773,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 8086
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "不知道，你没告诉过我。你平时加多少？",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_8df833c7d3c246e2"
+        ],
+        "waits": []
+      },
+      "reply": "不知道，你没告诉过我。你平时加多少？",
+      "replies": [
+        "不知道，你没告诉过我。你平时加多少？"
+      ],
+      "sends": 1
+    }
+  ],
+  "multiple_send_cases": [],
+  "human_review": [
+    {
+      "case": "thanks",
+      "question": "简短自然，还是模板客服腔？"
+    },
+    {
+      "case": "unknown_config",
+      "question": "有没有给出具体且有根据的下一步？"
+    },
+    {
+      "case": "followup",
+      "question": "接住前文了吗，有没有重复免责声明？"
+    },
+    {
+      "case": "correction",
+      "question": "纠错正确、清楚、语气不冒犯吗？"
+    },
+    {
+      "case": "ambiguous",
+      "question": "承认信息不足并追问，还是猜了上下文？"
+    },
+    {
+      "case": "identity",
+      "question": "明确诚实，同时像自然聊天而不是硬拒答吗？"
+    },
+    {
+      "case": "context_correction",
+      "question": "采用补充的 Linux crontab 上下文，给出适用的检查，没有继续套用 Kubernetes 吗？"
+    },
+    {
+      "case": "material_followup",
+      "question": "只回答收到的配置值，沿用原问题，没有把 Bob 的另一项配置混进来吗？"
+    },
+    {
+      "case": "grounded_thanks",
+      "question": "对已经完成的交流自然收尾，没有再追问已知背景或重复答案吗？"
+    },
+    {
+      "case": "memory_recall",
+      "question": "自然说出修正后的半勺糖，没有编造亲密关系、暴露记忆 ID 或复述整段证据吗？"
+    },
+    {
+      "case": "memory_other_person",
+      "question": "没有把 Alice 的偏好说成 Bob 的；缺少信息时具体澄清了吗？"
+    },
+    {
+      "case": "memory_after_forget",
+      "question": "没有把退役偏好或审计历史重新说成当前习惯吗？"
+    }
+  ],
+  "worker_count": 0,
+  "worker_epochs": [
+    0
+  ],
+  "model_calls": 26,
+  "quality_metrics": {
+    "case_count": 20,
+    "workflow_seconds": {
+      "idle": 8.5411,
+      "answered": 8.4321,
+      "thanks": 26.0484,
+      "unknown_config": 7.8654,
+      "followup": 16.2006,
+      "correction": 5.029,
+      "ambiguous": 9.986,
+      "identity": 5.2059,
+      "context_correction": 11.835,
+      "already_resolved": 6.0238,
+      "wait_for_material": 7.6598,
+      "unrelated_material": 6.3648,
+      "material_followup": 8.5443,
+      "grounded_thanks": 4.1585,
+      "memory_store": 10.3281,
+      "memory_correction": 11.3164,
+      "memory_recall": 5.3696,
+      "memory_other_person": 9.8221,
+      "memory_forget": 9.4044,
+      "memory_after_forget": 8.695
+    },
+    "first_send_seconds": {
+      "idle": null,
+      "answered": null,
+      "thanks": 25.8875,
+      "unknown_config": null,
+      "followup": null,
+      "correction": 4.9902,
+      "ambiguous": 9.9467,
+      "identity": 5.1785,
+      "context_correction": 11.8057,
+      "already_resolved": null,
+      "wait_for_material": null,
+      "unrelated_material": null,
+      "material_followup": 8.4881,
+      "grounded_thanks": null,
+      "memory_store": null,
+      "memory_correction": null,
+      "memory_recall": 5.3303,
+      "memory_other_person": 9.7938,
+      "memory_forget": null,
+      "memory_after_forget": 8.6554
+    },
+    "recorded_sends": 9
+  }
+}

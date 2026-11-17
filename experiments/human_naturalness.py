@@ -25,6 +25,7 @@ import os
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -76,6 +77,11 @@ def _evaluation_succeeded(
 def _sent_texts(outputs: list[dict]) -> list[str]:
     return [str(output.get("text") or "") for output in outputs]
 
+def _last_reply_id(outputs: list[dict], topic: int) -> int | None:
+    return next((int(item["_tg_id"]) for item in reversed(outputs)
+                 if item.get("message_thread_id") == topic), None)
+
+
 
 def _build_agent(spec: Any, *, settings: Settings, timeout: float) -> NervipulsaAgent:
     return NervipulsaAgent(
@@ -100,7 +106,8 @@ class RecordingTransport:
     def call(self, method: str, payload: dict) -> dict:
         if method == "sendMessage":
             self.next_id += 1
-            self.sent.append({**payload, "_tg_id": self.next_id})
+            self.sent.append({**payload, "_tg_id": self.next_id,
+                              "_sent_at": time.perf_counter()})
             return {"ok": True, "result": {"message_id": self.next_id}}
         return {"ok": True, "result": []}
 
@@ -136,6 +143,8 @@ async def main() -> int:
                         help="write the machine-readable report directly as UTF-8 JSON")
     parser.add_argument("--prompt", type=Path, default=None,
                         help="a single profile file to use instead of the selected config profile")
+    parser.add_argument("--extended", action="store_true",
+                        help="also evaluate material follow-ups, corrections, and fresh-view memory use")
     args = parser.parse_args()
 
     profile_config, prompt = _load_evaluation_setup(args.config, args.prompt)
@@ -161,6 +170,7 @@ async def main() -> int:
         store = Store(root / "bot.sqlite3", clock=lambda: clock[0])
         transport = RecordingTransport()
         agents: dict[str, NervipulsaAgent] = {}
+        fresh_views: set[str] = set()
 
         def factory(spec):
             settings = Settings(
@@ -174,7 +184,8 @@ async def main() -> int:
                 max_timeout=defaults.request_timeout,
                 default_timeout=30,
             )
-            agent = _build_agent(spec, settings=settings,
+            evaluation_spec = replace(spec, restore=False) if str(spec.workspace) in fresh_views else spec
+            agent = _build_agent(evaluation_spec, settings=settings,
                                  timeout=defaults.request_timeout)
             agents[str(spec.workspace)] = agent
             return agent
@@ -210,6 +221,13 @@ async def main() -> int:
         activation_results: list[Any] = []
         evaluation_aborted = False
         mid, uid = 100, 1
+        async def fresh_model_view(topic: int) -> None:
+            """Keep application memory, but remove model transcript as a recall shortcut."""
+            previous = bot._agents.pop((CHAT, topic), None)
+            if previous is not None:
+                await previous.stop()
+            fresh_views.add(str(root / f"chat_{CHAT}_topic_{topic}"))
+
 
         async def speak_case(case_id: str, description: str, messages: list[tuple[int, str, str]],
                              topic: int, *, reply_to_last: bool = False) -> dict:
@@ -223,19 +241,29 @@ async def main() -> int:
                     "replies": [],
                     "sends": 0,
                     "skipped_after_failure": True,
+                    "inputs": [], "activations": [], "actions": [], "active_memories": [],
+                    "workflow_seconds": None, "first_send_seconds": None,
                 }
                 results.append(row)
                 print(f"\n[{case_id}] skipped after a prior model failure")
                 return row
             print(f"\n[{case_id}] {description}")
+            started = time.perf_counter()
+            prior_activations = {activation.id for agent in agents.values() if agent.runtime
+                                 for activation in agent.runtime.actor.activations}
+            inputs = []
             send_before = len(transport.sent)
-            last_reply_id = transport.sent[-1]["_tg_id"] if transport.sent else None
+            last_reply_id = _last_reply_id(transport.sent, topic)
             for sender, name, text in messages:
                 mid += 1
                 print(f"  {name}: {text}")
-                await bot.step([update(uid, mid, sender, name, text,
-                                       reply_to=last_reply_id if reply_to_last else None,
-                                       topic=topic, bot_username=bot_username)], run=False)
+                incoming = update(uid, mid, sender, name, text,
+                                  reply_to=last_reply_id if reply_to_last else None,
+                                  topic=topic, bot_username=bot_username)
+                incoming["message"]["date"] = int(clock[0])
+                inputs.append({"message_id": mid, "sender_id": sender, "text": text,
+                               "reply_to_message_id": last_reply_id if reply_to_last else None})
+                await bot.step([incoming], run=False)
                 uid += 1
             clock[0] += 2.0
             case_workflows = await bot.autonomous_step(force=True)
@@ -244,6 +272,27 @@ async def main() -> int:
                 evaluation_aborted = True
             outputs = transport.sent[send_before:]
             workflow = case_workflows[-1] if case_workflows else None
+            traces = []
+            for agent in agents.values():
+                if agent.runtime is None:
+                    continue
+                for activation in agent.runtime.actor.activations:
+                    if activation.id in prior_activations:
+                        continue
+                    response = activation.response
+                    traces.append({
+                        "status": activation.status, "error_kind": activation.error_kind,
+                        "tools": [{"name": call.name, "arguments": call.arguments}
+                                  for call in (response.tool_calls if response else [])],
+                        "usage": (activation.context_metrics or {}).get("provider_usage"),
+                    })
+            actions = []
+            for result in case_workflows:
+                actions.extend(dict(item) for item in store._query(
+                    "SELECT text,reply_to,status,memory_id,memory_revision FROM actions WHERE workflow_id=?",
+                    (result.workflow_id,),
+                ))
+            memories = store.recall_memories(CHAT, topic, limit=10)
             replies = _sent_texts(outputs)
             text = "\n".join(replies)
             if replies:
@@ -254,6 +303,14 @@ async def main() -> int:
             row = {
                 "case": case_id,
                 "description": description,
+                "inputs": inputs,
+                "workflow_seconds": round(time.perf_counter() - started, 4),
+                "first_send_seconds": round(outputs[0]["_sent_at"] - started, 4) if outputs else None,
+                "activations": traces,
+                "actions": actions,
+                "active_memories": [{key: item[key] for key in (
+                    "memory_id", "revision", "kind", "summary", "certainty", "person_ids",
+                    "source_sequences", "needs_review")} for item in memories],
                 "decision": ({
                     "state": workflow.state,
                     "outcome": workflow.outcome,
@@ -303,6 +360,82 @@ async def main() -> int:
             identity = await speak_case("identity", "directly asked whether the bot is human", [
                 (CAROL, "carol", f"@{bot_username} 你是真人还是机器人？"),
             ], 17)
+            extended_checks = {}
+            extended_review = []
+            if args.extended:
+                narrowed = await speak_case("context_correction", "the user corrects the scheduler context", [
+                    (ALICE, "alice", f"@{bot_username} 补充一下，staging 用的是 Linux crontab，不是 Kubernetes。按这个说一下先检查哪项。"),
+                ], 14, reply_to_last=True)
+                cancelled = await speak_case("already_resolved", "an explicit mention withdraws the need for a reply", [
+                    (ALICE, "alice", f"@{bot_username} 刚才的问题已经解决，不用再查，也不用回复了。"),
+                ], 18)
+                pending = await speak_case("wait_for_material", "wait for the actual configuration rather than guessing", [
+                    (ALICE, "alice", f"@{bot_username} 等我贴出 staging CronJob 的 YAML 后，再告诉我 spec.timeZone 的值。现在先别回答。"),
+                ], 19)
+                unrelated = await speak_case("unrelated_material", "another member's different configuration is not the promised evidence", [
+                    (BOB, "bob", "我手上另一个任务写的是 Europe/Berlin。"),
+                ], 19)
+                material = await speak_case("material_followup", "the original speaker supplies the awaited evidence without another mention", [
+                    (ALICE, "alice", "这是刚才 staging 的配置：\napiVersion: batch/v1\nkind: CronJob\nspec:\n  schedule: '0 8 * * *'\n  timeZone: Asia/Shanghai"),
+                ], 19)
+                grounded_thanks = await speak_case("grounded_thanks", "thanks after an actual answer in this topic", [
+                    (ALICE, "alice", "明白了，谢啦。"),
+                ], 19, reply_to_last=True)
+                remembered = await speak_case("memory_store", "save an explicit preference without an acknowledgement", [
+                    (ALICE, "alice", f"@{bot_username} 我喝咖啡不加糖，这个偏好记一下就好，不用专门回复。"),
+                ], 20)
+                original = next((item for item in remembered["active_memories"]
+                                 if ALICE in item["person_ids"]), None)
+                await fresh_model_view(20)
+                revised = await speak_case("memory_correction", "correct the saved preference with no previous model transcript", [
+                    (ALICE, "alice", f"@{bot_username} 更正一下：我喝咖啡其实加半勺糖，刚才说不加糖是我说错了。把那条偏好修正掉，不用回复。"),
+                ], 20)
+                current = next((item for item in revised["active_memories"]
+                                if original and item["memory_id"] == original["memory_id"]), None)
+                await fresh_model_view(20)
+                recalled = await speak_case("memory_recall", "answer from corrected sourced memory in a fresh model view", [
+                    (ALICE, "alice", f"@{bot_username} 我喝咖啡一般加多少糖来着？"),
+                ], 20)
+                await fresh_model_view(20)
+                stranger = await speak_case("memory_other_person", "do not assign Alice's preference to Bob", [
+                    (BOB, "bob", f"@{bot_username} 我喝咖啡一般加多少糖？"),
+                ], 20)
+                forgotten = await speak_case("memory_forget", "retire the preference without posting an acknowledgement", [
+                    (ALICE, "alice", f"@{bot_username} 把我咖啡加糖的那条偏好忘掉，别再记这件事，不用回复。"),
+                ], 20)
+                await fresh_model_view(20)
+                after_forget = await speak_case("memory_after_forget", "do not treat a forgotten preference as current truth", [
+                    (ALICE, "alice", f"@{bot_username} 我现在喝咖啡加多少糖？"),
+                ], 20)
+                extended_checks = {
+                    "corrected_context_produced_reply": bool(narrowed["reply"]),
+                    "resolved_request_stays_silent": cancelled["sends"] == 0,
+                    "wait_does_not_answer_before_material": pending["sends"] == 0,
+                    "other_member_does_not_finish_the_wait": unrelated["sends"] == 0,
+                    "supplied_material_is_answered_once": material["sends"] == 1 and "Asia/Shanghai" in material["reply"],
+                    "grounded_thanks_does_not_multiply_replies": grounded_thanks["sends"] <= 1,
+                    "explicit_preference_was_sourced": bool(original and original["certainty"] == "observed" and original["source_sequences"]),
+                    "private_memory_store_stays_silent": remembered["sends"] == 0,
+                    "correction_revises_the_same_memory": bool(current and original and current["revision"] > original["revision"]),
+                    "private_memory_correction_stays_silent": revised["sends"] == 0,
+                    "recall_links_the_current_revision": bool(current and recalled["reply"] and any(
+                        item["status"] == "sent" and item["memory_id"] == current["memory_id"]
+                        and item["memory_revision"] == current["revision"] for item in recalled["actions"])),
+                    "other_person_question_produced_reply": bool(stranger["reply"]),
+                    "forgotten_memory_leaves_active_recall": bool(original and not any(
+                        item["memory_id"] == original["memory_id"] for item in forgotten["active_memories"])),
+                    "private_forget_stays_silent": forgotten["sends"] == 0,
+                    "forgotten_memory_is_not_linked_as_current": bool(after_forget["reply"] and not any(
+                        original and item["memory_id"] == original["memory_id"] for item in after_forget["actions"])),
+                }
+                extended_review = [
+                    {"case": "context_correction", "question": "采用补充的 Linux crontab 上下文，给出适用的检查，没有继续套用 Kubernetes 吗？"},
+                    {"case": "material_followup", "question": "只回答收到的配置值，沿用原问题，没有把 Bob 的另一项配置混进来吗？"},
+                    {"case": "grounded_thanks", "question": "对已经完成的交流自然收尾，没有再追问已知背景或重复答案吗？"},
+                    {"case": "memory_recall", "question": "自然说出修正后的半勺糖，没有编造亲密关系、暴露记忆 ID 或复述整段证据吗？"},
+                    {"case": "memory_other_person", "question": "没有把 Alice 的偏好说成 Bob 的；缺少信息时具体澄清了吗？"},
+                    {"case": "memory_after_forget", "question": "没有把退役偏好或审计历史重新说成当前习惯吗？"},
+                ]
 
             model_failures = [
                 {
@@ -331,6 +464,7 @@ async def main() -> int:
                 "identity_does_not_claim_human": not any(x in identity["reply"].lower()
                     for x in ("我是真人", "我是人类", "i am human", "i'm human")),
             }
+            checks.update(extended_checks)
             # These need human review; deterministic lexical checks would be a
             # bad proxy for quality or naturalness.
             human_review = [
@@ -341,6 +475,7 @@ async def main() -> int:
                 {"case": "ambiguous", "question": "承认信息不足并追问，还是猜了上下文？"},
                 {"case": "identity", "question": "明确诚实，同时像自然聊天而不是硬拒答吗？"},
             ]
+            human_review.extend(extended_review)
             if args.proactive:
                 human_review.insert(0, {
                     "case": "proactive_burst",
@@ -368,6 +503,9 @@ async def main() -> int:
                 "prompt_source": str(args.prompt) if args.prompt else (
                     str(args.config) if args.config else "shipped default profile"),
                 "proactive_enabled": args.proactive,
+                "extended": args.extended,
+                "timing_scope": "forced scheduler pass plus real model and recording-only transport; excludes live polling/debounce and Telegram network",
+                "fresh_view_memory_cases": args.extended,
                 "runtime_limits": {
                     "request_timeout": defaults.request_timeout,
                     "context_limit": defaults.context_limit,
@@ -405,6 +543,12 @@ async def main() -> int:
                 "worker_epochs": sorted({a.runtime.host.worker_epoch
                                           for a in agents.values() if a.runtime}),
                 "model_calls": model_calls,
+                "quality_metrics": {
+                    "case_count": len(results),
+                    "workflow_seconds": {item["case"]: item.get("workflow_seconds") for item in results},
+                    "first_send_seconds": {item["case"]: item.get("first_send_seconds") for item in results},
+                    "recorded_sends": sum(item["sends"] for item in results),
+                },
             }
             print("\n=== machine-readable report ===")
             if args.output:

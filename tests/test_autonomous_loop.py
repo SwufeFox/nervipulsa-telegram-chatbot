@@ -136,6 +136,32 @@ def test_unmentioned_message_reaches_the_model_and_its_tool_sends(tmp_path):
     run(scenario())
 
 
+def test_full_observation_batch_reaches_model_without_waiting_for_idle_or_age(tmp_path):
+    async def scenario():
+        bot, store, _, _, agent = build(
+            tmp_path, lambda request: tool_call("finish_silently", reason="noted"),
+            idle_seconds=60.0,
+        )
+        try:
+            bot.autonomy.max_batch_observations = 2
+            bot.autonomy.max_batch_seconds = 120.0
+            await bot.start()
+            await bot.step([update(mid=701, text="first observation")])
+            assert await bot.autonomous_step(force=False) == []
+            assert agent.runtime is None
+            await bot.step([update(mid=702, text="second observation")])
+
+            results = await bot.autonomous_step(force=False)
+
+            assert results and results[0].outcome == "silent"
+            assert isinstance(agent.runtime, Runtime), "full batch did not reach the model"
+            assert len(agent.runtime.actor.activations) == 1
+        finally:
+            await bot.stop()
+            store.close()
+    run(scenario())
+
+
 def test_mention_can_finish_without_speaking(tmp_path):
     async def scenario():
         bot, store, clock, transport, agent = build(

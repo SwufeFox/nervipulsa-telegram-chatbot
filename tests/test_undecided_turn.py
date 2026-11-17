@@ -181,8 +181,71 @@ def test_state_only_turn_is_recorded_as_noted(tmp_path):
             results = await bot.autonomous_step(force=True)
 
             assert results and results[0].outcome == "noted", results
-            assert len(seen) == 1
+            assert len(seen) == 2
             assert transport.sends == []
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_private_intent_receipt_can_lead_to_a_public_clarification(tmp_path):
+    def responder(request):
+        payload = json.loads(request.messages[-1]["content"])["payload"]
+        if payload.get("private_actions_recorded"):
+            assert payload["open_intents"][0]["anchor_message_id"] == 741
+            return ModelResponse(tool_calls=[ToolCall(
+                id="clarify", name="send_message", arguments={"text": "Which scheduler are you using?"},
+            )])
+        return ModelResponse(tool_calls=[ToolCall(
+            id="intent", name="set_intent",
+            arguments={"anchor_message_id": 741, "goal": "Ask which scheduler is used before answering"},
+        )])
+
+    async def scenario():
+        bot, store, clock, transport, seen = build(tmp_path, responder)
+        await bot.start()
+        try:
+            await bot.step([msg(741, "@alma_bot which timezone does cron use?")])
+            clock.advance(5)
+            results = await bot.autonomous_step(force=True)
+            assert results[0].outcome == "speak"
+            assert [item["text"] for item in transport.sends] == ["Which scheduler are you using?"]
+            assert len(seen) == 2
+            assert len(store.open_intents(fixtures.TEST_CHAT, fixtures.TOPIC_A)) == 1
+        finally:
+            await bot.stop()
+            store.close()
+
+    run(scenario())
+
+
+def test_text_after_private_intent_gets_its_own_bounded_tool_reminder(tmp_path):
+    def responder(request):
+        payload = json.loads(request.messages[-1]["content"])["payload"]
+        if payload.get("private_actions_recorded"):
+            return ModelResponse(content="Which scheduler are you using?")
+        if payload.get("kind") == "decision_required":
+            return ModelResponse(tool_calls=[ToolCall(
+                id="public-question", name="send_message",
+                arguments={"text": "Which scheduler are you using?"},
+            )])
+        return ModelResponse(tool_calls=[ToolCall(
+            id="private-intent", name="set_intent",
+            arguments={"anchor_message_id": 751, "goal": "Wait for the scheduler type"},
+        )])
+
+    async def scenario():
+        bot, store, clock, transport, seen = build(tmp_path, responder)
+        await bot.start()
+        try:
+            await bot.step([msg(751, "@alma_bot which timezone does cron use?")])
+            clock.advance(5)
+            results = await bot.autonomous_step(force=True)
+            assert results[0].outcome == "speak"
+            assert len(seen) == 3
+            assert [item["text"] for item in transport.sends] == ["Which scheduler are you using?"]
         finally:
             await bot.stop()
             store.close()

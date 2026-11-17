@@ -281,7 +281,10 @@ def test_only_one_open_episode_per_scope_survives_null_topic(tmp_path):
 def test_a_delivered_message_closes_the_goal_and_the_episode(tmp_path):
     def answer(index, payload):
         if index == 1:
-            return call("set_intent", goal="回他一句", anchor_message_id=501)
+            return ModelResponse(tool_calls=[
+                *call("set_intent", goal="回他一句", anchor_message_id=501).tool_calls,
+                *call("finish_silently").tool_calls,
+            ])
         if index == 2:
             return call("send_message", text="回了", resolves_intent=True, anchor_message_id=501)
         return call("finish_silently")

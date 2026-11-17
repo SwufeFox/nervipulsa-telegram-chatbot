@@ -216,7 +216,7 @@ class AutonomousLoop:
         self._wake.set()
 
     def _batches(self, now: float) -> list[tuple[int, int | None]]:
-        """Scopes whose window is ready: idle long enough, or open too long."""
+        """Scopes ready by a full batch, idle window, or maximum age."""
         ready: list[tuple[int, int | None]] = []
         for key, opened in list(self._batch_started.items()):
             rows = self.store.pending_observations(
@@ -231,7 +231,8 @@ class AutonomousLoop:
             last_at = self._last_activity.get(key, opened)
             idle = now - last_at
             age = now - opened
-            if idle >= self.idle_seconds or age >= self.max_batch_seconds:
+            full = len(rows) >= self.max_batch_observations
+            if full or idle >= self.idle_seconds or age >= self.max_batch_seconds:
                 ready.append(key)
         return ready
 
@@ -510,11 +511,11 @@ class AutonomousLoop:
                     or handler.outcome or handler.intents_set
                     or handler.intents_resolved or handler.memory_changes)
 
-    def _decision_reminder(self, payload: dict[str, Any], result: Any) -> dict[str, Any]:
-        """One explicit second chance to decide, carrying what went wrong.
+    def _decision_reminder(self, payload: dict[str, Any], result: Any, *,
+                           private_actions: bool = False) -> dict[str, Any]:
+        """One bounded chance to finish after prose or private bookkeeping.
 
-        Bounded to a single retry: a model that keeps answering in prose is
-        misbehaving, and retrying forever would spend the budget on it.
+        Private notes remain valid; this never supplies a public reply itself.
         """
         produced = (getattr(result, "text", None) or "").strip()
         reminder = dict(payload)
@@ -522,13 +523,25 @@ class AutonomousLoop:
         reminder["note"] = (
             "Your previous response"
             + (f" ({len(produced)} characters of text)" if produced else "")
-            + " did not choose an action, wait, note or explicit finish. "
-            "Ordinary text is never delivered; reading context alone is not a decision.\n"
+            + " has not produced a send, wait or explicit finish. "
+            "Ordinary text is never delivered, including a question written after a private action.\n"
             "Choose now: send_message to speak, finish_silently to end, wait_for_event / "
             "wait_until to reconsider later, remember / update_state to record something, "
             "or resolve_intent / forget_memory to close what no longer applies."
         )
         reminder["observations"] = payload.get("observations", [])
+        if private_actions:
+            reminder["private_actions_recorded"] = True
+            reminder["note"] = (
+                "Your private state or intent changes were recorded; their receipts are in the tool history. "
+                "They did not send a message or ask anyone a question. These are the SAME observations "
+                "in the SAME workflow, not new input. Finish your participation decision now: if you "
+                "took up a question and need information not yet requested, ask it with send_message. "
+                "Ordinary assistant text is still private; only send_message can deliver a question. "
+                "If material was already offered, you can wait; if nothing needs saying, use "
+                "finish_silently. A private note is valid and never obliges you to speak. "
+                "This completion opportunity will not repeat just for more private bookkeeping."
+            )
         return reminder
 
     def _memory_followup(self, payload: dict[str, Any], receipts: Sequence[dict[str, Any]],
@@ -698,12 +711,11 @@ class AutonomousLoop:
             status = getattr(result, "status", "error")
             seen_receipts = 0
             reminded = False
+            private_completed = False
             for round_index in range(MAX_MEMORY_READ_ROUNDS):
                 if status not in {"ok", "committed", "succeeded"}:
                     break
-                decided = bool(handler.actions or handler.waits or handler.outcome or handler.states
-                               or handler.intents_set or handler.intents_resolved)
-                if decided:
+                if handler.actions or handler.waits or handler.outcome:
                     break
                 receipts = handler.memory_results[seen_receipts:]
                 if receipts:
@@ -712,7 +724,18 @@ class AutonomousLoop:
                         observation_payload, receipts, observations,
                         final=round_index == MAX_MEMORY_READ_ROUNDS - 1,
                     )
-                elif self._undecided(handler) and not reminded:
+                elif not private_completed and (handler.states or handler.intents_set
+                                                 or handler.intents_resolved):
+                    current_payload = self._render(
+                        observations, chat_id, topic_id, episode_id=episode_id,
+                        continuation=continuation, matched_waits=matched_waits,
+                    )
+                    followup = self._decision_reminder(
+                        current_payload, result, private_actions=True,
+                    )
+                    private_completed = True
+                elif not reminded and (self._undecided(handler)
+                                       or bool((getattr(result, "text", None) or "").strip())):
                     followup = self._decision_reminder(observation_payload, result)
                     reminded = True
                 else:

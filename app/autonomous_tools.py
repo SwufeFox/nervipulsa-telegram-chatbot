@@ -290,8 +290,14 @@ class _SendMessage(_BaseTool):
                     ),
                 },
                 **_selector_properties(),
-                "memory_id": _memory_id_property(),
-                "memory_revision": {"type": "integer", "minimum": 1},
+                "memory_id": {
+                    **_memory_id_property(),
+                    "description": "Required with memory_revision when the text relies on a recalled memory, including a brief answer about someone's preference. Keep the ID in tool arguments, not the public text.",
+                },
+                "memory_revision": {
+                    "type": "integer", "minimum": 1,
+                    "description": "The current revision of memory_id from the provided memory or recall receipt; include both fields for memory-based replies.",
+                },
                 "resolves_intent": {
                     "type": "boolean",
                     "description": (
@@ -527,6 +533,11 @@ class _SetIntent(_BaseTool):
     Identify the source message with `anchor_message_id`, or name an existing
     commitment with `intent_id` to replace that exact goal. One is required;
     never rely on an implicit current goal.
+
+    This is private bookkeeping: it does not ask anyone a question or send a
+    message. If you take up a question but need missing information, ask for it
+    with send_message before waiting. No question is needed when the person
+    has already offered to supply the material or asked you not to reply yet.
     """
 
     name = "set_intent"

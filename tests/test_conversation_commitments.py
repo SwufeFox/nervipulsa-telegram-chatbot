@@ -294,9 +294,12 @@ def test_unknown_delivery_keeps_commitment_and_explains_its_source(tmp_path):
     def answer(payload):
         text = payload["observations"][-1]["payload"].get("text")
         if text == "Wait for Alice's result":
-            return response(("set_intent", {
-                "goal": "Tell Alice the result", "anchor_message_id": 401,
-            }))
+            return response(
+                ("set_intent", {
+                    "goal": "Tell Alice the result", "anchor_message_id": 401,
+                }),
+                ("finish_silently", {}),
+            )
         if text == "Result is ready":
             return response(
                 ("send_message", {"text": "Here is Alice's result.", "anchor_message_id": 401,

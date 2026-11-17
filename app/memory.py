@@ -135,7 +135,10 @@ def build_memory_context(
             references.append(reference)
         text = payload.get("text") or payload.get("reply_text")
         if isinstance(text, str) and text.strip() and len(texts) < 3:
-            texts.append(text[:256])
+            if len(text) > MAX_RECALL_QUERY_CHARS:
+                head = MAX_RECALL_QUERY_CHARS // 2
+                text = text[:head] + " " + text[-(MAX_RECALL_QUERY_CHARS - head - 1):]
+            texts.append(text)
 
     for reference in references[:MAX_MEMORY_PEOPLE]:
         add(store.recall_memories(

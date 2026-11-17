@@ -48,6 +48,10 @@ There is no keyword social rule and no participation score. Parsed messages from
 
 Sender filters only control whether a durable wait is satisfied; they do not prevent otherwise model-eligible observations from waking the model or reduce model calls.
 
+A full observation batch is eligible for dispatch immediately. Partial batches
+wait for their idle window or maximum age; retry deadlines, model budgets,
+per-topic ordering, and concurrency limits still apply.
+
 A chat/topic can keep several commitments open together. Each records its source
 message and sender; starting Bob's request does not replace Alice's unfinished
 request. The model selects a commitment with `anchor_message_id` or `intent_id`
@@ -57,6 +61,10 @@ commitment after confirmed delivery. Failed or unknown delivery leaves it open.
 Linked timers survive unrelated chat until due, cancelled, or expired. Legacy
 goals with no recorded source remain available by ID. In the console, `intents`
 shows open commitments, their sources, and linked waits for the watched scope.
+An intent is private bookkeeping. If the bot takes up a question but needs
+information, it must ask through `send_message` before waiting; saving a goal
+does not contact the person. It can wait quietly for material already offered.
+
 
 Meaningful shared episodes, explicit personal preferences, and the bot's own
 conversation interests can persist independently of commitments. Memories are
@@ -76,6 +84,10 @@ unless a terminal send, wait, or finish already occurred. Original observations
 are consumed once. Read-only exhaustion is audited as `undecided`, not silence.
 Retrieval matches literal words and CJK bigrams; it has no embeddings or semantic
 recall guarantee, and selection never decides whether the bot should speak.
+For a long observation, the bounded literal query retains both its beginning
+and end, so a question before a log or a correction after it can select memory.
+This does not provide semantic recall or preserve every detail in the middle.
+
 
 `wait_for_event` and `wait_until` may carry a `memory_id`, independently of an
 intent. Memory-linked timers survive unrelated conversation and restart so an
@@ -102,6 +114,13 @@ bounded. See [the integration contract](docs/INTEGRATION_CONTRACT.md) and
 Ordinary assistant text is never delivered — only `send_message` posts. A turn
 that calls no tool has not decided anything: it is asked once more, explicitly,
 and only then recorded as `undecided` rather than being counted as silence.
+State and intent writes are private. When no send, wait, or explicit finish
+has occurred, the model gets one bounded completion opportunity to decide
+whether to communicate or stay quiet. The same observations are not new input,
+and an exclusively private final decision can still end as `noted`.
+If that completion returns ordinary text instead of a tool decision, the
+existing one-time text-protocol reminder remains available. Both paths share
+the workflow's bounded continuation budget; prose is never posted automatically.
 
 It has no shell, no Python, no network access, and no way to read files. Its
 application tools can send, wait, manage commitments, and inspect scoped stored

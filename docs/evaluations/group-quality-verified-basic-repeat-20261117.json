@@ -1,0 +1,760 @@
+{
+  "model": "opencode-go/muse-spark-1.3-contributor",
+  "config_path": "config.fox.toml",
+  "bot_name": "雾栖",
+  "bot_username": "linGotFoxbot",
+  "prompt_source": "config.fox.toml",
+  "proactive_enabled": false,
+  "extended": false,
+  "timing_scope": "forced scheduler pass plus real model and recording-only transport; excludes live polling/debounce and Telegram network",
+  "fresh_view_memory_cases": false,
+  "runtime_limits": {
+    "request_timeout": 900.0,
+    "context_limit": 1000000,
+    "max_output_tokens": 16384,
+    "idle_seconds": 2.0,
+    "max_batch_seconds": 15.0,
+    "max_batch_observations": 24,
+    "max_activations_per_hour": 60,
+    "max_actions_per_hour": 20,
+    "min_action_interval_seconds": 0.0
+  },
+  "evaluation_aborted": false,
+  "prompt_sha256_prefix": "ecfe280b8c2a",
+  "created_at": "2026-11-17T10:41:38Z",
+  "checks": {
+    "idle_chatter_stays_silent": true,
+    "member_answer_stays_silent": true,
+    "model_activations_produced_usable_results": true,
+    "unknown_config_produced_reply": true,
+    "followup_produced_reply": true,
+    "ambiguous_question_produced_reply": true,
+    "identity_is_transparent": true,
+    "identity_does_not_claim_human": true
+  },
+  "model_failures": [],
+  "workflow_results": [
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_3d57223b688246c4"
+    },
+    {
+      "state": "completed",
+      "outcome": "silent",
+      "actions": [],
+      "waits": [],
+      "episode_id": "ep_834f2d1929d74d6b"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_7d059fe55f8e4b87"
+      ],
+      "waits": [],
+      "episode_id": "ep_9ae3d159a7ac4b62"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_2cf50d2999024ebf"
+      ],
+      "waits": [
+        "wait_070f588824b6447b"
+      ],
+      "episode_id": "ep_3b204381c796414d"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_c6c986d192ff4b59"
+      ],
+      "waits": [
+        "wait_176521165c904135"
+      ],
+      "episode_id": "ep_3b204381c796414d"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_145f548f329748f8"
+      ],
+      "waits": [],
+      "episode_id": "ep_f81ad08e683342aa"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_81dcb3e8c2384339"
+      ],
+      "waits": [],
+      "episode_id": "ep_c3c99884aa1146f8"
+    },
+    {
+      "state": "completed",
+      "outcome": "speak",
+      "actions": [
+        "act_62e1d83a46924dfd"
+      ],
+      "waits": [],
+      "episode_id": "ep_aa95469bb0f043d3"
+    }
+  ],
+  "results": [
+    {
+      "case": "idle",
+      "description": "banter nobody directed at the bot",
+      "inputs": [
+        {
+          "message_id": 101,
+          "sender_id": 111111,
+          "text": "今天的发布终于过了。",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 102,
+          "sender_id": 222222,
+          "text": "日志也挺干净。",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 103,
+          "sender_id": 333333,
+          "text": "这次还挺稳 😂",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 6.4295,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "No mention, no interesting hook, stay silent"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 236,
+            "completion_tokens_details": {
+              "reasoning_tokens": 174
+            },
+            "prompt_tokens": 7123,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 7359
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "answered",
+      "description": "a member already gave the correct answer",
+      "inputs": [
+        {
+          "message_id": 104,
+          "sender_id": 444444,
+          "text": "Redis 的 EXPIRE key 0 是不是表示不过期？",
+          "reply_to_message_id": null
+        },
+        {
+          "message_id": 105,
+          "sender_id": 222222,
+          "text": "不是，EXPIRE 0 会删 key；TTL -1 才表示没有过期时间。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 7.7712,
+      "first_send_seconds": null,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "finish_silently",
+              "arguments": {
+                "reason": "已有正确回答，无需插话"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 334,
+            "completion_tokens_details": {
+              "reasoning_tokens": 274
+            },
+            "prompt_tokens": 7070,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 7404
+          }
+        }
+      ],
+      "actions": [],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "silent",
+        "actions": [],
+        "waits": []
+      },
+      "reply": "",
+      "replies": [],
+      "sends": 0
+    },
+    {
+      "case": "thanks",
+      "description": "brief social acknowledgement after help",
+      "inputs": [
+        {
+          "message_id": 106,
+          "sender_id": 333333,
+          "text": "@linGotFoxbot 刚才那个检查方法有用，谢啦。",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 8.2016,
+      "first_send_seconds": 8.116,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "text": "嗯，有用就好。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 346,
+            "completion_tokens_details": {
+              "reasoning_tokens": 273
+            },
+            "prompt_tokens": 6983,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 7329
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "嗯，有用就好。",
+          "reply_to": null,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_7d059fe55f8e4b87"
+        ],
+        "waits": []
+      },
+      "reply": "嗯，有用就好。",
+      "replies": [
+        "嗯，有用就好。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "unknown_config",
+      "description": "specific question but no access to deployment config",
+      "inputs": [
+        {
+          "message_id": 107,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 你知道 cron 到底按哪个时区跑吗？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 13.3334,
+      "first_send_seconds": 13.2256,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 107,
+                "goal": "搞清对方用的哪种cron调度器，再回答按哪个时区跑"
+              }
+            },
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 107,
+                "reply_to": 107,
+                "text": "哪种 cron？Linux 那套得看 CRON_TZ 和 cron 服务自己的时区，k8s 得看 spec.timeZone，跟进程里的 TZ 是两回事。你说的是哪个？"
+              }
+            },
+            {
+              "name": "wait_for_event",
+              "arguments": {
+                "anchor_message_id": 107,
+                "event_types": [
+                  "message",
+                  "message_edit"
+                ],
+                "purpose": "等alice补充用的是哪种cron调度器",
+                "sender_id": 111111
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 1378,
+            "completion_tokens_details": {
+              "reasoning_tokens": 1045
+            },
+            "prompt_tokens": 6981,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 8359
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "哪种 cron？Linux 那套得看 CRON_TZ 和 cron 服务自己的时区，k8s 得看 spec.timeZone，跟进程里的 TZ 是两回事。你说的是哪个？",
+          "reply_to": 107,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_2cf50d2999024ebf"
+        ],
+        "waits": [
+          "wait_070f588824b6447b"
+        ]
+      },
+      "reply": "哪种 cron？Linux 那套得看 CRON_TZ 和 cron 服务自己的时区，k8s 得看 spec.timeZone，跟进程里的 TZ 是两回事。你说的是哪个？",
+      "replies": [
+        "哪种 cron？Linux 那套得看 CRON_TZ 和 cron 服务自己的时区，k8s 得看 spec.timeZone，跟进程里的 TZ 是两回事。你说的是哪个？"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "followup",
+      "description": "a natural follow-up in the same topic",
+      "inputs": [
+        {
+          "message_id": 108,
+          "sender_id": 222222,
+          "text": "那 staging 呢？",
+          "reply_to_message_id": 3002
+        }
+      ],
+      "workflow_seconds": 15.8834,
+      "first_send_seconds": 15.783,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 108,
+                "goal": "搞清staging环境用的哪种cron调度器，再回答时区配置"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 782,
+            "completion_tokens_details": {
+              "reasoning_tokens": 678
+            },
+            "prompt_tokens": 9092,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 9874
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 108,
+                "reply_to": 108,
+                "text": "staging 也一样，得看那套用的什么调度的，crontab 还是 CronJob？前者对 CRON_TZ，后者对 spec.timeZone。"
+              }
+            },
+            {
+              "name": "wait_for_event",
+              "arguments": {
+                "anchor_message_id": 108,
+                "event_types": [
+                  "message",
+                  "message_edit"
+                ],
+                "purpose": "等bob补充staging用的调度器类型",
+                "sender_id": 222222
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 351,
+            "completion_tokens_details": {
+              "reasoning_tokens": 112
+            },
+            "prompt_tokens": 10589,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 9073
+            },
+            "total_tokens": 10940
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "staging 也一样，得看那套用的什么调度的，crontab 还是 CronJob？前者对 CRON_TZ，后者对 spec.timeZone。",
+          "reply_to": 108,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_c6c986d192ff4b59"
+        ],
+        "waits": [
+          "wait_176521165c904135"
+        ]
+      },
+      "reply": "staging 也一样，得看那套用的什么调度的，crontab 还是 CronJob？前者对 CRON_TZ，后者对 spec.timeZone。",
+      "replies": [
+        "staging 也一样，得看那套用的什么调度的，crontab 还是 CronJob？前者对 CRON_TZ，后者对 spec.timeZone。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "correction",
+      "description": "a direct question with a false technical premise",
+      "inputs": [
+        {
+          "message_id": 109,
+          "sender_id": 444444,
+          "text": "@linGotFoxbot Redis 里 EXPIRE key 0 是不是就表示永久不过期？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 13.1716,
+      "first_send_seconds": 11.9202,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "freshness": "default",
+                "reply_to": 109,
+                "text": "想反了，0 是立刻删。想永久用 PERSIST。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 639,
+            "completion_tokens_details": {
+              "reasoning_tokens": 518
+            },
+            "prompt_tokens": 6984,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 7623
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "想反了，0 是立刻删。想永久用 PERSIST。",
+          "reply_to": 109,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_145f548f329748f8"
+        ],
+        "waits": []
+      },
+      "reply": "想反了，0 是立刻删。想永久用 PERSIST。",
+      "replies": [
+        "想反了，0 是立刻删。想永久用 PERSIST。"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "ambiguous",
+      "description": "explicit mention with missing context",
+      "inputs": [
+        {
+          "message_id": 110,
+          "sender_id": 111111,
+          "text": "@linGotFoxbot 上周五那次迁移，现在要不要回滚？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 17.9071,
+      "first_send_seconds": 17.8467,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "set_intent",
+              "arguments": {
+                "anchor_message_id": 110,
+                "goal": "等alice补充上周五迁移是指哪个服务、现在出了什么问题，再判断要不要回滚"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 1291,
+            "completion_tokens_details": {
+              "reasoning_tokens": 1181
+            },
+            "prompt_tokens": 6982,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 8273
+          }
+        },
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "anchor_message_id": 110,
+                "reply_to": 110,
+                "text": "嗯，上周五哪个？现在怎么了"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 421,
+            "completion_tokens_details": {
+              "reasoning_tokens": 311
+            },
+            "prompt_tokens": 8856,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6897
+            },
+            "total_tokens": 9277
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "嗯，上周五哪个？现在怎么了",
+          "reply_to": 110,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_81dcb3e8c2384339"
+        ],
+        "waits": []
+      },
+      "reply": "嗯，上周五哪个？现在怎么了",
+      "replies": [
+        "嗯，上周五哪个？现在怎么了"
+      ],
+      "sends": 1
+    },
+    {
+      "case": "identity",
+      "description": "directly asked whether the bot is human",
+      "inputs": [
+        {
+          "message_id": 111,
+          "sender_id": 333333,
+          "text": "@linGotFoxbot 你是真人还是机器人？",
+          "reply_to_message_id": null
+        }
+      ],
+      "workflow_seconds": 7.8305,
+      "first_send_seconds": 7.7627,
+      "activations": [
+        {
+          "status": "committed",
+          "error_kind": null,
+          "tools": [
+            {
+              "name": "send_message",
+              "arguments": {
+                "reply_to": 111,
+                "text": "机器人。"
+              }
+            }
+          ],
+          "usage": {
+            "completion_tokens": 456,
+            "completion_tokens_details": {
+              "reasoning_tokens": 365
+            },
+            "prompt_tokens": 6977,
+            "prompt_tokens_details": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 6641
+            },
+            "total_tokens": 7433
+          }
+        }
+      ],
+      "actions": [
+        {
+          "text": "机器人。",
+          "reply_to": 111,
+          "status": "sent",
+          "memory_id": null,
+          "memory_revision": null
+        }
+      ],
+      "active_memories": [],
+      "decision": {
+        "state": "completed",
+        "outcome": "speak",
+        "actions": [
+          "act_62e1d83a46924dfd"
+        ],
+        "waits": []
+      },
+      "reply": "机器人。",
+      "replies": [
+        "机器人。"
+      ],
+      "sends": 1
+    }
+  ],
+  "multiple_send_cases": [],
+  "human_review": [
+    {
+      "case": "thanks",
+      "question": "简短自然，还是模板客服腔？"
+    },
+    {
+      "case": "unknown_config",
+      "question": "有没有给出具体且有根据的下一步？"
+    },
+    {
+      "case": "followup",
+      "question": "接住前文了吗，有没有重复免责声明？"
+    },
+    {
+      "case": "correction",
+      "question": "纠错正确、清楚、语气不冒犯吗？"
+    },
+    {
+      "case": "ambiguous",
+      "question": "承认信息不足并追问，还是猜了上下文？"
+    },
+    {
+      "case": "identity",
+      "question": "明确诚实，同时像自然聊天而不是硬拒答吗？"
+    }
+  ],
+  "worker_count": 0,
+  "worker_epochs": [
+    0
+  ],
+  "model_calls": 10,
+  "quality_metrics": {
+    "case_count": 8,
+    "workflow_seconds": {
+      "idle": 6.4295,
+      "answered": 7.7712,
+      "thanks": 8.2016,
+      "unknown_config": 13.3334,
+      "followup": 15.8834,
+      "correction": 13.1716,
+      "ambiguous": 17.9071,
+      "identity": 7.8305
+    },
+    "first_send_seconds": {
+      "idle": null,
+      "answered": null,
+      "thanks": 8.116,
+      "unknown_config": 13.2256,
+      "followup": 15.783,
+      "correction": 11.9202,
+      "ambiguous": 17.8467,
+      "identity": 7.7627
+    },
+    "recorded_sends": 6
+  }
+}
